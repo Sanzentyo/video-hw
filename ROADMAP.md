@@ -50,6 +50,20 @@
 - backend ごとの encode examples が実装される
 - sample 動画ベース tests が実装される
 
+### 進捗（2026-02-18, rebuild-scaffold）
+
+- [x] `backend-contract` / `bitstream-core` / `vt-backend` / `nvidia-backend` / `examples/smoke` の workspace 構成を実装
+- [x] `bitstream-core` に増分 Annex-B parser（chunk -> AU）を移植
+- [x] VT adapter で `push_bitstream_chunk` / `flush` の stateful decode を実装
+- [x] VT adapter の packer（AVCC/HVCC）を adapter 層に保持
+- [x] NVIDIA adapter の packer（Annex-B）を adapter 層に保持
+- [x] scaffold で E2E tests（H264/HEVC, chunk=4096/1MB, decoded=303）を追加・通過
+- [x] scaffold で encode E2E（VT synthetic encode）を追加・通過
+- [ ] NVIDIA SDK bridge（`push_access_unit` 実接続）は未実装（次ステップ）
+
+注記: 受け入れ条件のうち「sample 動画ベース tests」「AU境界の共通化」「packer差分のadapter閉じ込み」は scaffold 側で達成済み。
+NVIDIA 実デコード/実エンコードは SDK 接続が残タスク。
+
 ## 参照
 
 - `STATUS.md`

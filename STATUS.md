@@ -35,6 +35,18 @@
 3. NVIDIA backend adapter の追加
 4. backend 差し替え contract test と CI 分離整備
 
+## 7. scaffold 実装状況（2026-02-18 追記）
+
+- `rebuild-scaffold` は `video-hw` の責務分離に沿って実装済み
+	- `backend-contract`: 共通 trait/type
+	- `bitstream-core`: 増分 Annex-B parser + parameter set cache
+	- `vt-backend`: standalone VT adapter（root crate 依存なし）
+	- `nvidia-backend`: SDK bridge 前段（packer + contract adapter 枠）
+- scaffold の E2E tests
+	- H264/HEVC decode（chunk=4096/1MB）で `decoded_frames=303`
+	- VT encode（synthetic）で packet 出力を確認
+- `cargo test --workspace`（rebuild-scaffold）: pass
+
 ## 6. 参照
 
 - `README.md`

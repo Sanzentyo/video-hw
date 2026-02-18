@@ -1,8 +1,8 @@
-use backend_contract::{Frame, VideoEncoder};
+use backend_contract::{Codec, Frame, VideoEncoder};
 use vt_backend::VtEncoderAdapter;
 
 fn main() {
-    let mut encoder = VtEncoderAdapter::new();
+    let mut encoder = VtEncoderAdapter::with_config(Codec::H264, 30, false);
     let frame = Frame {
         width: 1,
         height: 1,

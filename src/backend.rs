@@ -578,7 +578,10 @@ pub fn load_and_prepare_annexb(path: &Path, codec: Codec) -> Result<BitstreamPre
 }
 
 pub fn default_decode_input(codec: Codec) -> PathBuf {
-    PathBuf::from(format!("../sample-videos/sample-10s.{}", codec.file_extension()))
+    PathBuf::from(format!(
+        "../sample-videos/sample-10s.{}",
+        codec.file_extension()
+    ))
 }
 
 pub fn default_encode_output(codec: Codec) -> PathBuf {

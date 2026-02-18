@@ -13,6 +13,21 @@ pub struct Frame {
 }
 
 #[derive(Debug, Clone)]
+pub struct DecoderConfig {
+    pub codec: Codec,
+    pub fps: i32,
+    pub require_hardware: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodeSummary {
+    pub decoded_frames: usize,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub pixel_format: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EncodedPacket {
     pub codec: Codec,
     pub data: Vec<u8>,
@@ -46,7 +61,7 @@ pub enum BackendError {
     Backend(String),
 }
 
-pub trait VideoDecoder: Send {
+pub trait VideoDecoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_bitstream_chunk(
@@ -56,9 +71,11 @@ pub trait VideoDecoder: Send {
     ) -> Result<Vec<Frame>, BackendError>;
 
     fn flush(&mut self) -> Result<Vec<Frame>, BackendError>;
+
+    fn decode_summary(&self) -> DecodeSummary;
 }
 
-pub trait VideoEncoder: Send {
+pub trait VideoEncoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError>;
