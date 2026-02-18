@@ -1,25 +1,33 @@
 # video-hw
 
-`video-hw` は、複数のハードウェア backend（現状: VideoToolbox / NVIDIA）を同一契約で扱う Rust workspace です。
+`video-hw` は、複数のハードウェア backend（現状: VideoToolbox / NVIDIA）を同一 API で扱う単一 crate です。
 
-## Workspace 構成
+## 主要構成
 
 ```text
-crates/
-  backend-contract/   # 共通 trait / type / error
-  bitstream-core/     # Annex-B 増分パースと AU 組み立て
-  vt-backend/         # VideoToolbox 実装
-  nvidia-backend/     # NVIDIA 実装（SDK bridge は今後接続）
-root `src/` provides the unified facade API; backends remain in `crates/` as optional features.
+src/
+  lib.rs              # 公開API + backend切替
+  contract.rs         # 共通 trait / type / error
+  bitstream.rs        # Annex-B 増分パースと AU 組み立て
+  vt_backend.rs       # VideoToolbox 実装（macOS + feature）
+  nvidia_backend.rs   # NVIDIA 実装（feature、SDK bridge未接続）
+examples/
+  decode_annexb.rs
+  encode_synthetic.rs
+tests/
+  e2e_video_hw.rs
 ```
 
-## 統一 API（video-hw crate）
+## feature / platform 切替
 
-`video-hw` crate から `BackendKind` を選んで `Decoder` / `Encoder` を生成すると、同じ呼び出しコードで backend を差し替えられます。
+- デフォルト: `backend-vt`（macOS 前提）
+- NVIDIA を有効化: `--features backend-nvidia`
+- 実行時は `BackendKind` で backend を選択
+
+## 統一 API
 
 ```rust
-use backend_contract::{Codec, DecoderConfig};
-use video_hw::{BackendKind, Decoder};
+use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
 
 let mut decoder = Decoder::new(
     BackendKind::VideoToolbox,
@@ -37,16 +45,26 @@ let summary = decoder.decode_summary();
 
 ```bash
 cargo fmt --all
-cargo check --workspace
-cargo test --workspace -- --nocapture
+cargo check
+cargo test -- --nocapture
 
-# facade crate の example 実行例
-cargo run --example decode_vt
-cargo run --example encode_vt
+# examples
+cargo run --example decode_annexb -- --codec h264 --chunk-bytes 4096
+cargo run --example encode_synthetic -- --codec h264 --output ./encoded-output.h264
 ```
+
+## ドキュメント配置
+
+- ドキュメントは `docs/` 配下に整理済み
+- インデックス: `docs/README.md`
+
+## クリーンアップ状況
+
+- 旧 workspace の重複実装（`crates/`）は root 実装での動作確認後に削除済み
+- 旧バックアップ（`legacy-root-backup/`）は機能カバレッジ確認後に削除済み
 
 ## 現在の実装状況
 
-- `vt-backend`: decode/encode の実装あり（E2E テストあり）
-- `nvidia-backend`: contract と packer 接続済み（SDK 連携部分は未実装）
-- `bitstream-core`: chunk 増分処理と parameter set 抽出の unit test あり
+- VideoToolbox: decode/encode 実装あり（E2E テストあり）
+- NVIDIA: contract と packer 接続済み（SDK 連携部分は未実装）
+- bitstream: chunk 増分処理と parameter set 抽出の unit test あり

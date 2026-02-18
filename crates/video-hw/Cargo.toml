@@ -1,0 +1,10 @@
+[package]
+name = "video-hw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+backend-contract = { path = "../backend-contract" }
+vt-backend = { path = "../vt-backend" }
+nvidia-backend = { path = "../nvidia-backend" }

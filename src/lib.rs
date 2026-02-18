@@ -1,87 +1,20 @@
-use backend_contract::{Codec, DecoderConfig, EncodedPacket, Frame, VideoDecoder, VideoEncoder};
+mod bitstream;
+mod contract;
+#[cfg(feature = "backend-nvidia")]
+mod nvidia_backend;
 
-pub use backend_contract::{BackendError, CapabilityReport, DecodeSummary};
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+mod vt_backend;
+
+pub use contract::{
+    BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
+    VideoDecoder, VideoEncoder,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     VideoToolbox,
     Nvidia,
-}
-
-impl Default for BackendKind {
-    fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            BackendKind::VideoToolbox
-        }
-        #[cfg(all(not(target_os = "macos"), target_os = "linux"))]
-        {
-            BackendKind::Nvidia
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            BackendKind::VideoToolbox
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod vt_backend;
-mod nvidia_backend;
-
-struct UnsupportedDecoder(&'static str);
-struct UnsupportedEncoder(&'static str);
-
-impl UnsupportedDecoder {
-    fn new(msg: &'static str) -> Self {
-        Self(msg)
-    }
-}
-impl UnsupportedEncoder {
-    fn new(msg: &'static str) -> Self {
-        Self(msg)
-    }
-}
-
-impl VideoDecoder for UnsupportedDecoder {
-    fn query_capability(&self, _codec: Codec) -> Result<CapabilityReport, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
-
-    fn push_bitstream_chunk(
-        &mut self,
-        _chunk: &[u8],
-        _pts_90k: Option<i64>,
-    ) -> Result<Vec<Frame>, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
-
-    fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
-
-    fn decode_summary(&self) -> DecodeSummary {
-        DecodeSummary {
-            decoded_frames: 0,
-            width: None,
-            height: None,
-            pixel_format: None,
-        }
-    }
-}
-
-impl VideoEncoder for UnsupportedEncoder {
-    fn query_capability(&self, _codec: Codec) -> Result<CapabilityReport, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
-
-    fn push_frame(&mut self, _frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
-
-    fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
-        Err(BackendError::UnsupportedConfig(self.0.to_string()))
-    }
 }
 
 pub struct Decoder {
@@ -92,17 +25,30 @@ impl Decoder {
     pub fn new(kind: BackendKind, config: DecoderConfig) -> Self {
         let inner: Box<dyn VideoDecoder> = match kind {
             BackendKind::VideoToolbox => {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", feature = "backend-vt"))]
                 {
                     Box::new(vt_backend::VtDecoderAdapter::new(config))
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
                 {
-                    Box::new(UnsupportedDecoder::new("vt backend not supported on this platform"))
+                    let _ = config;
+                    Box::new(UnsupportedDecoder::new(
+                        "VideoToolbox backend requires macOS + backend-vt feature",
+                    ))
                 }
             }
             BackendKind::Nvidia => {
-                Box::new(nvidia_backend::NvidiaDecoderAdapter::new())
+                #[cfg(feature = "backend-nvidia")]
+                {
+                    Box::new(nvidia_backend::NvidiaDecoderAdapter::new(config.codec))
+                }
+                #[cfg(not(feature = "backend-nvidia"))]
+                {
+                    let _ = config;
+                    Box::new(UnsupportedDecoder::new(
+                        "NVIDIA backend requires backend-nvidia feature",
+                    ))
+                }
             }
         };
         Self { inner }
@@ -137,7 +83,7 @@ impl Encoder {
     pub fn new(kind: BackendKind, codec: Codec, fps: i32, require_hardware: bool) -> Self {
         let inner: Box<dyn VideoEncoder> = match kind {
             BackendKind::VideoToolbox => {
-                #[cfg(target_os = "macos")]
+                #[cfg(all(target_os = "macos", feature = "backend-vt"))]
                 {
                     Box::new(vt_backend::VtEncoderAdapter::with_config(
                         codec,
@@ -145,13 +91,27 @@ impl Encoder {
                         require_hardware,
                     ))
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
                 {
-                    Box::new(UnsupportedEncoder::new("vt backend not supported on this platform"))
+                    let _ = (codec, fps, require_hardware);
+                    Box::new(UnsupportedEncoder::new(
+                        "VideoToolbox backend requires macOS + backend-vt feature",
+                    ))
                 }
             }
             BackendKind::Nvidia => {
-                Box::new(nvidia_backend::NvidiaEncoderAdapter::new())
+                #[cfg(feature = "backend-nvidia")]
+                {
+                    let _ = (codec, fps, require_hardware);
+                    Box::new(nvidia_backend::NvidiaEncoderAdapter::new())
+                }
+                #[cfg(not(feature = "backend-nvidia"))]
+                {
+                    let _ = (codec, fps, require_hardware);
+                    Box::new(UnsupportedEncoder::new(
+                        "NVIDIA backend requires backend-nvidia feature",
+                    ))
+                }
             }
         };
         Self { inner }
@@ -167,5 +127,82 @@ impl Encoder {
 
     pub fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
         self.inner.query_capability(codec)
+    }
+}
+
+struct UnsupportedDecoder {
+    reason: String,
+    summary: DecodeSummary,
+}
+
+impl UnsupportedDecoder {
+    fn new(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+            summary: DecodeSummary {
+                decoded_frames: 0,
+                width: None,
+                height: None,
+                pixel_format: None,
+            },
+        }
+    }
+}
+
+impl VideoDecoder for UnsupportedDecoder {
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        Ok(CapabilityReport {
+            codec,
+            decode_supported: false,
+            encode_supported: false,
+            hardware_acceleration: false,
+        })
+    }
+
+    fn push_bitstream_chunk(
+        &mut self,
+        _chunk: &[u8],
+        _pts_90k: Option<i64>,
+    ) -> Result<Vec<Frame>, BackendError> {
+        Err(BackendError::UnsupportedConfig(self.reason.clone()))
+    }
+
+    fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+        Err(BackendError::UnsupportedConfig(self.reason.clone()))
+    }
+
+    fn decode_summary(&self) -> DecodeSummary {
+        self.summary.clone()
+    }
+}
+
+struct UnsupportedEncoder {
+    reason: String,
+}
+
+impl UnsupportedEncoder {
+    fn new(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+        }
+    }
+}
+
+impl VideoEncoder for UnsupportedEncoder {
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        Ok(CapabilityReport {
+            codec,
+            decode_supported: false,
+            encode_supported: false,
+            hardware_acceleration: false,
+        })
+    }
+
+    fn push_frame(&mut self, _frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
+        Err(BackendError::UnsupportedConfig(self.reason.clone()))
+    }
+
+    fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        Err(BackendError::UnsupportedConfig(self.reason.clone()))
     }
 }
