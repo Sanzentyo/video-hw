@@ -1,0 +1,11 @@
+[package]
+name = "smoke-examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+backend-contract = { path = "../../crates/backend-contract" }
+vt-backend = { path = "../../crates/vt-backend" }
+nvidia-backend = { path = "../../crates/nvidia-backend" }
