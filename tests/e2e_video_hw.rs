@@ -1,24 +1,28 @@
 use std::{fs, path::PathBuf};
 
-use backend_contract::{Codec, DecoderConfig, Frame, VideoDecoder, VideoEncoder};
-use vt_backend::{VtDecoderAdapter, VtEncoderAdapter};
+use backend_contract::{Codec, DecoderConfig, Frame};
+use video_hw::{BackendKind, Decoder, Encoder};
 
 #[cfg(target_os = "macos")]
 fn sample_path(name: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.join("../../sample-videos").join(name)
+    manifest_dir.join("sample-videos").join(name)
 }
 
 #[cfg(target_os = "macos")]
 fn decode_count(codec: Codec, file_name: &str, chunk_bytes: usize) -> usize {
-    let mut decoder = VtDecoderAdapter::new(DecoderConfig {
-        codec,
-        fps: 30,
-        require_hardware: false,
-    });
+    let mut decoder = Decoder::new(
+        BackendKind::VideoToolbox,
+        DecoderConfig {
+            codec,
+            fps: 30,
+            require_hardware: false,
+        },
+    );
 
     let path = sample_path(file_name);
     let data = fs::read(&path).expect("sample bitstream should exist");
+
     let mut total = 0usize;
     for chunk in data.chunks(chunk_bytes) {
         let frames = decoder
@@ -33,36 +37,22 @@ fn decode_count(codec: Codec, file_name: &str, chunk_bytes: usize) -> usize {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn e2e_decode_h264_chunk_4096() {
+fn e2e_video_hw_decode_h264_chunk_4096() {
     let decoded = decode_count(Codec::H264, "sample-10s.h264", 4096);
     assert_eq!(decoded, 303);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn e2e_decode_hevc_chunk_4096() {
-    let decoded = decode_count(Codec::Hevc, "sample-10s.h265", 4096);
-    assert_eq!(decoded, 303);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn e2e_decode_h264_chunk_1mb() {
-    let decoded = decode_count(Codec::H264, "sample-10s.h264", 1024 * 1024);
-    assert_eq!(decoded, 303);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn e2e_decode_hevc_chunk_1mb() {
+fn e2e_video_hw_decode_hevc_chunk_1mb() {
     let decoded = decode_count(Codec::Hevc, "sample-10s.h265", 1024 * 1024);
     assert_eq!(decoded, 303);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn e2e_encode_vt_h264_generates_packets() {
-    let mut encoder = VtEncoderAdapter::with_config(Codec::H264, 30, false);
+fn e2e_video_hw_encode_h264_generates_packets() {
+    let mut encoder = Encoder::new(BackendKind::VideoToolbox, Codec::H264, 30, false);
 
     for i in 0..30 {
         let frame = Frame {

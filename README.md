@@ -1,59 +1,52 @@
-# Rebuild Scaffold Workspace
+# video-hw
 
-このディレクトリは、次フェーズ（移設 + マルチbackend再構成）の開始点として使う Cargo workspace 雛形です。
+`video-hw` は、複数のハードウェア backend（現状: VideoToolbox / NVIDIA）を同一契約で扱う Rust workspace です。
 
-## 目的
-
-- 現在の `video-hw` から責務を段階的に移し替える
-- VT backend と NVIDIA backend を同一契約で扱う
-- 既存の `push_bitstream_chunk` 設計と `AccessUnit` 共通表現を維持する
-
-## ディレクトリ構成
+## Workspace 構成
 
 ```text
-rebuild-scaffold/
-  crates/
-    backend-contract/
-    bitstream-core/
-    vt-backend/
-    nvidia-backend/
-  examples/
-    smoke/
+crates/
+  backend-contract/   # 共通 trait / type / error
+  bitstream-core/     # Annex-B 増分パースと AU 組み立て
+  vt-backend/         # VideoToolbox 実装
+  nvidia-backend/     # NVIDIA 実装（SDK bridge は今後接続）
+root `src/` provides the unified facade API; backends remain in `crates/` as optional features.
 ```
 
-## 移行対応表
+## 統一 API（video-hw crate）
 
-- `src/annexb.rs` -> `crates/bitstream-core`
-- `src/packer.rs` -> `crates/vt-backend` / `crates/nvidia-backend`
-- `src/backend.rs` -> `crates/vt-backend`
-- NVIDIA 実装 -> `crates/nvidia-backend`
-- 共通 trait/error/capability -> `crates/backend-contract`
+`video-hw` crate から `BackendKind` を選んで `Decoder` / `Encoder` を生成すると、同じ呼び出しコードで backend を差し替えられます。
 
-## 実行メモ
+```rust
+use backend_contract::{Codec, DecoderConfig};
+use video_hw::{BackendKind, Decoder};
+
+let mut decoder = Decoder::new(
+    BackendKind::VideoToolbox,
+    DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: false,
+    },
+);
+let _ = decoder.push_bitstream_chunk(&[], None);
+let summary = decoder.decode_summary();
+```
+
+## 検証コマンド
 
 ```bash
+cargo fmt --all
 cargo check --workspace
+cargo test --workspace -- --nocapture
+
+# facade crate の example 実行例
+cargo run --example decode_vt
+cargo run --example encode_vt
 ```
 
-この雛形はまず構造固定のための最小実装です。機能実装は `MIGRATION_AND_REBUILD_GUIDE.md` と `TEST_PLAN_MULTIBACKEND.md` の順で拡張してください。
+## 現在の実装状況
 
-## 実装状況（2026-02-18 更新）
-
-- `backend-contract`
-  - 共通 `Codec` / `Frame` / `EncodedPacket` / `CapabilityReport`
-  - `DecoderConfig` / `DecodeSummary`
-  - `VideoDecoder` / `VideoEncoder` trait
-- `bitstream-core`
-  - 増分 Annex-B パーサ（chunk ごとに全体再パースしない）
-  - AU 組み立て、parameter set cache、flush 対応
-  - chunk 収束と parameter set 抽出の unit test
-- `vt-backend`
-  - standalone な VideoToolbox adapter 実装（root `video-hw` 依存なし）
-  - VT 用 `AvccHvccPacker` を公開
-- `nvidia-backend`
-  - `bitstream-core` 接続済み（SDK bridge は未接続）
-  - NVIDIA 用 `AnnexBPacker` を公開
-- `examples/smoke`
-  - `decode_vt` / `decode_nvidia` / `encode_vt` / `encode_nvidia` の起動入口を維持
-
-現時点で `cargo check --workspace` と `cargo test --workspace` は通過しています。
+- `vt-backend`: decode/encode の実装あり（E2E テストあり）
+- `nvidia-backend`: contract と packer 接続済み（SDK 連携部分は未実装）
+- `bitstream-core`: chunk 増分処理と parameter set 抽出の unit test あり

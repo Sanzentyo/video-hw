@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "anyhow"
-version = "1.0.101"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
-
-[[package]]
 name = "backend-contract"
 version = "0.1.0"
 dependencies = [
@@ -151,14 +145,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
-name = "nvidia-backend"
-version = "0.1.0"
-dependencies = [
- "backend-contract",
- "bitstream-core",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -174,16 +160,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "smoke-examples"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "backend-contract",
- "nvidia-backend",
- "vt-backend",
 ]
 
 [[package]]
@@ -224,6 +200,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "video-hw"
+version = "0.1.0"
+dependencies = [
+ "backend-contract",
+ "bitstream-core",
+ "core-foundation",
+ "core-media",
+ "core-video",
+ "video-toolbox",
+]
+
+[[package]]
 name = "video-toolbox"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,16 +224,4 @@ dependencies = [
  "core-media",
  "core-video",
  "libc",
-]
-
-[[package]]
-name = "vt-backend"
-version = "0.1.0"
-dependencies = [
- "backend-contract",
- "bitstream-core",
- "core-foundation",
- "core-media",
- "core-video",
- "video-toolbox",
 ]

@@ -1,8 +1,8 @@
-use backend_contract::{Codec, Frame, VideoEncoder};
-use vt_backend::VtEncoderAdapter;
+use backend_contract::{Codec, Frame};
+use video_hw::{BackendKind, Encoder};
 
 fn main() {
-    let mut encoder = VtEncoderAdapter::with_config(Codec::H264, 30, false);
+    let mut encoder = Encoder::new(BackendKind::Nvidia, Codec::H264, 30, true);
     let frame = Frame {
         width: 1,
         height: 1,
