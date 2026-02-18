@@ -57,6 +57,8 @@ cargo run --example encode_synthetic -- --codec h264 --output ./encoded-output.h
 
 - ドキュメントは `docs/` 配下に整理済み
 - インデックス: `docs/README.md`
+- ベンチ詳細: `docs/status/BENCHMARK_2026-02-18.md`
+- ffmpeg 比較: `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 
 ## クリーンアップ状況
 
@@ -68,3 +70,4 @@ cargo run --example encode_synthetic -- --codec h264 --output ./encoded-output.h
 - VideoToolbox: decode/encode 実装あり（E2E テストあり）
 - NVIDIA: contract と packer 接続済み（SDK 連携部分は未実装）
 - bitstream: chunk 増分処理と parameter set 抽出の unit test あり
+- benchmark: `decode_bench` で `hw_optional` / `hw_required` の比較計測が可能

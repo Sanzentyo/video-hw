@@ -1,5 +1,7 @@
 # Docs Index
 
+最初に `status/STATUS.md` を確認し、次にベンチ/比較レポートを参照してください。
+
 ## 現行ドキュメント
 
 - `status/STATUS.md`
