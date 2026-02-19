@@ -2,6 +2,8 @@ mod bitstream;
 mod contract;
 #[cfg(feature = "backend-nvidia")]
 mod nv_backend;
+#[cfg(feature = "backend-nvidia")]
+mod nv_meta_decoder;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;

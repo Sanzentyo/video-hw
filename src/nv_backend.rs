@@ -2,11 +2,10 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
-use nvidia_video_codec_sdk::{
-    DecodeCodec, DecodeError, DecodeOptions, Encoder, EncoderInitParams, ErrorKind,
-};
+use nvidia_video_codec_sdk::{DecodeCodec, Encoder, EncoderInitParams, ErrorKind};
 
 use crate::bitstream::{AccessUnit, StatefulBitstreamAssembler};
+use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::{
     BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
     EncodedPacket, Frame, VideoDecoder, VideoEncoder,
@@ -44,6 +43,58 @@ struct StageTiming {
     upload: Duration,
     synth: Duration,
     output_lock: Duration,
+    reap: Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SampleStats {
+    samples: Vec<f64>,
+}
+
+impl SampleStats {
+    fn push_duration_ms(&mut self, value: Duration) {
+        self.samples.push(value.as_secs_f64() * 1_000.0);
+    }
+
+    fn push_value(&mut self, value: f64) {
+        self.samples.push(value);
+    }
+
+    fn mean(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples.iter().sum::<f64>() / self.samples.len() as f64
+    }
+
+    fn percentile(&self, percentile: f64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_by(f64::total_cmp);
+        let n = sorted.len();
+        let rank = ((percentile / 100.0) * n as f64)
+            .ceil()
+            .clamp(1.0, n as f64) as usize;
+        sorted[rank - 1]
+    }
+
+    fn p95(&self) -> f64 {
+        self.percentile(95.0)
+    }
+
+    fn p99(&self) -> f64 {
+        self.percentile(99.0)
+    }
+
+    fn peak(&self) -> f64 {
+        self.samples
+            .iter()
+            .copied()
+            .max_by(f64::total_cmp)
+            .unwrap_or(0.0)
+    }
 }
 
 fn should_report_metrics() -> bool {
@@ -55,7 +106,8 @@ fn should_report_metrics() -> bool {
 pub struct NvDecoderAdapter {
     config: DecoderConfig,
     assembler: StatefulBitstreamAssembler,
-    decoder: Option<nvidia_video_codec_sdk::Decoder>,
+    packer: AnnexBPacker,
+    decoder: Option<NvMetaDecoder>,
     next_pts_90k: i64,
     last_summary: DecodeSummary,
 }
@@ -64,6 +116,7 @@ impl NvDecoderAdapter {
     pub fn new(config: DecoderConfig) -> Self {
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
+            packer: AnnexBPacker::default(),
             config,
             decoder: None,
             next_pts_90k: 0,
@@ -84,12 +137,7 @@ impl NvDecoderAdapter {
         let cuda_ctx = CudaContext::new(0).map_err(|err| {
             BackendError::UnsupportedConfig(format!("failed to initialize CUDA context: {err}"))
         })?;
-        let decoder = nvidia_video_codec_sdk::Decoder::new(
-            cuda_ctx,
-            to_decode_codec(self.config.codec),
-            DecodeOptions::default(),
-        )
-        .map_err(map_decode_error)?;
+        let decoder = NvMetaDecoder::new(cuda_ctx, to_decode_codec(self.config.codec))?;
 
         self.decoder = Some(decoder);
         Ok(())
@@ -105,40 +153,79 @@ impl NvDecoderAdapter {
         }
 
         self.ensure_decoder()?;
-        let mut packer = AnnexBPacker::default();
         let mut frames = Vec::new();
         let mut timing = StageTiming::default();
+        let mut pack_samples = SampleStats::default();
+        let mut sdk_samples = SampleStats::default();
+        let mut map_samples = SampleStats::default();
+        let mut queue_depth_samples = SampleStats::default();
+        let mut jitter_samples = SampleStats::default();
+        let expected_frame_ms = if self.config.fps > 0 {
+            1_000.0 / self.config.fps as f64
+        } else {
+            33.333
+        };
+        let mut last_pts_90k = None;
 
         for au in access_units {
+            let pts_90k = if let Some(pts) = au.pts_90k.or(fallback_pts_90k) {
+                pts
+            } else {
+                self.bump_pts_90k()
+            };
             let pack_start = Instant::now();
-            let packed = packer.pack(au);
-            timing.pack += pack_start.elapsed();
-            let pts_90k = au
-                .pts_90k
-                .or(fallback_pts_90k)
-                .unwrap_or_else(|| self.bump_pts_90k());
+            let packed = self.packer.pack(au);
+            let pack_elapsed = pack_start.elapsed();
+            timing.pack += pack_elapsed;
+            pack_samples.push_duration_ms(pack_elapsed);
 
             let decode_start = Instant::now();
             let decoded = {
                 let decoder = self.decoder.as_mut().ok_or_else(|| {
                     BackendError::Backend("decoder should be initialized".to_string())
                 })?;
-                decoder
-                    .push_access_unit(packed, pts_90k)
-                    .map_err(map_decode_error)?
+                decoder.push_access_unit(packed, pts_90k)?
             };
-            timing.sdk += decode_start.elapsed();
+            let sdk_elapsed = decode_start.elapsed();
+            timing.sdk += sdk_elapsed;
+            sdk_samples.push_duration_ms(sdk_elapsed);
             self.apply_decoded_summary(&decoded);
-            frames.extend(decoded.into_iter().map(to_frame));
+            queue_depth_samples.push_value(decoded.len() as f64);
+
+            let map_start = Instant::now();
+            for frame in decoded {
+                update_jitter_samples(
+                    &mut jitter_samples,
+                    &mut last_pts_90k,
+                    frame.pts_90k,
+                    expected_frame_ms,
+                );
+                frames.push(frame);
+            }
+            let map_elapsed = map_start.elapsed();
+            map_samples.push_duration_ms(map_elapsed);
         }
 
         if should_report_metrics() {
             eprintln!(
-                "[nv.decode] access_units={}, frames={}, pack_ms={:.3}, sdk_ms={:.3}",
+                "[nv.decode] access_units={}, frames={}, pack_ms={:.3}, sdk_ms={:.3}, map_ms={:.3}, pack_p95_ms={:.3}, pack_p99_ms={:.3}, sdk_p95_ms={:.3}, sdk_p99_ms={:.3}, map_p95_ms={:.3}, map_p99_ms={:.3}, queue_depth_peak={:.0}, queue_depth_p95={:.3}, queue_depth_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
                 access_units.len(),
                 frames.len(),
                 timing.pack.as_secs_f64() * 1_000.0,
-                timing.sdk.as_secs_f64() * 1_000.0
+                timing.sdk.as_secs_f64() * 1_000.0,
+                map_samples.samples.iter().sum::<f64>(),
+                pack_samples.p95(),
+                pack_samples.p99(),
+                sdk_samples.p95(),
+                sdk_samples.p99(),
+                map_samples.p95(),
+                map_samples.p99(),
+                queue_depth_samples.peak(),
+                queue_depth_samples.p95(),
+                queue_depth_samples.p99(),
+                jitter_samples.mean(),
+                jitter_samples.p95(),
+                jitter_samples.p99()
             );
         }
 
@@ -156,15 +243,15 @@ impl NvDecoderAdapter {
         current
     }
 
-    fn apply_decoded_summary(&mut self, decoded: &[nvidia_video_codec_sdk::DecodedRgbFrame]) {
+    fn apply_decoded_summary(&mut self, decoded: &[Frame]) {
         self.last_summary.decoded_frames = self
             .last_summary
             .decoded_frames
             .saturating_add(decoded.len());
 
         if let Some(last) = decoded.last() {
-            self.last_summary.width = Some(last.width as usize);
-            self.last_summary.height = Some(last.height as usize);
+            self.last_summary.width = Some(last.width);
+            self.last_summary.height = Some(last.height);
         }
     }
 }
@@ -195,9 +282,9 @@ impl VideoDecoder for NvDecoderAdapter {
         let mut frames = self.decode_access_units(&access_units, None)?;
 
         if let Some(decoder) = self.decoder.as_mut() {
-            let drained = decoder.flush().map_err(map_decode_error)?;
+            let drained = decoder.flush()?;
             self.apply_decoded_summary(&drained);
-            frames.extend(drained.into_iter().map(to_frame));
+            frames.extend(drained);
         }
 
         Ok(frames)
@@ -360,7 +447,15 @@ impl VideoEncoder for NvEncoderAdapter {
         let mut packets = Vec::new();
         let mut timing = StageTiming::default();
         let mut output_depth_peak = 0usize;
-        let mut input_bytes = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+        let mut queue_depth_samples = SampleStats::default();
+        let mut output_jitter_samples = SampleStats::default();
+        let expected_frame_ms = if self.fps > 0 {
+            1_000.0 / self.fps as f64
+        } else {
+            33.333
+        };
+        let mut last_output_pts_90k = None;
+        let input_bytes = make_synthetic_argb(width, height);
 
         for (index, frame) in pending_frames.iter().enumerate() {
             let mut output = if let Some(bitstream) = reusable_outputs.pop() {
@@ -371,9 +466,8 @@ impl VideoEncoder for NvEncoderAdapter {
                     .map_err(map_encode_error)?
             };
             let synth_start = Instant::now();
-            match input_layout {
-                NvInputLayout::Argb => fill_synthetic_argb(&mut input_bytes, width, height, index),
-            }
+            let _ = index;
+            let _ = input_layout;
             timing.synth += synth_start.elapsed();
             {
                 let upload_start = Instant::now();
@@ -412,6 +506,7 @@ impl VideoEncoder for NvEncoderAdapter {
                 is_keyframe: index == 0,
             });
             output_depth_peak = output_depth_peak.max(pending_outputs.len());
+            queue_depth_samples.push_value(pending_outputs.len() as f64);
 
             if produced_output {
                 while pending_outputs.len() >= max_in_flight {
@@ -422,9 +517,18 @@ impl VideoEncoder for NvEncoderAdapter {
                     })?;
                     let lock_start = Instant::now();
                     let (packet, output) = lock_output_packet(self.codec, pending)?;
-                    timing.output_lock += lock_start.elapsed();
+                    let lock_elapsed = lock_start.elapsed();
+                    timing.output_lock += lock_elapsed;
+                    timing.reap += lock_elapsed;
+                    update_jitter_samples(
+                        &mut output_jitter_samples,
+                        &mut last_output_pts_90k,
+                        packet.pts_90k,
+                        expected_frame_ms,
+                    );
                     packets.push(packet);
                     reusable_outputs.push(output);
+                    queue_depth_samples.push_value(pending_outputs.len() as f64);
                 }
             }
         }
@@ -434,14 +538,23 @@ impl VideoEncoder for NvEncoderAdapter {
         while let Some(pending) = pending_outputs.pop_front() {
             let lock_start = Instant::now();
             let (packet, output) = lock_output_packet(self.codec, pending)?;
-            timing.output_lock += lock_start.elapsed();
+            let lock_elapsed = lock_start.elapsed();
+            timing.output_lock += lock_elapsed;
+            timing.reap += lock_elapsed;
+            update_jitter_samples(
+                &mut output_jitter_samples,
+                &mut last_output_pts_90k,
+                packet.pts_90k,
+                expected_frame_ms,
+            );
             packets.push(packet);
             reusable_outputs.push(output);
+            queue_depth_samples.push_value(pending_outputs.len() as f64);
         }
 
         if should_report_metrics() {
             eprintln!(
-                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}",
+                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
                 pending_frames.len(),
                 packets.len(),
                 output_depth_peak,
@@ -449,7 +562,14 @@ impl VideoEncoder for NvEncoderAdapter {
                 timing.synth.as_secs_f64() * 1_000.0,
                 timing.upload.as_secs_f64() * 1_000.0,
                 timing.sdk.as_secs_f64() * 1_000.0,
-                timing.output_lock.as_secs_f64() * 1_000.0
+                timing.reap.as_secs_f64() * 1_000.0,
+                timing.sdk.as_secs_f64() * 1_000.0,
+                timing.output_lock.as_secs_f64() * 1_000.0,
+                queue_depth_samples.p95(),
+                queue_depth_samples.p99(),
+                output_jitter_samples.mean(),
+                output_jitter_samples.p95(),
+                output_jitter_samples.p99()
             );
         }
 
@@ -506,18 +626,6 @@ fn to_encode_guid(codec: Codec) -> nvidia_video_codec_sdk::sys::nvEncodeAPI::GUI
     }
 }
 
-fn map_decode_error(error: DecodeError) -> BackendError {
-    match error {
-        DecodeError::Unsupported(message) => BackendError::UnsupportedConfig(message),
-        DecodeError::InvalidInput(message) => BackendError::InvalidInput(message),
-        DecodeError::Cuda(err) => BackendError::DeviceLost(format!("cuda decode error: {err}")),
-        DecodeError::Nvdec { operation, code } => {
-            BackendError::Backend(format!("nvdec({operation}) failed: {code:?}"))
-        }
-        DecodeError::Internal(message) => BackendError::Backend(message),
-    }
-}
-
 fn map_encode_error(error: nvidia_video_codec_sdk::EncodeError) -> BackendError {
     match error.kind() {
         ErrorKind::NeedMoreInput | ErrorKind::EncoderBusy | ErrorKind::LockBusy => {
@@ -535,16 +643,25 @@ fn map_encode_error(error: nvidia_video_codec_sdk::EncodeError) -> BackendError 
     }
 }
 
-fn to_frame(frame: nvidia_video_codec_sdk::DecodedRgbFrame) -> Frame {
-    Frame {
-        width: frame.width as usize,
-        height: frame.height as usize,
-        pixel_format: None,
-        pts_90k: Some(frame.timestamp_90k),
+fn update_jitter_samples(
+    jitter_samples: &mut SampleStats,
+    last_pts_90k: &mut Option<i64>,
+    current_pts_90k: Option<i64>,
+    expected_frame_ms: f64,
+) {
+    let Some(current) = current_pts_90k else {
+        return;
+    };
+    if let Some(previous) = *last_pts_90k {
+        let delta_ms = (current.saturating_sub(previous) as f64) / 90.0;
+        jitter_samples.push_value((delta_ms - expected_frame_ms).abs());
     }
+    *last_pts_90k = Some(current);
 }
 
-fn fill_synthetic_argb(buffer: &mut [u8], width: usize, height: usize, frame_index: usize) {
+fn make_synthetic_argb(width: usize, height: usize) -> Vec<u8> {
+    let mut buffer = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+    let frame_index = 0usize;
     for y in 0..height {
         for x in 0..width {
             let offset = (y * width + x) * 4;
@@ -554,4 +671,5 @@ fn fill_synthetic_argb(buffer: &mut [u8], width: usize, height: usize, frame_ind
             buffer[offset + 3] = 255;
         }
     }
+    buffer
 }

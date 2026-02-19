@@ -69,11 +69,14 @@ struct Args {
     #[arg(long)]
     release: bool,
 
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 65536)]
     chunk_bytes: usize,
 
     #[arg(long, default_value_t = 300)]
     frame_count: usize,
+
+    #[arg(long, default_value_t = false)]
+    verify: bool,
 }
 
 #[derive(Debug)]
@@ -141,6 +144,24 @@ fn main() -> Result<()> {
     writeln!(&mut report)?;
     for result in &results {
         writeln!(&mut report, "{}: {:.3}s", result.label, result.seconds)?;
+    }
+
+    if args.verify {
+        writeln!(&mut report)?;
+        writeln!(&mut report, "verification: enabled")?;
+        let verify_items = [
+            ("video-hw", video_hw_output.as_path()),
+            ("ffmpeg", ffmpeg_output.as_path()),
+        ];
+        for (label, path) in verify_items {
+            let summary = ffprobe_summary(path, codec, args.frame_count)?;
+            run_ffmpeg_decode_verify(path, null_sink)?;
+            writeln!(
+                &mut report,
+                "{} verify: codec={}, {}x{}, frames={}, decode=ok",
+                label, summary.codec_name, summary.width, summary.height, summary.nb_read_frames
+            )?;
+        }
     }
 
     fs::write(&report_path, report).with_context(|| {
@@ -268,4 +289,92 @@ fn ffmpeg_encode_args(codec: Codec, frame_count: usize, output: &PathBuf) -> Vec
         codec.ffmpeg_muxer().to_string(),
         output.to_string_lossy().to_string(),
     ]
+}
+
+#[derive(Debug, Clone)]
+struct ProbeSummary {
+    codec_name: String,
+    width: usize,
+    height: usize,
+    nb_read_frames: usize,
+}
+
+fn ffprobe_summary(path: &std::path::Path, codec: Codec, expected_frames: usize) -> Result<ProbeSummary> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-show_entries",
+            "stream=codec_name,width,height,nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1",
+            &path.to_string_lossy(),
+        ])
+        .output()
+        .with_context(|| format!("spawn ffprobe for {}", path.display()))?;
+    if !output.status.success() {
+        bail!("ffprobe failed for {}: status={}", path.display(), output.status);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut codec_name = None;
+    let mut width = None;
+    let mut height = None;
+    let mut nb_read_frames = None;
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("").trim();
+        match key {
+            "codec_name" => codec_name = Some(value.to_string()),
+            "width" => width = value.parse::<usize>().ok(),
+            "height" => height = value.parse::<usize>().ok(),
+            "nb_read_frames" => nb_read_frames = value.parse::<usize>().ok(),
+            _ => {}
+        }
+    }
+
+    let summary = ProbeSummary {
+        codec_name: codec_name.unwrap_or_default(),
+        width: width.unwrap_or(0),
+        height: height.unwrap_or(0),
+        nb_read_frames: nb_read_frames.unwrap_or(0),
+    };
+
+    if summary.codec_name != codec.as_cli() {
+        bail!(
+            "unexpected codec for {}: expected {}, got {}",
+            path.display(),
+            codec.as_cli(),
+            summary.codec_name
+        );
+    }
+    if summary.nb_read_frames != expected_frames {
+        bail!(
+            "unexpected frame count for {}: expected {}, got {}",
+            path.display(),
+            expected_frames,
+            summary.nb_read_frames
+        );
+    }
+    if summary.width == 0 || summary.height == 0 {
+        bail!("unexpected dimensions for {}", path.display());
+    }
+
+    Ok(summary)
+}
+
+fn run_ffmpeg_decode_verify(path: &std::path::Path, null_sink: &str) -> Result<()> {
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-i", &path.to_string_lossy(), "-f", "null", null_sink])
+        .status()
+        .with_context(|| format!("spawn ffmpeg decode verify for {}", path.display()))?;
+    if !status.success() {
+        bail!(
+            "ffmpeg decode verify failed for {}: status={status}",
+            path.display()
+        );
+    }
+    Ok(())
 }

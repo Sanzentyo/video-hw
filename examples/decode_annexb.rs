@@ -15,7 +15,7 @@ struct Args {
     input: Option<PathBuf>,
     #[arg(long, default_value_t = 30)]
     fps: i32,
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 65536)]
     chunk_bytes: usize,
     #[arg(long, default_value_t = false)]
     require_hardware: bool,

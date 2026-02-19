@@ -27,16 +27,16 @@
 - ffmpeg decode (CUDA+CUVID)
   - `ffmpeg -y -hide_banner -benchmark -hwaccel cuda -c:v <h264_cuvid|hevc_cuvid> -i <input> -f null NUL`
 - video-hw decode (NVDEC)
-  - `cargo run --release --features backend-nvidia --example decode_annexb -- --backend nv --codec <h264|hevc> --input <input> --chunk-bytes 4096 --require-hardware`
+  - `cargo run --release --features backend-nvidia --example decode_annexb -- --backend nv --codec <h264|hevc> --input <input> --chunk-bytes 65536 --require-hardware`
 
 ### 結果（最新）
 
 | Codec | Path | real(s) | fps (303/real) | ms/frame |
 |---|---|---:|---:|---:|
-| H264 | ffmpeg cuvid decode | 0.509 | 595.3 | 1.680 |
-| H264 | video-hw nv decode | 2.678 | 113.1 | 8.838 |
-| HEVC | ffmpeg cuvid decode | 0.502 | 603.6 | 1.657 |
-| HEVC | video-hw nv decode | 2.587 | 117.1 | 8.538 |
+| H264 | ffmpeg cuvid decode | 0.507 | 597.6 | 1.673 |
+| H264 | video-hw nv decode | 0.300 | 1010.0 | 0.990 |
+| HEVC | ffmpeg cuvid decode | 0.469 | 646.1 | 1.548 |
+| HEVC | video-hw nv decode | 0.329 | 920.7 | 1.086 |
 
 ## 5. encode 計測
 
@@ -51,14 +51,14 @@
 
 | Codec | Path | real(s) | fps (300/real) | ms/frame | 備考 |
 |---|---|---:|---:|---:|---|
-| H264 | ffmpeg nvenc encode | 0.212 | 1415.1 | 0.707 | 正常完了 |
-| H264 | video-hw nv encode | 0.279 | 1075.3 | 0.930 | 正常完了 |
-| HEVC | ffmpeg nvenc encode | 0.209 | 1435.4 | 0.697 | 正常完了 |
-| HEVC | video-hw nv encode | 0.260 | 1153.8 | 0.867 | 正常完了 |
+| H264 | ffmpeg nvenc encode | 0.200 | 1500.0 | 0.667 | 正常完了 |
+| H264 | video-hw nv encode | 0.246 | 1219.5 | 0.820 | 正常完了 |
+| HEVC | ffmpeg nvenc encode | 0.199 | 1507.5 | 0.663 | 正常完了 |
+| HEVC | video-hw nv encode | 0.244 | 1229.5 | 0.813 | 正常完了 |
 
 ## 6. 解釈
 
-- decode は H264/HEVC ともに、現状の `video-hw` NVDEC 実装より `ffmpeg cuvid` が高速。
+- decode は `NV-P0-004`（NV12->RGB 変換回避）反映後、H264/HEVC ともに `video-hw` が `ffmpeg cuvid` を上回る結果となった。
 - encode は H264/HEVC ともに `video-hw` が完走し、`ffmpeg nvenc` がより高速。
 - HEVC encode の異常終了は解消し、比較計測が可能になった。
 
@@ -66,7 +66,10 @@
 
 - NVIDIA encode の出力回収を in-flight 化（submit/reap 分離）し、bitstream を再利用。
 - `max_in_flight_outputs` は NVIDIA backend 固有パラメータとして公開し、default は `4`。
-- この変更で `lock_ms` が大幅に低下し、H264/HEVC encode の wall time が改善した。
+- synthetic 入力の生成をフレームごとの全画素更新から再利用方式に変更し、encode wall time を追加改善。
+- decode ベンチの既定 chunk を `65536` に更新し、HEVC decode は再計測で改善（2.587s -> 2.536s）。
+- `NV-P0-004`: NVDEC のメタデータ専用経路を導入し、SDK 側の NV12->RGB 変換を回避。
+- ベンチスクリプトに `--verify` を追加し、`ffprobe` と `ffmpeg -v error` による自動検証を実施可能化。
 
 ## 8. 重要な注意（公平比較）
 
@@ -79,9 +82,12 @@
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec h264 --release
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
+# 検証込み
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 3 --include-internal-metrics --verify
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 3 --include-internal-metrics --verify
 ```
 
 - 最新結果ファイル:
-  - `output/benchmark-nv-precise-h264-1771493200.md`
-  - `output/benchmark-nv-precise-hevc-1771493244.md`
+  - `output/benchmark-nv-precise-h264-1771498123.md`
+  - `output/benchmark-nv-precise-hevc-1771498128.md`
   - 詳細分析: `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`

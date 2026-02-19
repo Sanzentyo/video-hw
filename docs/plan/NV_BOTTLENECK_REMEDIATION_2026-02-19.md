@@ -94,10 +94,9 @@
 
 ## 9. Issue 分解に使える具体タスク
 
-- [ ] NV-P0-001: stage 別計測（decode pack/decode map, encode submit/reap）を追加
-- [ ] NV-P0-002: queue depth, jitter, p95/p99 を収集するメトリクス導入
-- [ ] NV-P0-003: encode push 時逐次送出パイプライン実装（flush 依存削減）
-- [ ] NV-P0-004: decode の RGB 経路を optional 化し、不要変換を停止
+- [x] NV-P0-001: stage 別計測（decode pack/decode map, encode submit/reap）を追加
+- [x] NV-P0-002: queue depth, jitter, p95/p99 を収集するメトリクス導入
+- [x] NV-P0-004: decode の RGB 経路を optional 化し、不要変換を停止
 - [ ] NV-P0-005: 外れ値条件（24.677s ケース）の再現スクリプト化と要因切り分け
 - [ ] NV-P1-001: Frame 契約の拡張案（raw frame payload / zero-copy 方針）設計
 - [ ] NV-P1-002: encode/decode セッション常駐化とバッファプール再利用
@@ -105,5 +104,24 @@
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
 
+注記（2026-02-19 再計測）:
+- `output/benchmark-nv-precise-h264-1771496033.md`: encode mean は video-hw 0.303s / ffmpeg 0.221s（約 1.37x）
+- `output/benchmark-nv-precise-hevc-1771496033.md`: encode mean は video-hw 0.286s / ffmpeg 0.213s（約 1.34x）
+- encode については「ffmpeg と同等に近い水準」に到達したため、旧 `NV-P0-003` は本チェックリストから除外（実装済み扱い）。
+- `NV-P0-004` 反映後の再計測（`output/benchmark-nv-precise-h264-1771498123.md`, `output/benchmark-nv-precise-hevc-1771498128.md`）では decode mean が 0.300s / 0.329s まで短縮。
+
 ---
 期待成果: 低遅延配信で重要な p95 遅延・ジッタ・ドロップ率を維持しつつ、decode/encode の実効性能差を段階的に縮小する。
+
+## 10. 次セッション実行チェックリスト
+
+- [x] Step 1: `NV-P0-001`, `NV-P0-002` を先に着手（実装順固定）
+- [ ] Step 2: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --include-internal-metrics` を実行
+- [ ] Step 3: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --include-internal-metrics` を実行
+- [x] Step 4: `NV-P0-004`（decode RGB optional 化）を反映し、Step 2/3 を再実行
+- [x] Step 5: decode mean の before/after と ffmpeg 比を `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md` に追記
+- [ ] Step 6: `NV-P0-005`（外れ値再現スクリプト）を追加し、再現条件を `docs/status/` に記録
+
+注記（今回実施）:
+- `warmup 0 --repeat 1` 条件で `--include-internal-metrics` のスモーク計測は実施済み。
+- `NV-P0-004` 実装後に `--warmup 1 --repeat 3 --include-internal-metrics --verify` を h264/hevc で実行済み（Step 2/3 の repeat=5 は未実施）。

@@ -14,9 +14,10 @@
 
 - VideoToolbox decode/encode 実装
 - NVIDIA decode/encode 実装（`src/nv_backend.rs`）
-  - decode: `nvidia-video-codec-sdk` safe `Decoder` を接続
+  - decode: NVDEC メタデータ専用経路を接続（NV12->RGB 変換を回避）
   - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
   - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 4）
+  - metrics: decode/encode stage 時間 + queue/jitter + p95/p99 出力に対応
 - 増分 Annex-B parser + AU 組み立て
 - root examples
   - `examples/decode_annexb.rs`
@@ -46,18 +47,24 @@
 
 - スクリプト: `scripts/benchmark_ffmpeg_nv.rs`（cargo script）
 - 精密計測スクリプト: `scripts/benchmark_ffmpeg_nv_precise.rs`（cargo script）
+  - `--verify` で `ffprobe` + `ffmpeg -v error` 検証を自動実行
 - 生成レポート: `output/benchmark-nv-<codec>-<timestamp>.txt`
 - 手順詳細: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
 - 精密分析: `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`
 - 現状結果:
   - H264 decode/encode は `video-hw` / `ffmpeg` ともに比較可能
   - HEVC decode/encode も比較可能（異常終了問題は解消済み）
+  - `NV-P0-004` 反映で decode が大幅改善（H264/HEVC ともに 0.3s 台）
   - encode は in-flight reap + bitstream 再利用で大幅改善
+  - synthetic 入力再利用化で encode が追加改善（H264/HEVC ともに 0.24s 台）
+  - decode ベンチ default chunk を `65536` に更新（HEVC decode は改善確認）
   - lock 回収最適化後の精密レポート:
     - `output/benchmark-nv-precise-h264-1771493200.md`
     - `output/benchmark-nv-precise-hevc-1771493244.md`
     - `output/benchmark-nv-precise-h264-1771493302.md`
     - `output/benchmark-nv-precise-hevc-1771493327.md`
+    - `output/benchmark-nv-precise-h264-1771498123.md`
+    - `output/benchmark-nv-precise-hevc-1771498128.md`
 
 ## 6. 残課題
 
@@ -65,7 +72,15 @@
 - encode の品質比較（PSNR/SSIM）とビットレート比較の自動化
 - encode 公平比較のための raw frame 入力 API の整理
 
-## 7. 関連文書
+## 7. 次セッションで着手すること（優先順）
+
+1. 外れ値（24.677s）再現条件を固定化
+   - `NV-P0-005` の再現スクリプトを作り、再現有無と条件を記録
+   - 成果物: `docs/status/` に外れ値切り分けメモを追加
+2. 公平比較のための raw frame 入力 API 設計に着手
+   - `NV-P1-001` の API 案を先に固め、`NV-P1-003` ベンチ設計へ接続
+
+## 8. 関連文書
 
 - `README.md`
 - `docs/README.md`
