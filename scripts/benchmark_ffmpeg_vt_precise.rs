@@ -115,6 +115,33 @@ struct CaseSamples {
     seconds: Vec<f64>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct DecodeMetricSamples {
+    submit_ms: Vec<f64>,
+    elapsed_ms: Vec<f64>,
+    jitter_ms_mean: Vec<f64>,
+    jitter_ms_p95: Vec<f64>,
+    jitter_ms_p99: Vec<f64>,
+    input_copy_bytes: Vec<f64>,
+    output_copy_frames: Vec<f64>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct EncodeMetricSamples {
+    frame_prep_ms: Vec<f64>,
+    submit_ms: Vec<f64>,
+    complete_ms: Vec<f64>,
+    total_ms: Vec<f64>,
+    queue_peak: Vec<f64>,
+    queue_p95: Vec<f64>,
+    queue_p99: Vec<f64>,
+    jitter_ms_mean: Vec<f64>,
+    jitter_ms_p95: Vec<f64>,
+    jitter_ms_p99: Vec<f64>,
+    input_copy_bytes: Vec<f64>,
+    output_copy_bytes: Vec<f64>,
+}
+
 impl CaseSamples {
     fn new(case: Case) -> Self {
         Self {
@@ -171,6 +198,7 @@ impl Stats {
 #[derive(Debug)]
 struct CaseRun {
     seconds: f64,
+    metrics: Option<InternalMetrics>,
 }
 
 fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
@@ -224,6 +252,8 @@ fn main() -> Result<()> {
         .copied()
         .map(CaseSamples::new)
         .collect::<Vec<_>>();
+    let mut decode_metrics = DecodeMetricSamples::default();
+    let mut encode_metrics = EncodeMetricSamples::default();
 
     for i in 0..(args.warmup + args.repeat) {
         let is_warmup = i < args.warmup;
@@ -252,6 +282,54 @@ fn main() -> Result<()> {
                     Case::FfmpegEncode => 3,
                 };
                 samples[idx].push(run.seconds);
+                if let Some(metrics) = run.metrics {
+                    match metrics {
+                        InternalMetrics::Decode {
+                            submit_ms,
+                            elapsed_ms,
+                            jitter_ms_mean,
+                            jitter_ms_p95,
+                            jitter_ms_p99,
+                            input_copy_bytes,
+                            output_copy_frames,
+                        } => {
+                            decode_metrics.submit_ms.push(submit_ms);
+                            decode_metrics.elapsed_ms.push(elapsed_ms);
+                            decode_metrics.jitter_ms_mean.push(jitter_ms_mean);
+                            decode_metrics.jitter_ms_p95.push(jitter_ms_p95);
+                            decode_metrics.jitter_ms_p99.push(jitter_ms_p99);
+                            decode_metrics.input_copy_bytes.push(input_copy_bytes);
+                            decode_metrics.output_copy_frames.push(output_copy_frames);
+                        }
+                        InternalMetrics::Encode {
+                            frame_prep_ms,
+                            submit_ms,
+                            complete_ms,
+                            total_ms,
+                            queue_peak,
+                            queue_p95,
+                            queue_p99,
+                            jitter_ms_mean,
+                            jitter_ms_p95,
+                            jitter_ms_p99,
+                            input_copy_bytes,
+                            output_copy_bytes,
+                        } => {
+                            encode_metrics.frame_prep_ms.push(frame_prep_ms);
+                            encode_metrics.submit_ms.push(submit_ms);
+                            encode_metrics.complete_ms.push(complete_ms);
+                            encode_metrics.total_ms.push(total_ms);
+                            encode_metrics.queue_peak.push(queue_peak);
+                            encode_metrics.queue_p95.push(queue_p95);
+                            encode_metrics.queue_p99.push(queue_p99);
+                            encode_metrics.jitter_ms_mean.push(jitter_ms_mean);
+                            encode_metrics.jitter_ms_p95.push(jitter_ms_p95);
+                            encode_metrics.jitter_ms_p99.push(jitter_ms_p99);
+                            encode_metrics.input_copy_bytes.push(input_copy_bytes);
+                            encode_metrics.output_copy_bytes.push(output_copy_bytes);
+                        }
+                    }
+                }
             }
         }
     }
@@ -315,6 +393,106 @@ fn main() -> Result<()> {
             write!(&mut report, "{sec:.3}")?;
         }
         writeln!(&mut report)?;
+    }
+
+    if args.include_internal_metrics {
+        writeln!(&mut report)?;
+        writeln!(&mut report, "## Internal Metrics (video-hw)")?;
+        if !decode_metrics.submit_ms.is_empty() {
+            let submit = Stats::from_samples(&decode_metrics.submit_ms);
+            let elapsed = Stats::from_samples(&decode_metrics.elapsed_ms);
+            let jitter_mean = Stats::from_samples(&decode_metrics.jitter_ms_mean);
+            let jitter_p95 = Stats::from_samples(&decode_metrics.jitter_ms_p95);
+            let jitter_p99 = Stats::from_samples(&decode_metrics.jitter_ms_p99);
+            let input_copy = Stats::from_samples(&decode_metrics.input_copy_bytes);
+            let output_copy_frames = Stats::from_samples(&decode_metrics.output_copy_frames);
+            writeln!(&mut report, "### decode")?;
+            writeln!(
+                &mut report,
+                "- submit_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                submit.mean, submit.p95, submit.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- elapsed_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                elapsed.mean, elapsed.p95, elapsed.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- jitter_ms_mean mean={:.3}, jitter_ms_p95 mean={:.3}, jitter_ms_p99 mean={:.3}",
+                jitter_mean.mean, jitter_p95.mean, jitter_p99.mean
+            )?;
+            writeln!(
+                &mut report,
+                "- input_copy_bytes mean={:.3}, p95={:.3}, p99={:.3}",
+                input_copy.mean, input_copy.p95, input_copy.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- output_copy_frames mean={:.3}, p95={:.3}, p99={:.3}",
+                output_copy_frames.mean, output_copy_frames.p95, output_copy_frames.p99
+            )?;
+        }
+        if !encode_metrics.frame_prep_ms.is_empty() {
+            let frame_prep = Stats::from_samples(&encode_metrics.frame_prep_ms);
+            let submit = Stats::from_samples(&encode_metrics.submit_ms);
+            let complete = Stats::from_samples(&encode_metrics.complete_ms);
+            let total = Stats::from_samples(&encode_metrics.total_ms);
+            let queue_peak = Stats::from_samples(&encode_metrics.queue_peak);
+            let queue_p95 = Stats::from_samples(&encode_metrics.queue_p95);
+            let queue_p99 = Stats::from_samples(&encode_metrics.queue_p99);
+            let jitter_mean = Stats::from_samples(&encode_metrics.jitter_ms_mean);
+            let jitter_p95 = Stats::from_samples(&encode_metrics.jitter_ms_p95);
+            let jitter_p99 = Stats::from_samples(&encode_metrics.jitter_ms_p99);
+            let input_copy = Stats::from_samples(&encode_metrics.input_copy_bytes);
+            let output_copy = Stats::from_samples(&encode_metrics.output_copy_bytes);
+            writeln!(&mut report, "### encode")?;
+            writeln!(
+                &mut report,
+                "- frame_prep_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                frame_prep.mean, frame_prep.p95, frame_prep.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- submit_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                submit.mean, submit.p95, submit.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- complete_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                complete.mean, complete.p95, complete.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- total_ms mean={:.3}, p95={:.3}, p99={:.3}",
+                total.mean, total.p95, total.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- queue_peak mean={:.3}, p95={:.3}, p99={:.3}",
+                queue_peak.mean, queue_peak.p95, queue_peak.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- queue_p95 mean={:.3}, queue_p99 mean={:.3}",
+                queue_p95.mean, queue_p99.mean
+            )?;
+            writeln!(
+                &mut report,
+                "- jitter_ms_mean mean={:.3}, jitter_ms_p95 mean={:.3}, jitter_ms_p99 mean={:.3}",
+                jitter_mean.mean, jitter_p95.mean, jitter_p99.mean
+            )?;
+            writeln!(
+                &mut report,
+                "- input_copy_bytes mean={:.3}, p95={:.3}, p99={:.3}",
+                input_copy.mean, input_copy.p95, input_copy.p99
+            )?;
+            writeln!(
+                &mut report,
+                "- output_copy_bytes mean={:.3}, p95={:.3}, p99={:.3}",
+                output_copy.mean, output_copy.p95, output_copy.p99
+            )?;
+        }
     }
 
     if args.verify {
@@ -653,7 +831,7 @@ fn run_ffmpeg_decode_verify(path: &Path, null_sink: &str) -> Result<()> {
 }
 
 fn run_timed_command(mut cmd: Command) -> Result<CaseRun> {
-    cmd.stdout(Stdio::null());
+    cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
     let start = Instant::now();
@@ -670,7 +848,121 @@ fn run_timed_command(mut cmd: Command) -> Result<CaseRun> {
         );
     }
 
-    Ok(CaseRun { seconds: elapsed })
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metrics = parse_internal_metrics(&logs);
+    Ok(CaseRun {
+        seconds: elapsed,
+        metrics,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InternalMetrics {
+    Decode {
+        submit_ms: f64,
+        elapsed_ms: f64,
+        jitter_ms_mean: f64,
+        jitter_ms_p95: f64,
+        jitter_ms_p99: f64,
+        input_copy_bytes: f64,
+        output_copy_frames: f64,
+    },
+    Encode {
+        frame_prep_ms: f64,
+        submit_ms: f64,
+        complete_ms: f64,
+        total_ms: f64,
+        queue_peak: f64,
+        queue_p95: f64,
+        queue_p99: f64,
+        jitter_ms_mean: f64,
+        jitter_ms_p95: f64,
+        jitter_ms_p99: f64,
+        input_copy_bytes: f64,
+        output_copy_bytes: f64,
+    },
+}
+
+fn parse_internal_metrics(logs: &str) -> Option<InternalMetrics> {
+    let decode_line = logs
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("[vt.decode]"));
+    if let Some(line) = decode_line {
+        let submit_line = logs
+            .lines()
+            .rev()
+            .find(|l| l.trim_start().starts_with("[vt.decode.submit]"));
+        let submit_ms = submit_line
+            .and_then(|l| parse_metric_value(l, "submit_ms"))
+            .unwrap_or(0.0);
+        let input_copy_bytes = submit_line
+            .and_then(|l| parse_metric_value(l, "input_copy_bytes"))
+            .unwrap_or(0.0);
+        let elapsed_ms = parse_metric_value(line, "elapsed_ms").unwrap_or(0.0);
+        let jitter_ms_mean = parse_metric_value(line, "jitter_ms_mean").unwrap_or(0.0);
+        let jitter_ms_p95 = parse_metric_value(line, "jitter_ms_p95").unwrap_or(0.0);
+        let jitter_ms_p99 = parse_metric_value(line, "jitter_ms_p99").unwrap_or(0.0);
+        let output_copy_frames = parse_metric_value(line, "output_copy_frames").unwrap_or(0.0);
+        return Some(InternalMetrics::Decode {
+            submit_ms,
+            elapsed_ms,
+            jitter_ms_mean,
+            jitter_ms_p95,
+            jitter_ms_p99,
+            input_copy_bytes,
+            output_copy_frames,
+        });
+    }
+
+    let encode_line = logs
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("[vt.encode]"));
+    if let Some(line) = encode_line {
+        let frame_prep_ms = parse_metric_value(line, "frame_prep_ms").unwrap_or(0.0);
+        let submit_ms = parse_metric_value(line, "submit_ms").unwrap_or(0.0);
+        let complete_ms = parse_metric_value(line, "complete_ms").unwrap_or(0.0);
+        let total_ms = parse_metric_value(line, "total_ms").unwrap_or(0.0);
+        let queue_peak = parse_metric_value(line, "queue_peak").unwrap_or(0.0);
+        let queue_p95 = parse_metric_value(line, "queue_p95").unwrap_or(0.0);
+        let queue_p99 = parse_metric_value(line, "queue_p99").unwrap_or(0.0);
+        let jitter_ms_mean = parse_metric_value(line, "jitter_ms_mean").unwrap_or(0.0);
+        let jitter_ms_p95 = parse_metric_value(line, "jitter_ms_p95").unwrap_or(0.0);
+        let jitter_ms_p99 = parse_metric_value(line, "jitter_ms_p99").unwrap_or(0.0);
+        let input_copy_bytes = parse_metric_value(line, "input_copy_bytes").unwrap_or(0.0);
+        let output_copy_bytes = parse_metric_value(line, "output_copy_bytes").unwrap_or(0.0);
+        return Some(InternalMetrics::Encode {
+            frame_prep_ms,
+            submit_ms,
+            complete_ms,
+            total_ms,
+            queue_peak,
+            queue_p95,
+            queue_p99,
+            jitter_ms_mean,
+            jitter_ms_p95,
+            jitter_ms_p99,
+            input_copy_bytes,
+            output_copy_bytes,
+        });
+    }
+
+    None
+}
+
+fn parse_metric_value(line: &str, key: &str) -> Option<f64> {
+    for token in line.split(',') {
+        let t = token.trim();
+        if let Some(value) = t.strip_prefix(&format!("{key}=")) {
+            return value.parse::<f64>().ok();
+        }
+    }
+    None
 }
 
 fn run_command(cmd: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {

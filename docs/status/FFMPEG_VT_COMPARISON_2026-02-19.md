@@ -80,6 +80,12 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --re
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --release --warmup 1 --repeat 3 --verify --equal-raw-input --include-internal-metrics
 ```
 
+定常運用（直列実行）:
+
+```bash
+cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
+```
+
 生成レポート:
 - `output/benchmark-vt-precise-h264-1771530053.md`
 - `output/benchmark-vt-precise-hevc-1771530065.md`
@@ -100,3 +106,5 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --re
 - `ffmpeg` 出力は `ffprobe` + `ffmpeg -v error` で decode=ok。
 - `video-hw` 出力は現状 raw payload 形式のため `ffprobe` が直接解釈できない場合がある。
   このためスクリプト側で「出力バイト数 > 0」を fallback 検証として扱っている。
+- `--include-internal-metrics` 有効時は `Internal Metrics (video-hw)` を出力し、
+  NV 精密レポートと同一セクション構成（`decode` / `encode`）で比較可能。

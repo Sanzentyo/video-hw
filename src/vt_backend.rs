@@ -560,8 +560,22 @@ impl VtEncoderAdapter {
         }
     }
 
-    fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
-        scheduler.set_generation(self.pipeline_generation_hint().unwrap_or(1).max(1));
+    #[allow(dead_code)]
+    pub fn configured_generation(&self) -> u64 {
+        self.config_generation
+    }
+
+    #[allow(dead_code)]
+    pub fn pending_switch_generation(&self) -> Option<u64> {
+        self.pending_switch.as_ref().map(|p| p.target_generation)
+    }
+
+    #[allow(dead_code)]
+    pub fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
+        let generation = self
+            .pending_switch_generation()
+            .unwrap_or_else(|| self.configured_generation());
+        scheduler.set_generation(generation.max(1));
     }
 
     fn preprocess_frame_via_pipeline(&mut self, frame: Frame) -> Result<Frame, BackendError> {
@@ -1362,5 +1376,33 @@ mod tests {
         assert!(adapter.pending_switch.is_some());
         assert!(adapter.force_next_keyframe);
         assert_eq!(adapter.pipeline_generation_hint(), Some(2));
+    }
+
+    #[test]
+    fn vt_pending_switch_generation_syncs_to_pipeline_scheduler() {
+        let scheduler = PipelineScheduler::new(VtTransformAdapter::new(), 4);
+        let mut adapter = VtEncoderAdapter::with_config(Codec::H264, 30, false);
+        adapter.pending_frames.push(Frame {
+            width: 640,
+            height: 360,
+            pixel_format: None,
+            pts_90k: Some(0),
+            argb: None,
+            force_keyframe: false,
+        });
+        adapter
+            .apply_vt_session_switch(
+                VtSessionConfig {
+                    force_keyframe_on_activate: false,
+                },
+                SessionSwitchMode::OnNextKeyframe,
+            )
+            .unwrap();
+
+        adapter.sync_pipeline_generation(&scheduler);
+        assert_eq!(
+            scheduler.generation(),
+            adapter.pending_switch_generation().unwrap_or(1)
+        );
     }
 }

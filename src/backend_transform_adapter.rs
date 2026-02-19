@@ -2,6 +2,8 @@ use std::time::Duration;
 
 #[cfg(feature = "backend-nvidia")]
 use crate::cuda_transform::CudaNv12ToRgb;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use crate::vt_metal_transform::VtMetalNv12ToRgb;
 use crate::{
     BackendError, ColorRequest, Frame, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob,
     TransformResult, should_enqueue_transform,
@@ -86,6 +88,8 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
 #[derive(Debug)]
 pub struct VtTransformAdapter {
     dispatcher: TransformDispatcher,
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    metal: Option<VtMetalNv12ToRgb>,
 }
 
 impl VtTransformAdapter {
@@ -96,6 +100,12 @@ impl VtTransformAdapter {
     pub fn with_config(worker_count: usize, queue_capacity: usize) -> Self {
         Self {
             dispatcher: TransformDispatcher::new(worker_count, queue_capacity),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            metal: if vt_gpu_transform_enabled() {
+                VtMetalNv12ToRgb::new().ok()
+            } else {
+                None
+            },
         }
     }
 }
@@ -119,6 +129,12 @@ impl BackendTransformAdapter for VtTransformAdapter {
 
         match (input, color) {
             (DecodedUnit::Nv12Cpu(frame), ColorRequest::Rgb8 | ColorRequest::Rgba8) => {
+                #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+                if let Some(metal) = &self.metal
+                    && let Ok(rgb) = metal.convert(&frame)
+                {
+                    return Ok(Some(DecodedUnit::RgbCpu(rgb)));
+                }
                 self.dispatcher
                     .submit(TransformJob::Nv12ToRgb(frame))
                     .map_err(|e| BackendError::TemporaryBackpressure(format!("{e:?}")))?;
@@ -138,6 +154,17 @@ impl BackendTransformAdapter for VtTransformAdapter {
                 "transform recv failed: {err:?}"
             ))),
         }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+fn vt_gpu_transform_enabled() -> bool {
+    match std::env::var("VIDEO_HW_VT_GPU_TRANSFORM") {
+        Ok(raw) => {
+            let v = raw.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
     }
 }
 
@@ -202,6 +229,9 @@ mod tests {
         let output = adapter
             .submit(DecodedUnit::Nv12Cpu(nv12), ColorRequest::Rgb8, None)
             .unwrap();
+        if let Some(DecodedUnit::RgbCpu(_)) = output {
+            return;
+        }
         assert!(output.is_none());
         let reaped = adapter.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(reaped, Some(DecodedUnit::RgbCpu(_))));

@@ -10,6 +10,8 @@ mod nv_meta_decoder;
 mod pipeline;
 mod pipeline_scheduler;
 mod transform;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+mod vt_metal_transform;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;
