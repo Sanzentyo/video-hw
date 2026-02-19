@@ -8,8 +8,8 @@ use nvidia_video_codec_sdk::{
 
 use crate::bitstream::{AccessUnit, StatefulBitstreamAssembler};
 use crate::{
-    BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
-    VideoDecoder, VideoEncoder,
+    BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
+    EncodedPacket, Frame, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Default)]
@@ -212,17 +212,28 @@ pub struct NvEncoderAdapter {
     codec: Codec,
     fps: i32,
     require_hardware: bool,
+    max_in_flight_outputs: usize,
     pending_frames: Vec<Frame>,
     width: Option<usize>,
     height: Option<usize>,
 }
 
 impl NvEncoderAdapter {
-    pub fn with_config(codec: Codec, fps: i32, require_hardware: bool) -> Self {
+    pub fn with_config(
+        codec: Codec,
+        fps: i32,
+        require_hardware: bool,
+        backend_options: BackendEncoderOptions,
+    ) -> Self {
+        let max_in_flight_outputs = match backend_options {
+            BackendEncoderOptions::Nvidia(options) => options.max_in_flight_outputs.clamp(1, 64),
+            BackendEncoderOptions::Default => 4,
+        };
         Self {
             codec,
             fps,
             require_hardware,
+            max_in_flight_outputs,
             pending_frames: Vec::new(),
             width: None,
             height: None,
@@ -335,17 +346,30 @@ impl VideoEncoder for NvEncoderAdapter {
         let height = self.height.take().unwrap_or(360);
 
         let (session, input_layout, _pool_size) = self.make_session(width, height)?;
+        let max_in_flight = self.max_in_flight_outputs;
         let mut input = session.create_input_buffer().map_err(map_encode_error)?;
         let mut pending_outputs = VecDeque::<PendingOutput>::new();
+        let mut reusable_outputs = Vec::with_capacity(max_in_flight);
+        for _ in 0..max_in_flight {
+            reusable_outputs.push(
+                session
+                    .create_output_bitstream()
+                    .map_err(map_encode_error)?,
+            );
+        }
         let mut packets = Vec::new();
         let mut timing = StageTiming::default();
         let mut output_depth_peak = 0usize;
         let mut input_bytes = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
 
         for (index, frame) in pending_frames.iter().enumerate() {
-            let mut output = session
-                .create_output_bitstream()
-                .map_err(map_encode_error)?;
+            let mut output = if let Some(bitstream) = reusable_outputs.pop() {
+                bitstream
+            } else {
+                session
+                    .create_output_bitstream()
+                    .map_err(map_encode_error)?
+            };
             let synth_start = Instant::now();
             match input_layout {
                 NvInputLayout::Argb => fill_synthetic_argb(&mut input_bytes, width, height, index),
@@ -390,14 +414,18 @@ impl VideoEncoder for NvEncoderAdapter {
             output_depth_peak = output_depth_peak.max(pending_outputs.len());
 
             if produced_output {
-                let pending = pending_outputs.pop_front().ok_or_else(|| {
-                    BackendError::Backend(
-                        "missing pending output after encode submission".to_string(),
-                    )
-                })?;
-                let lock_start = Instant::now();
-                packets.push(lock_output_packet(self.codec, pending)?);
-                timing.output_lock += lock_start.elapsed();
+                while pending_outputs.len() >= max_in_flight {
+                    let pending = pending_outputs.pop_front().ok_or_else(|| {
+                        BackendError::Backend(
+                            "missing pending output after encode submission".to_string(),
+                        )
+                    })?;
+                    let lock_start = Instant::now();
+                    let (packet, output) = lock_output_packet(self.codec, pending)?;
+                    timing.output_lock += lock_start.elapsed();
+                    packets.push(packet);
+                    reusable_outputs.push(output);
+                }
             }
         }
 
@@ -405,16 +433,19 @@ impl VideoEncoder for NvEncoderAdapter {
 
         while let Some(pending) = pending_outputs.pop_front() {
             let lock_start = Instant::now();
-            packets.push(lock_output_packet(self.codec, pending)?);
+            let (packet, output) = lock_output_packet(self.codec, pending)?;
             timing.output_lock += lock_start.elapsed();
+            packets.push(packet);
+            reusable_outputs.push(output);
         }
 
         if should_report_metrics() {
             eprintln!(
-                "[nv.encode] frames={}, packets={}, queue_peak={}, synth_ms={:.3}, upload_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}",
+                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}",
                 pending_frames.len(),
                 packets.len(),
                 output_depth_peak,
+                max_in_flight,
                 timing.synth.as_secs_f64() * 1_000.0,
                 timing.upload.as_secs_f64() * 1_000.0,
                 timing.sdk.as_secs_f64() * 1_000.0,
@@ -439,15 +470,26 @@ struct PendingOutput<'a> {
 
 fn lock_output_packet(
     codec: Codec,
-    mut pending: PendingOutput<'_>,
-) -> Result<EncodedPacket, BackendError> {
-    let lock = pending.output.lock().map_err(map_encode_error)?;
-    Ok(EncodedPacket {
-        codec,
-        data: lock.data().to_vec(),
-        pts_90k: pending.pts_90k,
-        is_keyframe: pending.is_keyframe,
-    })
+    pending: PendingOutput<'_>,
+) -> Result<(EncodedPacket, nvidia_video_codec_sdk::Bitstream<'_>), BackendError> {
+    let PendingOutput {
+        mut output,
+        pts_90k,
+        is_keyframe,
+    } = pending;
+    let data = {
+        let lock = output.lock().map_err(map_encode_error)?;
+        lock.data().to_vec()
+    };
+    Ok((
+        EncodedPacket {
+            codec,
+            data,
+            pts_90k,
+            is_keyframe,
+        },
+        output,
+    ))
 }
 
 fn to_decode_codec(codec: Codec) -> DecodeCodec {

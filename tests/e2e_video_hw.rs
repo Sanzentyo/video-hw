@@ -6,6 +6,8 @@ use std::{fs, path::PathBuf};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use rstest::rstest;
+#[cfg(feature = "backend-nvidia")]
+use video_hw::{BackendEncoderOptions, EncoderConfig, NvidiaEncoderOptions};
 use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -271,6 +273,44 @@ fn e2e_nv_backend_hevc_decode_sample() {
 
     assert!(decoded_frames > 0);
     assert_eq!(decoder.decode_summary().decoded_frames, decoded_frames);
+}
+
+#[cfg(feature = "backend-nvidia")]
+#[test]
+fn e2e_nv_backend_encode_accepts_backend_specific_options() {
+    let mut config = EncoderConfig::new(Codec::H264, 30, true);
+    config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
+        max_in_flight_outputs: 4,
+    });
+    let mut encoder = Encoder::with_config(BackendKind::Nvidia, config);
+
+    for i in 0..30 {
+        match encoder.push_frame(Frame {
+            width: 640,
+            height: 360,
+            pixel_format: None,
+            pts_90k: Some(i * 3000),
+        }) {
+            Ok(_) => {}
+            Err(video_hw::BackendError::UnsupportedConfig(message))
+                if message.contains("CUDA context") =>
+            {
+                eprintln!("skip: CUDA/NVENC unavailable: {message}");
+                return;
+            }
+            Err(err) => panic!("unexpected encode error: {err:?}"),
+        }
+    }
+
+    match encoder.flush() {
+        Ok(packets) => assert!(!packets.is_empty()),
+        Err(video_hw::BackendError::UnsupportedConfig(message))
+            if message.contains("CUDA context") =>
+        {
+            eprintln!("skip: CUDA/NVENC unavailable: {message}");
+        }
+        Err(err) => panic!("unexpected encode flush error: {err:?}"),
+    }
 }
 
 #[cfg(not(feature = "backend-nvidia"))]

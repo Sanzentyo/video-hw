@@ -66,6 +66,23 @@ cargo run --features backend-nvidia --example decode_annexb -- --backend nv --co
 
 # NVENC encode
 cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-h264.bin
+
+# NVENC encode (backend 固有パラメータ)
+cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --nv-max-in-flight 4 --output output/video-hw-h264.bin
+```
+
+Rust API から設定する場合:
+
+```rust
+use video_hw::{
+    BackendEncoderOptions, BackendKind, Codec, Encoder, EncoderConfig, NvidiaEncoderOptions,
+};
+
+let mut config = EncoderConfig::new(Codec::H264, 30, true);
+config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
+    max_in_flight_outputs: 4,
+});
+let _encoder = Encoder::with_config(BackendKind::Nvidia, config);
 ```
 
 ## ffmpeg 比較ベンチ
@@ -73,6 +90,10 @@ cargo run --features backend-nvidia --example encode_synthetic -- --backend nv -
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec h264 --release
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
+
+# 反復実行 + 統計（mean/p95/CV）
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --release --warmup 2 --repeat 9
 ```
 
 ## スクリプト実装方針

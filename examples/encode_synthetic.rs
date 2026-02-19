@@ -2,7 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use video_hw::{BackendKind, Codec, Encoder, Frame};
+use video_hw::{
+    BackendEncoderOptions, BackendKind, Codec, Encoder, EncoderConfig, Frame, NvidiaEncoderOptions,
+};
 
 #[derive(Parser, Debug)]
 #[command(about = "Encode synthetic frames")]
@@ -19,6 +21,9 @@ struct Args {
     frame_count: usize,
     #[arg(long, default_value = "./encoded-output.bin")]
     output: PathBuf,
+
+    #[arg(long)]
+    nv_max_in_flight: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -26,7 +31,15 @@ fn main() -> Result<()> {
     let codec = parse_codec(&args.codec)?;
     let backend = parse_backend(&args.backend)?;
 
-    let mut encoder = Encoder::new(backend, codec, args.fps, args.require_hardware);
+    let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
+    if matches!(backend, BackendKind::Nvidia) {
+        let mut options = NvidiaEncoderOptions::default();
+        if let Some(value) = args.nv_max_in_flight {
+            options.max_in_flight_outputs = value.clamp(1, 64);
+        }
+        config.backend_options = BackendEncoderOptions::Nvidia(options);
+    }
+    let mut encoder = Encoder::with_config(backend, config);
 
     let mut total_packets = 0usize;
     let mut out = Vec::new();
