@@ -19,6 +19,19 @@ pub struct DecoderConfig {
     pub codec: Codec,
     pub fps: i32,
     pub require_hardware: bool,
+    pub backend_options: BackendDecoderOptions,
+}
+
+impl DecoderConfig {
+    #[must_use]
+    pub fn new(codec: Codec, fps: i32, require_hardware: bool) -> Self {
+        Self {
+            codec,
+            fps,
+            require_hardware,
+            backend_options: BackendDecoderOptions::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,10 +55,22 @@ impl EncoderConfig {
 }
 
 #[derive(Debug, Clone, Default)]
+pub enum BackendDecoderOptions {
+    #[default]
+    Default,
+    Nvidia(NvidiaDecoderOptions),
+}
+
+#[derive(Debug, Clone, Default)]
 pub enum BackendEncoderOptions {
     #[default]
     Default,
     Nvidia(NvidiaEncoderOptions),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NvidiaDecoderOptions {
+    pub report_metrics: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +78,10 @@ pub struct NvidiaEncoderOptions {
     pub max_in_flight_outputs: usize,
     pub gop_length: Option<u32>,
     pub frame_interval_p: Option<i32>,
+    pub report_metrics: Option<bool>,
+    pub safe_lifetime_mode: Option<bool>,
+    pub enable_pipeline_scheduler: Option<bool>,
+    pub pipeline_queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +112,10 @@ impl Default for NvidiaEncoderOptions {
             max_in_flight_outputs: 6,
             gop_length: None,
             frame_interval_p: None,
+            report_metrics: None,
+            safe_lifetime_mode: None,
+            enable_pipeline_scheduler: None,
+            pipeline_queue_capacity: None,
         }
     }
 }

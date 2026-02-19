@@ -2,7 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
+use video_hw::{
+    BackendDecoderOptions, BackendKind, Codec, Decoder, DecoderConfig, NvidiaDecoderOptions,
+};
 
 #[derive(Parser, Debug)]
 #[command(about = "Decode Annex-B stream")]
@@ -19,6 +21,8 @@ struct Args {
     chunk_bytes: usize,
     #[arg(long, default_value_t = false)]
     require_hardware: bool,
+    #[arg(long)]
+    nv_report_metrics: Option<bool>,
 }
 
 fn main() -> Result<()> {
@@ -26,6 +30,13 @@ fn main() -> Result<()> {
     let codec = parse_codec(&args.codec)?;
     let backend = parse_backend(&args.backend)?;
     let input_path = args.input.unwrap_or_else(|| default_decode_input(codec));
+    let backend_options = if matches!(backend, BackendKind::Nvidia) {
+        BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
+            report_metrics: args.nv_report_metrics,
+        })
+    } else {
+        BackendDecoderOptions::Default
+    };
 
     let mut decoder = Decoder::new(
         backend,
@@ -33,6 +44,7 @@ fn main() -> Result<()> {
             codec,
             fps: args.fps,
             require_hardware: args.require_hardware,
+            backend_options,
         },
     );
 

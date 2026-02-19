@@ -14,9 +14,9 @@ use crate::bitstream::{AccessUnit, StatefulBitstreamAssembler};
 use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
-    BackendEncoderOptions, BackendError, CapabilityReport, Codec, ColorRequest, DecodeSummary,
-    DecoderConfig, EncodedPacket, Frame, NvidiaSessionConfig, SessionSwitchMode,
-    SessionSwitchRequest, VideoDecoder, VideoEncoder,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
+    ColorRequest, DecodeSummary, DecoderConfig, EncodedPacket, Frame, NvidiaSessionConfig,
+    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Default)]
@@ -113,30 +113,14 @@ impl SampleStats {
     }
 }
 
-fn should_report_metrics() -> bool {
-    std::env::var("VIDEO_HW_NV_METRICS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn should_use_safe_lifetime_mode() -> bool {
-    std::env::var("VIDEO_HW_NV_SAFE_LIFETIME")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn should_enable_pipeline_scheduler() -> bool {
-    std::env::var("VIDEO_HW_NV_PIPELINE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn pipeline_queue_capacity(max_in_flight_outputs: usize) -> usize {
-    std::env::var("VIDEO_HW_NV_PIPELINE_QUEUE")
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name)
         .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v.clamp(1, 1024))
-        .unwrap_or_else(|| (max_in_flight_outputs.saturating_mul(2)).clamp(4, 128))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.parse::<usize>().ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +139,7 @@ struct CopyStats {
 
 pub struct NvDecoderAdapter {
     config: DecoderConfig,
+    report_metrics: bool,
     assembler: StatefulBitstreamAssembler,
     packer: AnnexBPacker,
     decoder: Option<NvMetaDecoder>,
@@ -164,10 +149,18 @@ pub struct NvDecoderAdapter {
 
 impl NvDecoderAdapter {
     pub fn new(config: DecoderConfig) -> Self {
+        let report_metrics = match &config.backend_options {
+            BackendDecoderOptions::Nvidia(options) => options
+                .report_metrics
+                .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
+                .unwrap_or(false),
+            BackendDecoderOptions::Default => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
+        };
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
             packer: AnnexBPacker::default(),
             config,
+            report_metrics,
             decoder: None,
             next_pts_90k: 0,
             last_summary: DecodeSummary {
@@ -261,7 +254,7 @@ impl NvDecoderAdapter {
             jitter_samples,
         };
 
-        if should_report_metrics() {
+        if self.report_metrics {
             eprintln!(
                 "[nv.decode] access_units={}, frames={}, pack_ms={:.3}, sdk_ms={:.3}, map_ms={:.3}, pack_p95_ms={:.3}, pack_p99_ms={:.3}, sdk_p95_ms={:.3}, sdk_p99_ms={:.3}, map_p95_ms={:.3}, map_p99_ms={:.3}, queue_depth_peak={:.0}, queue_depth_p95={:.3}, queue_depth_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
                 access_units.len(),
@@ -368,6 +361,7 @@ pub struct NvEncoderAdapter {
     force_next_keyframe: bool,
     width: Option<usize>,
     height: Option<usize>,
+    report_metrics: bool,
     buffer_lifetime_mode: NvBufferLifetimeMode,
     pipeline_scheduler: Option<PipelineScheduler>,
 }
@@ -379,14 +373,30 @@ impl NvEncoderAdapter {
         require_hardware: bool,
         backend_options: BackendEncoderOptions,
     ) -> Self {
-        let (max_in_flight_outputs, gop_length, frame_interval_p) = match backend_options {
-            BackendEncoderOptions::Nvidia(options) => (
-                options.max_in_flight_outputs.clamp(1, 64),
-                options.gop_length,
-                options.frame_interval_p,
-            ),
-            BackendEncoderOptions::Default => (6, None, None),
+        let options = match backend_options {
+            BackendEncoderOptions::Nvidia(options) => options,
+            BackendEncoderOptions::Default => crate::NvidiaEncoderOptions::default(),
         };
+        let max_in_flight_outputs = options.max_in_flight_outputs.clamp(1, 64);
+        let gop_length = options.gop_length;
+        let frame_interval_p = options.frame_interval_p;
+        let report_metrics = options
+            .report_metrics
+            .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
+            .unwrap_or(false);
+        let safe_lifetime_mode = options
+            .safe_lifetime_mode
+            .or_else(|| env_bool("VIDEO_HW_NV_SAFE_LIFETIME"))
+            .unwrap_or(false);
+        let enable_pipeline_scheduler = options
+            .enable_pipeline_scheduler
+            .or_else(|| env_bool("VIDEO_HW_NV_PIPELINE"))
+            .unwrap_or(false);
+        let pipeline_queue_capacity = options
+            .pipeline_queue_capacity
+            .or_else(|| env_usize("VIDEO_HW_NV_PIPELINE_QUEUE"))
+            .map(|v| v.clamp(1, 1024))
+            .unwrap_or_else(|| (max_in_flight_outputs.saturating_mul(2)).clamp(4, 128));
         Self {
             codec,
             fps,
@@ -405,16 +415,16 @@ impl NvEncoderAdapter {
             force_next_keyframe: false,
             width: None,
             height: None,
-            buffer_lifetime_mode: if should_use_safe_lifetime_mode() {
+            report_metrics,
+            buffer_lifetime_mode: if safe_lifetime_mode {
                 NvBufferLifetimeMode::PerFrameSafe
             } else {
                 NvBufferLifetimeMode::ReusablePoolUnsafe
             },
-            pipeline_scheduler: if should_enable_pipeline_scheduler() {
-                let capacity = pipeline_queue_capacity(max_in_flight_outputs);
+            pipeline_scheduler: if enable_pipeline_scheduler {
                 Some(PipelineScheduler::new(
-                    NvidiaTransformAdapter::new(1, capacity),
-                    capacity,
+                    NvidiaTransformAdapter::new(1, pipeline_queue_capacity),
+                    pipeline_queue_capacity,
                 ))
             } else {
                 None
@@ -664,6 +674,7 @@ impl VideoEncoder for NvEncoderAdapter {
         let max_in_flight = self.max_in_flight_outputs;
         let fps = self.fps;
         let codec = self.codec;
+        let report_metrics = self.report_metrics;
         let session = self.ensure_session(width, height)?;
         if session.buffer_lifetime_mode == NvBufferLifetimeMode::PerFrameSafe {
             return Self::flush_safe_per_frame(
@@ -674,6 +685,7 @@ impl VideoEncoder for NvEncoderAdapter {
                 fps,
                 codec,
                 max_in_flight,
+                report_metrics,
             );
         }
         let input_layout = session.input_layout;
@@ -879,7 +891,7 @@ impl VideoEncoder for NvEncoderAdapter {
             Ok(())
         })?;
 
-        if should_report_metrics() {
+        if report_metrics {
             eprintln!(
                 "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),
@@ -935,6 +947,7 @@ impl NvEncoderAdapter {
         fps: i32,
         codec: Codec,
         max_in_flight: usize,
+        report_metrics: bool,
     ) -> Result<Vec<EncodedPacket>, BackendError> {
         let mut packets = Vec::with_capacity(pending_frames.len());
         let mut timing = StageTiming::default();
@@ -1074,7 +1087,7 @@ impl NvEncoderAdapter {
             queue_depth_samples.push_value(pending_outputs.len() as f64);
         }
 
-        if should_report_metrics() {
+        if report_metrics {
             eprintln!(
                 "[nv.encode.safe] frames={}, packets={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),

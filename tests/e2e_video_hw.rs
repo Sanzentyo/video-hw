@@ -6,9 +6,9 @@ use std::{fs, path::PathBuf};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use rstest::rstest;
+use video_hw::{BackendDecoderOptions, BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(feature = "backend-nvidia")]
 use video_hw::{BackendEncoderOptions, EncoderConfig, NvidiaEncoderOptions};
-use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     feature = "backend-nvidia"
@@ -32,6 +32,7 @@ fn decode_count(codec: Codec, file_name: &str, chunk_bytes: usize) -> usize {
             codec,
             fps: 30,
             require_hardware: false,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -58,6 +59,7 @@ fn decode_total_and_summary(codec: Codec, file_name: &str, chunk_bytes: usize) -
             codec,
             fps: 30,
             require_hardware: false,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -111,6 +113,7 @@ fn e2e_decode_flush_without_input_is_empty() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: false,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -152,6 +155,7 @@ fn e2e_vt_backend_reports_unsupported_when_unavailable() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: false,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -177,6 +181,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: true,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -243,6 +248,7 @@ fn e2e_nv_backend_hevc_decode_sample() {
             codec: Codec::Hevc,
             fps: 30,
             require_hardware: true,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
@@ -289,6 +295,7 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
         max_in_flight_outputs: 4,
         gop_length: None,
         frame_interval_p: None,
+        ..Default::default()
     });
     let mut encoder = Encoder::with_config(BackendKind::Nvidia, config);
 
@@ -347,6 +354,7 @@ fn e2e_nvidia_backend_requires_feature_when_disabled() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: true,
+            backend_options: BackendDecoderOptions::Default,
         },
     );
 
