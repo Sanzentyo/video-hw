@@ -29,6 +29,10 @@ struct Args {
     output: PathBuf,
     #[arg(long)]
     nv_max_in_flight: Option<usize>,
+    #[arg(long)]
+    nv_gop_length: Option<u32>,
+    #[arg(long)]
+    nv_frame_interval_p: Option<i32>,
 }
 
 fn main() -> Result<()> {
@@ -61,6 +65,8 @@ fn main() -> Result<()> {
         if let Some(value) = args.nv_max_in_flight {
             options.max_in_flight_outputs = value.clamp(1, 64);
         }
+        options.gop_length = args.nv_gop_length;
+        options.frame_interval_p = args.nv_frame_interval_p;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
     let mut encoder = Encoder::with_config(backend, config);
@@ -76,6 +82,7 @@ fn main() -> Result<()> {
             pixel_format: None,
             pts_90k: Some((i as i64) * 3000),
             argb: Some(input[start..end].to_vec()),
+            force_keyframe: false,
         };
         let packets = encoder.push_frame(frame)?;
         total_packets += packets.len();
@@ -119,4 +126,3 @@ fn parse_backend(raw: &str) -> Result<BackendKind> {
         other => anyhow::bail!("unsupported backend: {other}"),
     }
 }
-

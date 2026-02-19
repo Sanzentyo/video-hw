@@ -104,6 +104,10 @@ struct Args {
 
     #[arg(long)]
     nv_max_in_flight: Option<usize>,
+    #[arg(long)]
+    nv_gop_length: Option<u32>,
+    #[arg(long)]
+    nv_frame_interval_p: Option<i32>,
 
     #[arg(long, default_value_t = false)]
     verify: bool,
@@ -660,6 +664,12 @@ fn run_case(
             };
             if let Some(value) = args.nv_max_in_flight {
                 cmd.args(["--nv-max-in-flight", &value.to_string()]);
+            }
+            if let Some(value) = args.nv_gop_length {
+                cmd.args(["--nv-gop-length", &value.to_string()]);
+            }
+            if let Some(value) = args.nv_frame_interval_p {
+                cmd.args(["--nv-frame-interval-p", &value.to_string()]);
             }
             if args.include_internal_metrics {
                 cmd.env("VIDEO_HW_NV_METRICS", "1");

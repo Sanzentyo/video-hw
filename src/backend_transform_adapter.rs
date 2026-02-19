@@ -1,11 +1,11 @@
 use std::time::Duration;
 
+#[cfg(feature = "backend-nvidia")]
+use crate::cuda_transform::CudaNv12ToRgb;
 use crate::{
     BackendError, ColorRequest, Frame, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob,
     TransformResult, should_enqueue_transform,
 };
-#[cfg(feature = "backend-nvidia")]
-use crate::cuda_transform::CudaNv12ToRgb;
 
 #[derive(Debug, Clone)]
 pub enum DecodedUnit {
@@ -56,10 +56,10 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
         match (input, color) {
             (DecodedUnit::Nv12Cpu(frame), ColorRequest::Rgb8 | ColorRequest::Rgba8) => {
                 #[cfg(feature = "backend-nvidia")]
-                if let Some(cuda) = &self.cuda {
-                    if let Ok(rgb) = cuda.convert(&frame) {
-                        return Ok(Some(DecodedUnit::RgbCpu(rgb)));
-                    }
+                if let Some(cuda) = &self.cuda
+                    && let Ok(rgb) = cuda.convert(&frame)
+                {
+                    return Ok(Some(DecodedUnit::RgbCpu(rgb)));
                 }
                 self.dispatcher
                     .submit(TransformJob::Nv12ToRgb(frame))
@@ -121,6 +121,7 @@ mod tests {
             pixel_format: None,
             pts_90k: Some(0),
             argb: None,
+            force_keyframe: false,
         });
         let output = adapter
             .submit(input, ColorRequest::KeepNative, None)

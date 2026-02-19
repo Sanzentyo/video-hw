@@ -14,6 +14,8 @@ use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
     feature = "backend-nvidia"
 ))]
 use video_hw::{Encoder, Frame};
+#[cfg(feature = "backend-nvidia")]
+use video_hw::{NvidiaSessionConfig, SessionSwitchMode, SessionSwitchRequest};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 fn sample_path(name: &str) -> PathBuf {
@@ -129,6 +131,7 @@ fn e2e_encode_h264_generates_packets() {
             pixel_format: None,
             pts_90k: Some(i * 3000),
             argb: None,
+            force_keyframe: false,
         };
         let packets = encoder
             .push_frame(frame)
@@ -216,6 +219,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
                 pixel_format: None,
                 pts_90k: Some(i * 3000),
                 argb: None,
+                force_keyframe: false,
             })
             .expect("push_frame should succeed");
     }
@@ -283,6 +287,8 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
     let mut config = EncoderConfig::new(Codec::H264, 30, true);
     config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
         max_in_flight_outputs: 4,
+        gop_length: None,
+        frame_interval_p: None,
     });
     let mut encoder = Encoder::with_config(BackendKind::Nvidia, config);
 
@@ -293,6 +299,7 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
             pixel_format: None,
             pts_90k: Some(i * 3000),
             argb: None,
+            force_keyframe: false,
         }) {
             Ok(_) => {}
             Err(video_hw::BackendError::UnsupportedConfig(message))
@@ -314,6 +321,21 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
         }
         Err(err) => panic!("unexpected encode flush error: {err:?}"),
     }
+}
+
+#[cfg(feature = "backend-nvidia")]
+#[test]
+fn e2e_nv_backend_accepts_explicit_session_switch_request() {
+    let mut encoder = Encoder::new(BackendKind::Nvidia, Codec::H264, 30, true);
+    let result = encoder.request_session_switch(SessionSwitchRequest::Nvidia {
+        config: NvidiaSessionConfig {
+            gop_length: Some(60),
+            frame_interval_p: Some(1),
+            force_idr_on_activate: true,
+        },
+        mode: SessionSwitchMode::Immediate,
+    });
+    assert!(result.is_ok());
 }
 
 #[cfg(not(feature = "backend-nvidia"))]

@@ -98,6 +98,7 @@
 - 入出力 CPU タスク（ingress/egress）と GPU 本線（decode/encode submit-reap）を分離し、queue/backpressure で制御。
 - backend 差分（NVIDIA / VideoToolbox）は adapter 層に閉じ、上位契約は共通化。
 - 詳細: `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
+- セッション再設計: `docs/plan/NV_SESSION_ARCHITECTURE_REDESIGN_2026-02-19.md`
 
 ## 9. Issue 分解に使える具体タスク
 
@@ -109,14 +110,28 @@
   - `Frame.argb: Option<Vec<u8>>` を導入し、NVIDIA encode で実入力経路を接続
 - [ ] NV-P1-002: encode/decode セッション常駐化とバッファプール再利用
   - 進捗: CUDA context を `NvEncoderAdapter` 内で flush 跨ぎ再利用
-  - 未完: NVENC `Session` の完全常駐化（safe API の buffer lifetime 制約あり）
+  - 進捗: `NvidiaEncoderOptions` に `gop_length` / `frame_interval_p` を追加し、NVENC preset へ反映
+  - 進捗: `Frame.force_keyframe` を追加し、NVENC `FORCEIDR` フラグへマッピング
+  - 進捗: 明示的切替 API `request_session_switch(SessionSwitchRequest)` を追加（NVIDIA最小実装）
+  - 進捗: `NvEncodeSession`（`Pin<Box<Session>>` + reusable buffer pool）を導入し、flush 跨ぎで session/buffer を再利用
+  - 進捗: session 切替時は `Session::reconfigure` を優先（失敗時のみ再生成）
+  - 進捗: `pending_switch` を導入し、`OnNextKeyframe` 切替を明示的に保留適用
+  - 進捗: session generation（`active_generation` / `config_generation` / `next_generation`）を導入し、切替世代を明示管理
+  - 進捗: `PipelineScheduler` に generation 制御（stale generation drop）を追加し、`NvEncoderAdapter::sync_pipeline_generation` で接続
+  - 進捗: safe API lifetime 制約に対して `VIDEO_HW_NV_SAFE_LIFETIME=1` の per-frame buffer 経路を追加（unsafe transmute 再利用プールを回避可能）
+  - 進捗: safe 経路を flush 内ローカルプール再利用へ最適化し、h264 encode 1.011s -> 0.391s（repeat=1, verify）
+  - 状態: 本セッションでは進捗確認を行い、追加最適化は打ち止めとして次回へ持ち越し
+  - 未完: safe 経路のさらなる最適化（依然として再利用プール経路より不利）
+  - 設計: `docs/plan/NV_SESSION_ARCHITECTURE_REDESIGN_2026-02-19.md`
 - [x] NV-P1-003: ffmpeg 同条件比較ベンチ（同一入力・同一フレーム列）作成
   - `scripts/benchmark_ffmpeg_nv_precise.rs` に `--equal-raw-input` を追加
   - `examples/encode_raw_argb.rs` を追加（同一 ARGB 入力列を video-hw 側へ投入）
-- [ ] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
-  - 進捗: `src/pipeline_scheduler.rs` を追加（submit/reap + transform 分離）
-- [ ] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
-  - 進捗: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
+- [x] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
+  - 実装: `src/pipeline_scheduler.rs`（submit/reap + transform 分離）
+  - 実装: `src/nv_backend.rs` encode 本線前処理へオプション接続（`VIDEO_HW_NV_PIPELINE=1`）
+  - 実装: generation 同期（`NvEncoderAdapter::sync_pipeline_generation`）
+- [x] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
+  - 実装: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
 - [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
   - Phase 1 実装済み: `src/backend_transform_adapter.rs`
     - 共通 `BackendTransformAdapter` trait
@@ -132,8 +147,24 @@
     - 運用乖離のある「1回だけ入力 upload」最適化は採用しない
   - 追補（今回2）:
     - `src/pipeline_scheduler.rs` を追加し、NVIDIA adapter との submit/reap 駆動を実装
+  - 追補（今回3）:
+    - `src/nv_backend.rs` encode 本線で `PipelineScheduler` を利用可能化（Windows/NVIDIA 範囲）
+    - encode metrics に copy 計測（`input_copy_bytes`, `output_copy_bytes`）を追加
+  - 契約文書:
+    - `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
+  - 方針（保留）:
+    - VT 実体（Metal/CoreImage）は別セッションで NV 同等水準まで引き上げる
+    - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
+
+## 9.1 将来タスク（保留・次回以降）
+
+- `NV-P1-002` safe lifetime 追加最適化（本セッションでは打ち止め）
+- `NV-P1-006` VT 実体（Metal/CoreImage）の実装完了
+- 品質比較（PSNR/SSIM）と bitrate 比較の自動化
+- GPU ランナー常設 CI（Windows + NVIDIA）
+- `NV-P2-001` / `NV-P2-002` の運用段階タスク
 
 注記（2026-02-19 再計測）:
 - `output/benchmark-nv-precise-h264-1771496033.md`: encode mean は video-hw 0.303s / ffmpeg 0.221s（約 1.37x）
@@ -156,7 +187,7 @@
 注記（今回実施）:
 - `warmup 0 --repeat 1 --verify` で h264 を 1 回実施し、24.677s 外れ値は非再現（`output/benchmark-nv-precise-h264-1771514429.md`）。
 - `NV-P0-004` 実装後に `--warmup 1 --repeat 5 --include-internal-metrics` を h264/hevc で実行済み。
-- `NV-P1-004/005` の基盤として `src/pipeline.rs`（bounded queue）と `src/transform.rs`（CPU worker 変換）を追加済み。backend への本統合は次段。
+- `NV-P1-004/005` は `src/pipeline_scheduler.rs` と `src/nv_backend.rs`（`VIDEO_HW_NV_PIPELINE=1`）で backend 本統合まで実施済み。
 - レビュー指摘の反映:
   - スロット制（in-flight credits）を `src/pipeline.rs` に追加
   - KeepNative fast-path 判定を `src/transform.rs` に追加
@@ -184,6 +215,28 @@
   - `output/benchmark-nv-precise-hevc-1771514780.md`（repeat=3, verify）
   - `output/benchmark-nv-precise-h264-1771515974.md`（repeat=3, verify）
   - `output/benchmark-nv-precise-hevc-1771515974.md`（repeat=3, verify）
+  - `output/benchmark-nv-precise-h264-1771517285.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771517463.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771518104.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771519379.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771519756.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771520277.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-hevc-1771520285.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771520908.md`（repeat=1, verify, safe-lifetime）
+  - `output/benchmark-nv-precise-h264-1771520915.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771521536.md`（repeat=1, verify, safe-lifetime）
+  - `output/benchmark-nv-precise-h264-1771521543.md`（repeat=1, verify）
+  - `output/benchmark-nv-precise-h264-1771521720.md`（repeat=3, verify, equal-raw-input）
+  - `output/benchmark-nv-precise-h264-1771521734.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
+  - `output/benchmark-nv-precise-hevc-1771521747.md`（repeat=3, verify, equal-raw-input）
+  - `output/benchmark-nv-precise-hevc-1771521759.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
+  - `output/benchmark-nv-precise-h264-1771522777.md`（repeat=3, verify, equal-raw-input）
+  - `output/benchmark-nv-precise-hevc-1771522791.md`（repeat=3, verify, equal-raw-input）
+  - `output/benchmark-nv-precise-h264-1771522805.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
+  - `output/benchmark-nv-precise-hevc-1771522818.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
+  - `output/benchmark-nv-precise-h264-1771522938.md`（repeat=3, verify, equal-raw-input, 最新）
+  - `output/benchmark-nv-precise-h264-1771523551.md`（repeat=1, verify, equal-raw-input, pipeline-on）
+  - `output/benchmark-nv-precise-h264-1771523753.md`（repeat=1, verify, equal-raw-input, pipeline-on, 最新）
   - `output/benchmark-nv-precise-h264-1771515386.md`（repeat=3, verify, equal-raw-input）
   - `output/benchmark-nv-precise-hevc-1771515398.md`（repeat=3, verify, equal-raw-input）
   - mean（最新）:
@@ -192,5 +245,23 @@
   - mean（equal-raw-input）:
     - h264（repeat=3, verify, equal-raw-input）: video-hw decode 0.286s / encode 0.467s, ffmpeg decode 0.493s / encode 0.228s
     - hevc（repeat=3, verify, equal-raw-input）: video-hw decode 0.326s / encode 0.435s, ffmpeg decode 0.495s / encode 0.218s
+  - mean（repeat=1, verify）:
+    - h264: video-hw decode 0.294s / encode 0.310s, ffmpeg decode 0.523s / encode 0.203s
+    - hevc: video-hw decode 0.303s / encode 0.290s, ffmpeg decode 0.467s / encode 0.202s
+  - mean（repeat=1, verify, safe-lifetime）:
+    - h264: video-hw decode 0.364s / encode 1.011s, ffmpeg decode 0.535s / encode 0.218s
+  - mean（repeat=1, verify, safe-lifetime, local-pool 最適化後）:
+    - h264: video-hw decode 0.448s / encode 0.391s, ffmpeg decode 0.571s / encode 0.237s
+  - mean（repeat=3, verify, equal-raw-input, 実運用寄り）:
+    - h264（通常）: video-hw decode 0.300s / encode 0.487s, ffmpeg decode 0.509s / encode 0.229s
+    - h264（safe-lifetime）: video-hw decode 0.293s / encode 0.479s, ffmpeg decode 0.527s / encode 0.235s
+    - hevc（通常）: video-hw decode 0.304s / encode 0.455s, ffmpeg decode 0.495s / encode 0.227s
+    - hevc（safe-lifetime）: video-hw decode 0.292s / encode 0.458s, ffmpeg decode 0.505s / encode 0.233s
+  - mean（repeat=3, verify, equal-raw-input, 直列再計測）:
+    - h264（通常）: video-hw decode 0.288s / encode 0.475s, ffmpeg decode 0.494s / encode 0.229s
+    - h264（safe-lifetime）: video-hw decode 0.282s / encode 0.475s, ffmpeg decode 0.506s / encode 0.231s
+    - hevc（通常）: video-hw decode 0.315s / encode 0.446s, ffmpeg decode 0.498s / encode 0.230s
+    - hevc（safe-lifetime）: video-hw decode 0.325s / encode 0.444s, ffmpeg decode 0.484s / encode 0.234s
+    - h264（最新確認）: video-hw decode 0.286s / encode 0.457s, ffmpeg decode 0.480s / encode 0.224s
   - verify:
     - h264/hevc とも `ffprobe` + `ffmpeg -v error` 検証で decode=ok

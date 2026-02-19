@@ -148,6 +148,7 @@ impl NvMetaDecoder {
                 pixel_format: None,
                 pts_90k: Some(entry.timestamp),
                 argb: None,
+                force_keyframe: false,
             });
         }
         self.ensure_no_callback_error()?;

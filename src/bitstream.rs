@@ -40,9 +40,10 @@ impl StatefulBitstreamAssembler {
     }
 
     pub fn with_codec(codec: Codec) -> Self {
-        let mut this = Self::default();
-        this.codec = Some(codec);
-        this
+        Self {
+            codec: Some(codec),
+            ..Self::default()
+        }
     }
 
     pub fn push_chunk(
@@ -257,7 +258,7 @@ fn is_key_vcl(codec: Codec, nal: &[u8]) -> bool {
     }
     match codec {
         Codec::H264 => (nal[0] & 0x1f) == 5,
-        Codec::Hevc => matches!((nal[0] >> 1) & 0x3f, 16 | 17 | 18 | 19 | 20 | 21),
+        Codec::Hevc => matches!((nal[0] >> 1) & 0x3f, 16..=21),
     }
 }
 
