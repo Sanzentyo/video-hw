@@ -18,6 +18,8 @@
   - decode: call ごとの reaper thread 生成を除去し、metadata 集計をインライン化
   - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
   - encode: input/output buffer を in-flight 数に応じてプール再利用
+  - encode: `Frame.argb` を優先して入力 upload（未指定時のみ synthetic fallback）
+  - encode: CUDA context を flush 跨ぎで再利用
   - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 6 に更新）
   - metrics: decode/encode stage 時間 + queue/jitter + p95/p99 出力に対応
   - 設計追補: RGB 変換を非同期 worker へ切り出す分散パイプライン設計を追加
@@ -28,9 +30,12 @@
   - `src/transform.rs`: `ColorRequest::KeepNative` fast-path 判定を追加
   - `src/backend_transform_adapter.rs`: backend 差分 adapter（NV-P1-006 Phase 1）
     - `BackendTransformAdapter` trait / `DecodedUnit` 抽象
-    - `NvidiaTransformAdapter`: fast-path + NV12->RGB 非同期 dispatch
+    - `NvidiaTransformAdapter`: KeepNative fast-path + CUDA NV12->RGB 優先（失敗時 CPU worker fallback）
     - `VtTransformAdapter`: passthrough stub
+  - `src/cuda_transform.rs`: CUDA kernel（NVRTC）による NV12->RGB 変換実体
+  - `src/pipeline_scheduler.rs`: `BackendTransformAdapter` を使う submit/reap スケジューラ
   - `examples/transform_nv12_rgb.rs`: worker 分散動作の実行例
+  - `examples/encode_raw_argb.rs`: raw ARGB 入力で encode する実行例
   - `src/nv_backend.rs`: decode/encode の submit/reap 分離（worker thread）を導入
 - 増分 Annex-B parser + AU 組み立て
 - root examples
@@ -70,7 +75,7 @@
   - HEVC decode/encode も比較可能（異常終了問題は解消済み）
   - `NV-P0-004` 反映で decode が大幅改善（H264/HEVC ともに 0.3s 台）
   - encode は in-flight reap + bitstream 再利用で大幅改善
-  - synthetic 入力再利用化で encode が追加改善（H264/HEVC ともに 0.24s 台）
+  - encode は in-flight reap + buffer 再利用を中心に改善を継続中
   - decode ベンチ default chunk を `65536` に更新（HEVC decode は改善確認）
   - lock 回収最適化後の精密レポート:
     - `output/benchmark-nv-precise-h264-1771493200.md`
@@ -89,9 +94,31 @@
     - `output/benchmark-nv-precise-hevc-1771501008.md`
     - `output/benchmark-nv-precise-h264-1771505433.md`
     - `output/benchmark-nv-precise-hevc-1771505433.md`
+    - `output/benchmark-nv-precise-h264-1771513976.md`
+    - `output/benchmark-nv-precise-hevc-1771513976.md`
+    - `output/benchmark-nv-precise-h264-1771514429.md`（外れ値軽試行）
+    - `output/benchmark-nv-precise-h264-1771514448.md`（repeat=5）
+    - `output/benchmark-nv-precise-hevc-1771514450.md`（repeat=5）
+    - `output/benchmark-nv-precise-h264-1771514780.md`（repeat=3, verify）
+    - `output/benchmark-nv-precise-hevc-1771514780.md`（repeat=3, verify）
+    - `output/benchmark-nv-precise-h264-1771515974.md`（repeat=3, verify）
+    - `output/benchmark-nv-precise-hevc-1771515974.md`（repeat=3, verify）
+    - `output/benchmark-nv-precise-h264-1771515386.md`（repeat=3, verify, equal-raw-input）
+    - `output/benchmark-nv-precise-hevc-1771515398.md`（repeat=3, verify, equal-raw-input）
   - 最新 mean（warmup 1 / repeat 3 / verify）
-    - h264: video-hw decode 0.338s, encode 0.320s / ffmpeg decode 0.538s, encode 0.259s
-    - hevc: video-hw decode 0.371s, encode 0.321s / ffmpeg decode 0.536s, encode 0.232s
+    - h264: video-hw decode 0.365s, encode 0.324s / ffmpeg decode 0.546s, encode 0.265s
+    - hevc: video-hw decode 0.394s, encode 0.317s / ffmpeg decode 0.517s, encode 0.266s
+  - repeat=5（include-internal-metrics）
+    - h264: video-hw decode 0.289s, encode 0.271s / ffmpeg decode 0.588s, encode 0.229s
+    - hevc: video-hw decode 0.305s, encode 0.258s / ffmpeg decode 0.543s, encode 0.208s
+  - 外れ値軽試行（h264, warmup 0 / repeat 1 / verify）:
+    - `output/benchmark-nv-precise-h264-1771514429.md` では 24.677s ケースは非再現
+  - 最新（warmup 1 / repeat 3 / verify）:
+    - h264: video-hw decode 0.291s, encode 0.324s / ffmpeg decode 0.547s, encode 0.217s
+    - hevc: video-hw decode 0.312s, encode 0.316s / ffmpeg decode 0.536s, encode 0.254s
+  - 同一 raw 入力（warmup 1 / repeat 3 / verify / equal-raw-input）:
+    - h264: video-hw decode 0.286s, encode 0.467s / ffmpeg decode 0.493s, encode 0.228s
+    - hevc: video-hw decode 0.326s, encode 0.435s / ffmpeg decode 0.495s, encode 0.218s
   - verify: h264/hevc とも `ffprobe` + `ffmpeg -v error` で decode=ok
 
 ## 6. 残課題
@@ -102,14 +129,13 @@
 
 ## 7. 次セッションで着手すること（優先順）
 
-1. 外れ値（24.677s）再現条件を固定化
-   - `NV-P0-005` の再現スクリプトを作り、再現有無と条件を記録
-   - 成果物: `docs/status/` に外れ値切り分けメモを追加
-2. 分散パイプライン実装に着手
-   - `NV-P1-004/005` の本統合と `NV-P1-006` Phase 2（NVIDIA CUDA / VT Metal-CoreImage）を実装
+1. 分散パイプライン実装に着手
+   - `NV-P1-004/005` の backend 本統合（`PipelineScheduler` を `nv_backend` decode/encode 本線へ接続）
    - 成果物: adapter 経由で backend 実装差分を吸収しつつ decode/encode 本線を非ブロッキング化
-3. 公平比較のための raw frame 入力 API 設計に着手
-   - `NV-P1-001` の API 案を先に固め、`NV-P1-003` ベンチ設計へ接続
+2. 公平比較のための raw frame 入力 API 設計に着手
+   - `NV-P1-001` / `NV-P1-003` は実装済み。次は zero-copy 契約と copy 計測の明文化
+3. セッション常駐化の実装
+   - `NV-P1-002` として NVENC session 常駐化（safe API 制約の回避設計）を実装し、起動スパイクを評価
 
 ## 8. 関連文書
 

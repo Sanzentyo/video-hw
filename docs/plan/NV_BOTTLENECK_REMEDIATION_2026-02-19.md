@@ -7,18 +7,18 @@
 
 ## 2. 最新ベンチマークスナップショット
 
-### 2.1 最新比較（通常条件）
+### 2.1 最新比較（repeat=5, include-internal-metrics）
 | Codec | video-hw decode | video-hw encode | ffmpeg decode | ffmpeg encode |
 |---|---:|---:|---:|---:|
-| h264 | 2.958s | 0.745s | 0.485s | 0.203s |
-| hevc | 2.773s | 0.713s | 0.491s | 0.201s |
+| h264 | 0.289s | 0.271s | 0.588s | 0.229s |
+| hevc | 0.305s | 0.258s | 0.543s | 0.208s |
 
 ### 2.2 追加最新 h264（外れ値/条件差あり）
 | Codec | video-hw decode | video-hw encode | ffmpeg decode | ffmpeg encode | 扱い |
 |---|---:|---:|---:|---:|---|
 | h264 | 24.677s | 2.881s | 0.544s | 0.230s | 外れ値または実行条件差の可能性が高く、主要比較には直接採用しない |
 
-補足: 外れ値の再現条件（GPU 負荷、電源モード、ビルド差分、同時実行プロセス、入力条件）を別実験で切り分ける。
+補足: `warmup 0 --repeat 1 --verify` の軽試行（`output/benchmark-nv-precise-h264-1771514429.md`）では外れ値は再現せず、本計画では優先度を下げる。
 
 ## 3. ボトルネック仮説（コード/API 制約紐付け）
 
@@ -104,18 +104,34 @@
 - [x] NV-P0-001: stage 別計測（decode pack/decode map, encode submit/reap）を追加
 - [x] NV-P0-002: queue depth, jitter, p95/p99 を収集するメトリクス導入
 - [x] NV-P0-004: decode の RGB 経路を optional 化し、不要変換を停止
-- [ ] NV-P0-005: 外れ値条件（24.677s ケース）の再現スクリプト化と要因切り分け
-- [ ] NV-P1-001: Frame 契約の拡張案（raw frame payload / zero-copy 方針）設計
+- [x] NV-P0-005: 外れ値条件（24.677s ケース）の再現スクリプト化と要因切り分け（軽試行 1 回で非再現のため本件ではクローズ）
+- [x] NV-P1-001: Frame 契約の拡張案（raw frame payload / zero-copy 方針）設計
+  - `Frame.argb: Option<Vec<u8>>` を導入し、NVIDIA encode で実入力経路を接続
 - [ ] NV-P1-002: encode/decode セッション常駐化とバッファプール再利用
-- [ ] NV-P1-003: ffmpeg 同条件比較ベンチ（同一入力・同一フレーム列）作成
+  - 進捗: CUDA context を `NvEncoderAdapter` 内で flush 跨ぎ再利用
+  - 未完: NVENC `Session` の完全常駐化（safe API の buffer lifetime 制約あり）
+- [x] NV-P1-003: ffmpeg 同条件比較ベンチ（同一入力・同一フレーム列）作成
+  - `scripts/benchmark_ffmpeg_nv_precise.rs` に `--equal-raw-input` を追加
+  - `examples/encode_raw_argb.rs` を追加（同一 ARGB 入力列を video-hw 側へ投入）
 - [ ] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
+  - 進捗: `src/pipeline_scheduler.rs` を追加（submit/reap + transform 分離）
 - [ ] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
+  - 進捗: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
 - [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
   - Phase 1 実装済み: `src/backend_transform_adapter.rs`
     - 共通 `BackendTransformAdapter` trait
     - `DecodedUnit`（`MetadataOnly | Nv12Cpu | RgbCpu`）
     - NVIDIA 側: KeepNative fast-path + NV12->RGB 非同期 dispatch（`TransformDispatcher` 連携）
     - VT 側: パススルー stub（Metal/CoreImage 実装は未着手）
+  - Phase 2（部分）実装済み:
+    - `src/cuda_transform.rs` を追加（NVRTC + CUDA kernel による NV12->RGB）
+    - `NvidiaTransformAdapter` で CUDA 経路を優先使用し、失敗時のみ CPU worker fallback
+  - 追補（今回）:
+    - `src/contract.rs` の `Frame` に `argb: Option<Vec<u8>>` を追加
+    - `src/nv_backend.rs` encode で `frame.argb` を優先投入（未指定時のみ synthetic fallback）
+    - 運用乖離のある「1回だけ入力 upload」最適化は採用しない
+  - 追補（今回2）:
+    - `src/pipeline_scheduler.rs` を追加し、NVIDIA adapter との submit/reap 駆動を実装
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
 
@@ -131,15 +147,15 @@
 ## 10. 次セッション実行チェックリスト
 
 - [x] Step 1: `NV-P0-001`, `NV-P0-002` を先に着手（実装順固定）
-- [ ] Step 2: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --include-internal-metrics` を実行
-- [ ] Step 3: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --include-internal-metrics` を実行
+- [x] Step 2: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --include-internal-metrics` を実行
+- [x] Step 3: `cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --include-internal-metrics` を実行
 - [x] Step 4: `NV-P0-004`（decode RGB optional 化）を反映し、Step 2/3 を再実行
 - [x] Step 5: decode mean の before/after と ffmpeg 比を `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md` に追記
-- [ ] Step 6: `NV-P0-005`（外れ値再現スクリプト）を追加し、再現条件を `docs/status/` に記録
+- [x] Step 6: `NV-P0-005`（外れ値再現）は軽試行 1 回で非再現のため追加実装は保留でクローズ
 
 注記（今回実施）:
-- `warmup 0 --repeat 1` 条件で `--include-internal-metrics` のスモーク計測は実施済み。
-- `NV-P0-004` 実装後に `--warmup 1 --repeat 3 --include-internal-metrics --verify` を h264/hevc で実行済み（Step 2/3 の repeat=5 は未実施）。
+- `warmup 0 --repeat 1 --verify` で h264 を 1 回実施し、24.677s 外れ値は非再現（`output/benchmark-nv-precise-h264-1771514429.md`）。
+- `NV-P0-004` 実装後に `--warmup 1 --repeat 5 --include-internal-metrics` を h264/hevc で実行済み。
 - `NV-P1-004/005` の基盤として `src/pipeline.rs`（bounded queue）と `src/transform.rs`（CPU worker 変換）を追加済み。backend への本統合は次段。
 - レビュー指摘の反映:
   - スロット制（in-flight credits）を `src/pipeline.rs` に追加
@@ -147,6 +163,7 @@
   - decode/encode submit-reap 分離を `src/nv_backend.rs` に反映（thread 分離）
   - decode metadata 経路で call 単位 reaper thread 生成を除去（`src/nv_backend.rs`）
   - encode 入力/出力バッファを in-flight 数に応じてプール再利用（`src/nv_backend.rs`）
+  - （取り消し）synthetic 固定入力向けの「input 一度 upload」最適化は運用乖離のため撤回
 - 再計測（`--warmup 1 --repeat 3 --include-internal-metrics --verify`）:
   - `output/benchmark-nv-precise-h264-1771499558.md`
   - `output/benchmark-nv-precise-hevc-1771499564.md`
@@ -158,8 +175,22 @@
   - `output/benchmark-nv-precise-hevc-1771501008.md`
   - `output/benchmark-nv-precise-h264-1771505433.md`
   - `output/benchmark-nv-precise-hevc-1771505433.md`
+  - `output/benchmark-nv-precise-h264-1771513976.md`
+  - `output/benchmark-nv-precise-hevc-1771513976.md`
+  - `output/benchmark-nv-precise-h264-1771514429.md`（外れ値軽試行）
+  - `output/benchmark-nv-precise-h264-1771514448.md`（repeat=5）
+  - `output/benchmark-nv-precise-hevc-1771514450.md`（repeat=5）
+  - `output/benchmark-nv-precise-h264-1771514780.md`（repeat=3, verify）
+  - `output/benchmark-nv-precise-hevc-1771514780.md`（repeat=3, verify）
+  - `output/benchmark-nv-precise-h264-1771515974.md`（repeat=3, verify）
+  - `output/benchmark-nv-precise-hevc-1771515974.md`（repeat=3, verify）
+  - `output/benchmark-nv-precise-h264-1771515386.md`（repeat=3, verify, equal-raw-input）
+  - `output/benchmark-nv-precise-hevc-1771515398.md`（repeat=3, verify, equal-raw-input）
   - mean（最新）:
-    - h264: video-hw decode 0.338s / encode 0.320s, ffmpeg decode 0.538s / encode 0.259s
-    - hevc: video-hw decode 0.371s / encode 0.321s, ffmpeg decode 0.536s / encode 0.232s
+    - h264（repeat=3, verify）: video-hw decode 0.291s / encode 0.324s, ffmpeg decode 0.547s / encode 0.217s
+    - hevc（repeat=3, verify）: video-hw decode 0.312s / encode 0.316s, ffmpeg decode 0.536s / encode 0.254s
+  - mean（equal-raw-input）:
+    - h264（repeat=3, verify, equal-raw-input）: video-hw decode 0.286s / encode 0.467s, ffmpeg decode 0.493s / encode 0.228s
+    - hevc（repeat=3, verify, equal-raw-input）: video-hw decode 0.326s / encode 0.435s, ffmpeg decode 0.495s / encode 0.218s
   - verify:
     - h264/hevc とも `ffprobe` + `ffmpeg -v error` 検証で decode=ok

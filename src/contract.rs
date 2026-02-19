@@ -10,6 +10,7 @@ pub struct Frame {
     pub height: usize,
     pub pixel_format: Option<u32>,
     pub pts_90k: Option<i64>,
+    pub argb: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]

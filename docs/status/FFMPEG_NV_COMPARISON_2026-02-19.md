@@ -77,6 +77,15 @@
 - encode は現状、`video-hw` が synthetic ARGB 入力で、ffmpeg は `testsrc2` 入力を使用。
 - encode の完全公平比較には、`video-hw` 側へ同一入力データ経路（raw frame input API）の追加が必要。
 
+追補（実装済み）:
+- `examples/encode_raw_argb.rs` を追加し、`Frame.argb` で raw ARGB 入力を投入可能にした。
+- `scripts/benchmark_ffmpeg_nv_precise.rs` に `--equal-raw-input` を追加し、`ffmpeg` / `video-hw` の encode に同一 raw 入力列を供給可能にした。
+- 実測（repeat=3, verify, equal-raw-input）:
+  - h264: `output/benchmark-nv-precise-h264-1771515386.md`
+    - video-hw encode 0.467s / ffmpeg encode 0.228s
+  - hevc: `output/benchmark-nv-precise-hevc-1771515398.md`
+    - video-hw encode 0.435s / ffmpeg encode 0.218s
+
 ## 9. 次段の実装方針（分散パイプライン）
 
 - RGB 変換や resize などの CPU/GPU タスクは decode/encode 本線と別スレッドへオフロードする。
@@ -91,6 +100,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
 # 検証込み
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 3 --include-internal-metrics --verify
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 3 --include-internal-metrics --verify
+# 同一 raw 入力列での公平比較
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 3 --include-internal-metrics --verify --equal-raw-input
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 3 --include-internal-metrics --verify --equal-raw-input
 ```
 
 - 最新結果ファイル:

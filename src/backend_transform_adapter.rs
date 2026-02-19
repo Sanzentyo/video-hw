@@ -4,6 +4,8 @@ use crate::{
     BackendError, ColorRequest, Frame, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob,
     TransformResult, should_enqueue_transform,
 };
+#[cfg(feature = "backend-nvidia")]
+use crate::cuda_transform::CudaNv12ToRgb;
 
 #[derive(Debug, Clone)]
 pub enum DecodedUnit {
@@ -26,12 +28,16 @@ pub trait BackendTransformAdapter {
 #[derive(Debug)]
 pub struct NvidiaTransformAdapter {
     dispatcher: TransformDispatcher,
+    #[cfg(feature = "backend-nvidia")]
+    cuda: Option<CudaNv12ToRgb>,
 }
 
 impl NvidiaTransformAdapter {
     pub fn new(worker_count: usize, queue_capacity: usize) -> Self {
         Self {
             dispatcher: TransformDispatcher::new(worker_count, queue_capacity),
+            #[cfg(feature = "backend-nvidia")]
+            cuda: CudaNv12ToRgb::new().ok(),
         }
     }
 }
@@ -49,6 +55,12 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
 
         match (input, color) {
             (DecodedUnit::Nv12Cpu(frame), ColorRequest::Rgb8 | ColorRequest::Rgba8) => {
+                #[cfg(feature = "backend-nvidia")]
+                if let Some(cuda) = &self.cuda {
+                    if let Ok(rgb) = cuda.convert(&frame) {
+                        return Ok(Some(DecodedUnit::RgbCpu(rgb)));
+                    }
+                }
                 self.dispatcher
                     .submit(TransformJob::Nv12ToRgb(frame))
                     .map_err(|e| BackendError::TemporaryBackpressure(format!("{e:?}")))?;
@@ -108,6 +120,7 @@ mod tests {
             height: 36,
             pixel_format: None,
             pts_90k: Some(0),
+            argb: None,
         });
         let output = adapter
             .submit(input, ColorRequest::KeepNative, None)
@@ -122,6 +135,9 @@ mod tests {
         let output = adapter
             .submit(DecodedUnit::Nv12Cpu(nv12), ColorRequest::Rgb8, None)
             .unwrap();
+        if let Some(DecodedUnit::RgbCpu(_)) = output {
+            return;
+        }
         assert!(output.is_none());
         let reaped = adapter.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(reaped, Some(DecodedUnit::RgbCpu(_))));

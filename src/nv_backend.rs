@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
@@ -314,6 +314,7 @@ pub struct NvEncoderAdapter {
     fps: i32,
     require_hardware: bool,
     max_in_flight_outputs: usize,
+    cuda_ctx: Option<Arc<CudaContext>>,
     pending_frames: Vec<Frame>,
     width: Option<usize>,
     height: Option<usize>,
@@ -335,22 +336,32 @@ impl NvEncoderAdapter {
             fps,
             require_hardware,
             max_in_flight_outputs,
+            cuda_ctx: None,
             pending_frames: Vec::new(),
             width: None,
             height: None,
         }
     }
 
+    fn ensure_cuda_ctx(&mut self) -> Result<Arc<CudaContext>, BackendError> {
+        if let Some(ctx) = &self.cuda_ctx {
+            return Ok(Arc::clone(ctx));
+        }
+        let ctx = CudaContext::new(0).map_err(|err| {
+            BackendError::UnsupportedConfig(format!("failed to initialize CUDA context: {err}"))
+        })?;
+        self.cuda_ctx = Some(Arc::clone(&ctx));
+        Ok(ctx)
+    }
+
     fn make_session(
-        &self,
+        &mut self,
         width: usize,
         height: usize,
     ) -> Result<(nvidia_video_codec_sdk::Session, NvInputLayout, usize), BackendError> {
         let _ = self.require_hardware;
 
-        let cuda_ctx = CudaContext::new(0).map_err(|err| {
-            BackendError::UnsupportedConfig(format!("failed to initialize CUDA context: {err}"))
-        })?;
+        let cuda_ctx = self.ensure_cuda_ctx()?;
 
         let encoder = Encoder::initialize_with_cuda(cuda_ctx).map_err(map_encode_error)?;
         let encode_guid = to_encode_guid(self.codec);
@@ -472,7 +483,6 @@ impl VideoEncoder for NvEncoderAdapter {
             33.333
         };
         let mut last_output_pts_90k = None;
-        let input_bytes = make_synthetic_argb(width, height);
         let (ready_tx, ready_rx) = mpsc::channel::<PendingOutput<'_>>();
         let (reaped_tx, reaped_rx) = mpsc::channel::<Result<ReapedOutput<'_>, BackendError>>();
         let mut dispatched_outputs = 0usize;
@@ -510,18 +520,27 @@ impl VideoEncoder for NvEncoderAdapter {
                         .map_err(map_encode_error)?
                 };
                 let synth_start = Instant::now();
-                let _ = index;
                 let _ = input_layout;
+                let argb = frame
+                    .argb
+                    .clone()
+                    .unwrap_or_else(|| make_synthetic_argb(width, height, index));
+                if argb.len() != width.saturating_mul(height).saturating_mul(4) {
+                    return Err(BackendError::InvalidInput(format!(
+                        "argb payload size mismatch: expected {}, got {}",
+                        width.saturating_mul(height).saturating_mul(4),
+                        argb.len()
+                    )));
+                }
                 timing.synth += synth_start.elapsed();
                 {
                     let upload_start = Instant::now();
                     let mut lock = input.lock().map_err(map_encode_error)?;
                     unsafe {
-                        lock.write(&input_bytes);
+                        lock.write(&argb);
                     }
                     timing.upload += upload_start.elapsed();
                 }
-
                 let input_timestamp = frame
                     .pts_90k
                     .unwrap_or_else(|| (index as i64).saturating_mul(3_000))
@@ -742,9 +761,8 @@ fn update_jitter_samples(
     *last_pts_90k = Some(current);
 }
 
-fn make_synthetic_argb(width: usize, height: usize) -> Vec<u8> {
+fn make_synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
     let mut buffer = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-    let frame_index = 0usize;
     for y in 0..height {
         for x in 0..width {
             let offset = (y * width + x) * 4;

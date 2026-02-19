@@ -1,27 +1,32 @@
 use std::{fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     BackendEncoderOptions, BackendKind, Codec, Encoder, EncoderConfig, Frame, NvidiaEncoderOptions,
 };
 
 #[derive(Parser, Debug)]
-#[command(about = "Encode synthetic frames")]
+#[command(about = "Encode raw ARGB frames")]
 struct Args {
-    #[arg(long, default_value = "vt")]
+    #[arg(long, default_value = "nv")]
     backend: String,
     #[arg(long, default_value = "h264")]
     codec: String,
     #[arg(long, default_value_t = 30)]
     fps: i32,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     require_hardware: bool,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long)]
+    input_raw: PathBuf,
+    #[arg(long, default_value_t = 640)]
+    width: usize,
+    #[arg(long, default_value_t = 360)]
+    height: usize,
+    #[arg(long, default_value_t = 300)]
     frame_count: usize,
     #[arg(long, default_value = "./encoded-output.bin")]
     output: PathBuf,
-
     #[arg(long)]
     nv_max_in_flight: Option<usize>,
 }
@@ -30,6 +35,25 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let codec = parse_codec(&args.codec)?;
     let backend = parse_backend(&args.backend)?;
+
+    let frame_size = args
+        .width
+        .checked_mul(args.height)
+        .and_then(|px| px.checked_mul(4))
+        .context("frame size overflow")?;
+    let required_size = frame_size
+        .checked_mul(args.frame_count)
+        .context("required input size overflow")?;
+    let input = fs::read(&args.input_raw)
+        .with_context(|| format!("failed to read raw input: {}", args.input_raw.display()))?;
+    if input.len() < required_size {
+        anyhow::bail!(
+            "raw input too small: need {} bytes for {} frames, got {}",
+            required_size,
+            args.frame_count,
+            input.len()
+        );
+    }
 
     let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
     if matches!(backend, BackendKind::Nvidia) {
@@ -43,14 +67,15 @@ fn main() -> Result<()> {
 
     let mut total_packets = 0usize;
     let mut out = Vec::new();
-
     for i in 0..args.frame_count {
+        let start = i * frame_size;
+        let end = start + frame_size;
         let frame = Frame {
-            width: 640,
-            height: 360,
+            width: args.width,
+            height: args.height,
             pixel_format: None,
             pts_90k: Some((i as i64) * 3000),
-            argb: None,
+            argb: Some(input[start..end].to_vec()),
         };
         let packets = encoder.push_frame(frame)?;
         total_packets += packets.len();
@@ -65,17 +90,17 @@ fn main() -> Result<()> {
         out.extend_from_slice(&p.data);
     }
 
-    fs::write(&args.output, &out)?;
-
+    fs::write(&args.output, &out)
+        .with_context(|| format!("failed to write output: {}", args.output.display()))?;
     println!(
-        "packets={}, output_bytes={}, output={}, backend={}, codec={}",
+        "packets={}, output_bytes={}, output={}, backend={}, codec={}, input_raw={}",
         total_packets,
         out.len(),
         args.output.display(),
         args.backend,
-        args.codec
+        args.codec,
+        args.input_raw.display()
     );
-
     Ok(())
 }
 
@@ -94,3 +119,4 @@ fn parse_backend(raw: &str) -> Result<BackendKind> {
         other => anyhow::bail!("unsupported backend: {other}"),
     }
 }
+

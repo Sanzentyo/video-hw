@@ -128,6 +128,7 @@ fn e2e_encode_h264_generates_packets() {
             height: 360,
             pixel_format: None,
             pts_90k: Some(i * 3000),
+            argb: None,
         };
         let packets = encoder
             .push_frame(frame)
@@ -214,6 +215,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
                 height: 360,
                 pixel_format: None,
                 pts_90k: Some(i * 3000),
+                argb: None,
             })
             .expect("push_frame should succeed");
     }
@@ -290,6 +292,7 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
             height: 360,
             pixel_format: None,
             pts_90k: Some(i * 3000),
+            argb: None,
         }) {
             Ok(_) => {}
             Err(video_hw::BackendError::UnsupportedConfig(message))

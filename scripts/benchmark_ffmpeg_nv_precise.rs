@@ -93,6 +93,12 @@ struct Args {
     #[arg(long, default_value_t = 300)]
     frame_count: usize,
 
+    #[arg(long, default_value_t = 640)]
+    width: usize,
+
+    #[arg(long, default_value_t = 360)]
+    height: usize,
+
     #[arg(long, default_value_t = false)]
     include_internal_metrics: bool,
 
@@ -101,6 +107,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     verify: bool,
+
+    #[arg(long, default_value_t = false)]
+    equal_raw_input: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -220,9 +229,17 @@ fn main() -> Result<()> {
 
     let decode_bin = example_bin_path(profile, "decode_annexb");
     let encode_bin = example_bin_path(profile, "encode_synthetic");
+    let encode_raw_bin = example_bin_path(profile, "encode_raw_argb");
     let video_hw_output = output_dir.join(format!("video-hw-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-{}-precise.bin", args.codec.as_cli()));
+    let raw_input = output_dir.join(format!(
+        "benchmark-input-argb-{}x{}-{}f.raw",
+        args.width, args.height, args.frame_count
+    ));
     let null_sink = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    if args.equal_raw_input {
+        write_raw_argb_input(&raw_input, args.width, args.height, args.frame_count)?;
+    }
 
     let cases = [
         Case::VideoHwDecode,
@@ -250,8 +267,10 @@ fn main() -> Result<()> {
                 &args,
                 &decode_bin,
                 &encode_bin,
+                &encode_raw_bin,
                 &video_hw_output,
                 &ffmpeg_output,
+                &raw_input,
                 null_sink,
             )?;
             println!("  {:<16} {:.3}s", case.label(), run.seconds);
@@ -347,6 +366,9 @@ fn main() -> Result<()> {
     writeln!(&mut report, "codec: {}", args.codec.as_cli())?;
     writeln!(&mut report, "warmup: {}", args.warmup)?;
     writeln!(&mut report, "repeat: {}", args.repeat)?;
+    writeln!(&mut report, "width: {}", args.width)?;
+    writeln!(&mut report, "height: {}", args.height)?;
+    writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(
         &mut report,
         "internal_metrics: {}",
@@ -571,8 +593,10 @@ fn run_case(
     args: &Args,
     decode_bin: &Path,
     encode_bin: &Path,
+    encode_raw_bin: &Path,
     video_hw_output: &Path,
     ffmpeg_output: &Path,
+    raw_input: &Path,
     null_sink: &str,
 ) -> Result<CaseRun> {
     match case {
@@ -595,20 +619,45 @@ fn run_case(
             run_timed_command(cmd, !args.include_internal_metrics)
         }
         Case::VideoHwEncode => {
-            let mut cmd = Command::new(encode_bin);
-            cmd.args([
-                "--backend",
-                "nv",
-                "--codec",
-                args.codec.as_cli(),
-                "--fps",
-                "30",
-                "--frame-count",
-                &args.frame_count.to_string(),
-                "--require-hardware",
-                "--output",
-                &video_hw_output.to_string_lossy(),
-            ]);
+            let mut cmd = if args.equal_raw_input {
+                let mut c = Command::new(encode_raw_bin);
+                c.args([
+                    "--backend",
+                    "nv",
+                    "--codec",
+                    args.codec.as_cli(),
+                    "--fps",
+                    "30",
+                    "--frame-count",
+                    &args.frame_count.to_string(),
+                    "--width",
+                    &args.width.to_string(),
+                    "--height",
+                    &args.height.to_string(),
+                    "--input-raw",
+                    &raw_input.to_string_lossy(),
+                    "--require-hardware",
+                    "--output",
+                    &video_hw_output.to_string_lossy(),
+                ]);
+                c
+            } else {
+                let mut c = Command::new(encode_bin);
+                c.args([
+                    "--backend",
+                    "nv",
+                    "--codec",
+                    args.codec.as_cli(),
+                    "--fps",
+                    "30",
+                    "--frame-count",
+                    &args.frame_count.to_string(),
+                    "--require-hardware",
+                    "--output",
+                    &video_hw_output.to_string_lossy(),
+                ]);
+                c
+            };
             if let Some(value) = args.nv_max_in_flight {
                 cmd.args(["--nv-max-in-flight", &value.to_string()]);
             }
@@ -641,27 +690,80 @@ fn run_case(
                 Codec::Hevc => "hevc",
             };
             let mut cmd = Command::new("ffmpeg");
-            cmd.args([
-                "-y",
-                "-hide_banner",
-                "-benchmark",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=640x360:rate=30",
-                "-frames:v",
-                &args.frame_count.to_string(),
-                "-c:v",
-                args.codec.ffmpeg_encode_codec(),
-                "-preset",
-                "p1",
-                "-f",
-                muxer,
-                &ffmpeg_output.to_string_lossy(),
-            ]);
+            if args.equal_raw_input {
+                cmd.args([
+                    "-y",
+                    "-hide_banner",
+                    "-benchmark",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "argb",
+                    "-s:v",
+                    &format!("{}x{}", args.width, args.height),
+                    "-r",
+                    "30",
+                    "-i",
+                    &raw_input.to_string_lossy(),
+                    "-frames:v",
+                    &args.frame_count.to_string(),
+                    "-c:v",
+                    args.codec.ffmpeg_encode_codec(),
+                    "-preset",
+                    "p1",
+                    "-f",
+                    muxer,
+                    &ffmpeg_output.to_string_lossy(),
+                ]);
+            } else {
+                cmd.args([
+                    "-y",
+                    "-hide_banner",
+                    "-benchmark",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=640x360:rate=30",
+                    "-frames:v",
+                    &args.frame_count.to_string(),
+                    "-c:v",
+                    args.codec.ffmpeg_encode_codec(),
+                    "-preset",
+                    "p1",
+                    "-f",
+                    muxer,
+                    &ffmpeg_output.to_string_lossy(),
+                ]);
+            }
             run_timed_command(cmd, true)
         }
     }
+}
+
+fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
+    let frame_size = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(4))
+        .context("frame size overflow")?;
+    let total_size = frame_size
+        .checked_mul(frame_count)
+        .context("raw input total size overflow")?;
+    let mut out = vec![0_u8; total_size];
+
+    for frame_index in 0..frame_count {
+        let frame_base = frame_index * frame_size;
+        for y in 0..height {
+            for x in 0..width {
+                let offset = frame_base + (y * width + x) * 4;
+                out[offset] = ((x + frame_index) % 256) as u8;
+                out[offset + 1] = ((y + frame_index * 2) % 256) as u8;
+                out[offset + 2] = ((frame_index * 5) % 256) as u8;
+                out[offset + 3] = 255;
+            }
+        }
+    }
+    fs::write(path, out).with_context(|| format!("write raw input: {}", path.display()))?;
+    Ok(())
 }
 
 fn run_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {

@@ -503,6 +503,7 @@ fn summary_to_frames(count: usize, summary: &DecodeSummary) -> Vec<Frame> {
             height,
             pixel_format,
             pts_90k: None,
+            argb: None,
         })
         .collect()
 }

@@ -147,6 +147,7 @@ impl NvMetaDecoder {
                 height: height as usize,
                 pixel_format: None,
                 pts_90k: Some(entry.timestamp),
+                argb: None,
             });
         }
         self.ensure_no_callback_error()?;

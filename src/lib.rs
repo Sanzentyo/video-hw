@@ -1,11 +1,14 @@
 mod backend_transform_adapter;
 mod bitstream;
+#[cfg(feature = "backend-nvidia")]
+mod cuda_transform;
 mod contract;
 #[cfg(feature = "backend-nvidia")]
 mod nv_backend;
 #[cfg(feature = "backend-nvidia")]
 mod nv_meta_decoder;
 mod pipeline;
+mod pipeline_scheduler;
 mod transform;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -22,6 +25,7 @@ pub use pipeline::{
     BoundedQueueRx, BoundedQueueTx, InFlightCredits, QueueRecvError, QueueSendError, QueueStats,
     bounded_queue,
 };
+pub use pipeline_scheduler::PipelineScheduler;
 pub use transform::{
     ColorRequest, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob, TransformResult,
     make_argb_to_nv12_dummy, nv12_to_rgb24, should_enqueue_transform,
