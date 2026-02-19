@@ -7,6 +7,11 @@
 - root 単一 crate 構成へ整理済み
 - backend 切替は `BackendKind` + feature で運用
 - VideoToolbox の decode/encode は E2E まで通過
+- VideoToolbox の encode は実フレーム入力（ARGB）・PTS 反映・packet順安定化まで対応
+- VideoToolbox の encode session は flush 跨ぎ再利用に対応（寸法変更時のみ再生成）
+- VideoToolbox の `PipelineScheduler` は decode/encode 本線に接続済み（`VIDEO_HW_VT_PIPELINE=1`）
+- VideoToolbox の transform は CPU worker fallback 実装済み（`VtTransformAdapter`）
+- VideoToolbox の簡易メトリクス出力を追加（`VIDEO_HW_VT_METRICS=1`）
 - NVIDIA の decode/encode は `nvidia-video-codec-sdk` safe API で接続済み
 - `decode_annexb` / `encode_synthetic` の examples で実行確認済み
 - Criterion ベンチで `hw_optional` / `hw_required` の比較が可能
@@ -16,17 +21,18 @@
 
 ## 直近の優先タスク
 
-1. パイプライン分散化（CPU/GPU）
-   - `PipelineScheduler` による submit/reap/transform/egress の分離
-   - RGB 変換を非同期 worker（GPU優先、CPU fallback）へ移動
-2. E2E の NVIDIA 実機検証拡充
-   - Linux + GPU 環境で sample video ベースの回帰テストを追加
-3. CI 分離
+1. VT parity の残作業
+   - VT transform の GPU 実経路（Metal/CoreImage）を実装
+   - VT session switch + generation 制御を実装
+   - VT 指標を NV 同等粒度（queue/jitter/copy）へ拡張
+2. VT 比較運用の固定化
+   - ffmpeg VT 比較を `warmup/repeat/verify/equal-raw-input` で定常運用
+3. NV 保留項目の再開
+   - `NV-P1-002` safe lifetime 経路の追加最適化
+   - `VIDEO_HW_NV_PIPELINE=1` 経路の soak test
+4. CI 分離・安定化
    - macOS (VT) / Linux+GPU (NVIDIA) を分離して安定運用
-4. encode 比較の公平化
-   - `video-hw` に同一素材入力 encode 経路を追加し、`ffmpeg` 比較条件を統一
-5. VT parity セッション
-   - `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md` に沿って VT を NV 同等水準へ引き上げる
+   - GPU ランナー常設化
 
 ## 受け入れ条件
 

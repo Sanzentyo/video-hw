@@ -58,6 +58,16 @@ cargo test -- --nocapture
 cargo test --features backend-nvidia -- --nocapture
 ```
 
+## pipeline scheduler トグル
+
+- NVIDIA
+  - `VIDEO_HW_NV_PIPELINE=1` で有効化
+  - `VIDEO_HW_NV_PIPELINE_QUEUE=<N>` で queue 容量調整
+- VideoToolbox
+  - `VIDEO_HW_VT_PIPELINE=1` で有効化
+  - `VIDEO_HW_VT_PIPELINE_QUEUE=<N>` で queue 容量調整
+  - `VIDEO_HW_VT_METRICS=1` で decode/encode 計測ログを出力
+
 ## 実行例
 
 ```bash

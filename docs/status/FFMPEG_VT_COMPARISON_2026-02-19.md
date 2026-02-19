@@ -70,3 +70,33 @@
 - encode は現状、`video-hw` が `examples/encode_synthetic.rs`（合成フレーム入力）であり、
   ffmpeg の「同一素材入力 encode」と厳密に同条件ではない。
 - encode の完全公平比較には、`video-hw` 側へ「同一素材入力で encode」する経路追加が必要。
+
+## 8. 精密再計測（warmup/repeat/verify/equal-raw-input）
+
+実行コマンド:
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --release --warmup 1 --repeat 3 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --release --warmup 1 --repeat 3 --verify --equal-raw-input --include-internal-metrics
+```
+
+生成レポート:
+- `output/benchmark-vt-precise-h264-1771530053.md`
+- `output/benchmark-vt-precise-hevc-1771530065.md`
+
+結果（mean, 秒）:
+
+| Codec | video-hw decode | video-hw encode | ffmpeg decode | ffmpeg encode |
+|---|---:|---:|---:|---:|
+| H264 | 0.172 | 0.328 | 0.895 | 0.307 |
+| HEVC | 0.162 | 0.382 | 0.757 | 0.352 |
+
+所見:
+- decode は H264/HEVC とも `video-hw` が `ffmpeg videotoolbox` より高速（約4.7〜5.2x）。
+- encode は現条件で `video-hw` が `ffmpeg videotoolbox` より遅い（約1.07x）。
+- 反復のばらつきは小さく、`video-hw` は CV 2% 未満。
+
+検証メモ:
+- `ffmpeg` 出力は `ffprobe` + `ffmpeg -v error` で decode=ok。
+- `video-hw` 出力は現状 raw payload 形式のため `ffprobe` が直接解釈できない場合がある。
+  このためスクリプト側で「出力バイト数 > 0」を fallback 検証として扱っている。

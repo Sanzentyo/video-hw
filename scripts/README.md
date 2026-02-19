@@ -50,6 +50,17 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 - NVIDIA backend 固有パラメータ（`max_in_flight_outputs`）を変える場合は
   `--nv-max-in-flight <N>` を使用する（未指定時は default `6`）。
 
+### 4) VideoToolbox 精密ベンチ（反復 + 統計）
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --release --warmup 2 --repeat 9
+```
+
+- 生成レポート: `output/benchmark-vt-precise-<codec>-<epoch>.md`
+- `--verify` で `ffprobe` + `ffmpeg -v error` 検証を実行する。
+- `--equal-raw-input` で `video-hw` / `ffmpeg` encode に同一 raw ARGB 入力を供給する。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること

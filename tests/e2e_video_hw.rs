@@ -7,6 +7,10 @@ use std::{fs, path::PathBuf};
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use rstest::rstest;
 #[cfg(feature = "backend-nvidia")]
+use video_hw::NvidiaSessionConfig;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::VtSessionConfig;
+#[cfg(feature = "backend-nvidia")]
 use video_hw::{BackendEncoderOptions, EncoderConfig, NvidiaEncoderOptions};
 use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(any(
@@ -14,8 +18,11 @@ use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
     feature = "backend-nvidia"
 ))]
 use video_hw::{Encoder, Frame};
-#[cfg(feature = "backend-nvidia")]
-use video_hw::{NvidiaSessionConfig, SessionSwitchMode, SessionSwitchRequest};
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    feature = "backend-nvidia"
+))]
+use video_hw::{SessionSwitchMode, SessionSwitchRequest};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 fn sample_path(name: &str) -> PathBuf {
@@ -141,6 +148,72 @@ fn e2e_encode_h264_generates_packets() {
 
     let packets = encoder.flush().expect("flush should succeed");
     assert!(!packets.is_empty());
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_encode_h264_rejects_invalid_argb_payload() {
+    let mut encoder = Encoder::new(BackendKind::VideoToolbox, Codec::H264, 30, false);
+    let bad_frame = Frame {
+        width: 640,
+        height: 360,
+        pixel_format: None,
+        pts_90k: Some(0),
+        argb: Some(vec![0_u8; 16]),
+        force_keyframe: false,
+    };
+
+    let result = encoder.push_frame(bad_frame);
+    match result {
+        Err(video_hw::BackendError::InvalidInput(message)) => {
+            assert!(message.contains("argb payload size mismatch"));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_encode_h264_packets_are_pts_monotonic() {
+    let mut encoder = Encoder::new(BackendKind::VideoToolbox, Codec::H264, 30, false);
+
+    for i in 0..30 {
+        let frame = Frame {
+            width: 640,
+            height: 360,
+            pixel_format: None,
+            pts_90k: Some(i * 3000),
+            argb: None,
+            force_keyframe: i == 10,
+        };
+        let packets = encoder
+            .push_frame(frame)
+            .expect("push_frame should succeed");
+        assert!(packets.is_empty());
+    }
+
+    let packets = encoder.flush().expect("flush should succeed");
+    assert!(!packets.is_empty());
+
+    let pts_list: Vec<i64> = packets.iter().filter_map(|p| p.pts_90k).collect();
+    assert!(!pts_list.is_empty(), "encoded packets must include pts");
+    assert!(
+        pts_list.windows(2).all(|w| w[0] <= w[1]),
+        "packet pts must be monotonic non-decreasing: {pts_list:?}"
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_accepts_explicit_session_switch_request() {
+    let mut encoder = Encoder::new(BackendKind::VideoToolbox, Codec::H264, 30, false);
+    let result = encoder.request_session_switch(SessionSwitchRequest::VideoToolbox {
+        config: VtSessionConfig {
+            force_keyframe_on_activate: true,
+        },
+        mode: SessionSwitchMode::Immediate,
+    });
+    assert!(result.is_ok());
 }
 
 #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]

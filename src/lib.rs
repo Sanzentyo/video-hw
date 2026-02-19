@@ -20,7 +20,7 @@ pub use backend_transform_adapter::{
 pub use contract::{
     BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
     EncodedPacket, EncoderConfig, Frame, NvidiaEncoderOptions, NvidiaSessionConfig,
-    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
+    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder, VtSessionConfig,
 };
 pub use pipeline::{
     BoundedQueueRx, BoundedQueueTx, InFlightCredits, QueueRecvError, QueueSendError, QueueStats,

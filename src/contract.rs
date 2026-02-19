@@ -70,9 +70,18 @@ pub struct NvidiaSessionConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct VtSessionConfig {
+    pub force_keyframe_on_activate: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum SessionSwitchRequest {
     Nvidia {
         config: NvidiaSessionConfig,
+        mode: SessionSwitchMode,
+    },
+    VideoToolbox {
+        config: VtSessionConfig,
         mode: SessionSwitchMode,
     },
 }

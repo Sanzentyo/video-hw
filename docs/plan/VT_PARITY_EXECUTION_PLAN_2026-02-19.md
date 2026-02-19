@@ -20,46 +20,45 @@ VideoToolbox backend へ同等レベルで適用する。
 
 1. scheduler 本統合
 - NV: `VIDEO_HW_NV_PIPELINE=1` で encode 本線前処理まで接続済み
-- VT: adapter は stub で、本線統合は未完
+- VT: decode/encode とも `PipelineScheduler` 接続済み（`VIDEO_HW_VT_PIPELINE=1`）
 
 2. transform adapter 実体
 - NV: CUDA 優先 + CPU fallback
-- VT: passthrough stub（Metal/CoreImage 実装未着手）
+- VT: CPU worker fallback 実装済み（NV12->RGB）
+- VT: GPU 実経路（Metal/CoreImage）は未着手
 
 3. session / generation 運用
 - NV: `pending_switch` + generation 制御を実装
-- VT: 同等制御の実装・検証が不足
+- VT: encode session 再利用は実装済み（flush 跨ぎ）
+- VT: encode の session switch + generation 制御は実装済み（`Immediate` / `OnNextKeyframe` / `DrainThenSwap`）
 
 4. 比較基盤
 - NV: ffmpeg 比較（verify/equal-raw-input）を継続運用
-- VT: 比較レポートはあるが、NV と同粒度の継続計測基盤に未到達
+- VT: `VIDEO_HW_VT_METRICS=1` による簡易計測を追加済み
+- VT: encode/decode とも queue/jitter/copy 指標を追加済み
 
 ## 4. VT 同等化タスク（NV 1対1対応）
 
 | NV 側項目 | VT 側対応タスク | 完了条件 |
 |---|---|---|
-| NV-P1-004 | `PipelineScheduler` を VT decode/encode 本線へ接続 | submit/reap の非ブロッキング動作を確認 |
-| NV-P1-005 | VT TransformLayer（GPU優先 + CPU fallback） | callback thread を詰まらせない |
-| NV-P1-006 | `VtTransformAdapter` 実体（Metal/CoreImage） | stub を廃止し実経路化 |
-| session generation | VT 側 session switch + generation 制御 | `OnNextKeyframe` / `Immediate` の整合 |
-| metrics parity | VT encode/decode に stage + queue + jitter + copy 指標 | NV と同様の比較軸を提供 |
+| NV-P1-004 | `PipelineScheduler` を VT decode/encode 本線へ接続 | 完了（`VIDEO_HW_VT_PIPELINE=1`） |
+| NV-P1-005 | VT TransformLayer（GPU優先 + CPU fallback） | CPU fallback 完了、GPU 実経路が未完 |
+| NV-P1-006 | `VtTransformAdapter` 実体（Metal/CoreImage） | CPU fallback 完了、Metal/CoreImage が未完 |
+| session generation | VT 側 session switch + generation 制御 | 完了（encode 経路） |
+| metrics parity | VT encode/decode に stage + queue + jitter + copy 指標 | 完了（`VIDEO_HW_VT_METRICS=1`） |
 | benchmark parity | ffmpeg VT 比較スクリプトの repeat/verify/equal-input 運用 | h264/hevc で継続再現可能 |
 
 ## 5. 実装フェーズ（VTセッション）
 
-1. VT-P0: 計測基盤の同等化
-- VT 経路に stage/queue/jitter/copy 指標を追加
-- 既存 NV レポートとの比較軸を一致させる
-
-2. VT-P1: パイプライン本統合
-- `PipelineScheduler` を VT backend 本線へ接続
-- generation 同期を session switch と連動
-
-3. VT-P2: Transform 実体化
+1. VT-P2: Transform 実体化（未完）
 - `VtTransformAdapter` に Metal/CoreImage 経路を実装
 - CPU fallback を worker で維持し callback thread を保護
 
-4. VT-P3: 検証固定化
+2. VT-P4: 計測基盤の同等化（完了）
+- VT 経路に queue/jitter/copy 指標を追加
+- 既存 NV レポートとの比較軸を一致させる
+
+3. VT-P5: 検証固定化
 - ffmpeg VT 比較を `warmup/repeat/verify/equal-raw-input` で定常化
 - soak test を定期実行できるスクリプトを整備
 
@@ -82,7 +81,7 @@ VideoToolbox backend へ同等レベルで適用する。
 1. `cargo check --all-targets --features backend-vt`
 2. `cargo test --all-targets --features backend-vt -- --nocapture`
 3. VT 比較レポート更新（`docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`）
-4. VT-P0 -> VT-P1 の順で着手
+4. VT-P2 -> VT-P5 の順で着手
 
 ## 9. 関連
 

@@ -39,14 +39,22 @@
   - `src/pipeline.rs`: in-flight credit 制御（スロット制）
   - `src/transform.rs`: `TransformDispatcher`（NV12->RGB を CPU worker で非同期実行）
   - `src/transform.rs`: `ColorRequest::KeepNative` fast-path 判定を追加
-  - `src/backend_transform_adapter.rs`: backend 差分 adapter（NV-P1-006 Phase 1）
+  - `src/backend_transform_adapter.rs`: backend 差分 adapter（NV-P1-006）
     - `BackendTransformAdapter` trait / `DecodedUnit` 抽象
     - `NvidiaTransformAdapter`: KeepNative fast-path + CUDA NV12->RGB 優先（失敗時 CPU worker fallback）
-    - `VtTransformAdapter`: passthrough stub
+    - `VtTransformAdapter`: CPU worker fallback を実装（NV12->RGB）
   - `src/cuda_transform.rs`: CUDA kernel（NVRTC）による NV12->RGB 変換実体
   - `src/pipeline_scheduler.rs`: `BackendTransformAdapter` を使う submit/reap スケジューラ
   - `src/pipeline_scheduler.rs`: generation 制御（`submit_with_generation` / `set_generation` / stale drop）を追加
   - `src/nv_backend.rs`: `PipelineScheduler` 連携前処理（KeepNative fast-path）を接続
+  - `src/vt_backend.rs`: `PipelineScheduler` 連携前処理（decode/encode）を接続
+  - `src/vt_backend.rs`: `VIDEO_HW_VT_PIPELINE` / `VIDEO_HW_VT_PIPELINE_QUEUE` トグルを追加
+  - `src/vt_backend.rs`: `VIDEO_HW_VT_METRICS` で decode/encode 計測ログを追加
+  - `src/vt_backend.rs`: VT decode/encode 計測に queue/jitter/copy 指標を追加
+  - `src/vt_backend.rs`: VT encode session の flush 跨ぎ再利用を実装（解像度変更時のみ再生成）
+  - `src/vt_backend.rs`: VT encode の session switch + generation 制御を実装
+  - `src/vt_backend.rs`: VT encode packet の keyframe 判定を payload 解析ベースへ更新
+  - `src/vt_backend.rs`: VT encode packet 出力順を frame index 基準で安定化
   - `examples/transform_nv12_rgb.rs`: worker 分散動作の実行例
   - `examples/encode_raw_argb.rs`: raw ARGB 入力で encode する実行例
   - `src/nv_backend.rs`: decode/encode の submit/reap 分離（worker thread）を導入
@@ -63,10 +71,12 @@
 
 - `cargo fmt --all`: pass
 - `cargo check`: pass
-- `cargo check --features backend-nvidia`: pass
 - `cargo test -- --nocapture`: pass
-- `cargo test --features backend-nvidia -- --nocapture`: pass
-  - NVIDIA E2E は CUDA/NVDEC/NVENC が使えない環境では skip 分岐あり
+- `cargo test --features backend-vt -- --nocapture`: pass
+- `cargo bench --features backend-vt --bench decode_bench`: pass（ケースごとの直列実行で完走）
+- `cargo check --all-targets --features backend-nvidia`: fail（実行環境依存）
+  - `nvcc --version` が見つからない
+  - `NVIDIA_VIDEO_CODEC_SDK_PATH` 未設定で `libnvidia-encode` / `libnvcuvid` 未検出
 
 ## 4. NVIDIA 依存固定
 
@@ -174,13 +184,31 @@
     - h264（最新確認）: video-hw decode 0.286s, encode 0.457s / ffmpeg decode 0.480s, encode 0.224s
   - verify: h264/hevc とも `ffprobe` + `ffmpeg -v error` で decode=ok
 
+- VT 精密計測スクリプト: `scripts/benchmark_ffmpeg_vt_precise.rs`（cargo script）
+  - `warmup/repeat/verify/equal-raw-input` をサポート
+  - 直近再計測（warmup 1 / repeat 3 / verify / equal-raw-input）:
+    - h264: video-hw decode 0.172s, encode 0.328s / ffmpeg decode 0.895s, encode 0.307s
+    - hevc: video-hw decode 0.162s, encode 0.382s / ffmpeg decode 0.757s, encode 0.352s
+  - レポート:
+    - `output/benchmark-vt-precise-h264-1771530053.md`
+    - `output/benchmark-vt-precise-hevc-1771530065.md`
+  - 注意:
+    - `video-hw` 出力は raw payload 形式のため、`ffprobe` が直接解釈できない場合がある
+    - スクリプトでは fallback として `output_bytes > 0` の検証を併用
+
 ## 6. 残課題
 
-- CI での GPU ランナー常設（Windows + NVIDIA）
-- encode の品質比較（PSNR/SSIM）とビットレート比較の自動化
-- encode 公平比較のための raw frame 入力 API の整理（契約は文書化済み）
-- `NV-P1-002`: safe lifetime 経路の追加最適化（本セッションでは進捗確認のうえ打ち止め）
-- VT backend の NV 同等化（別セッションで集中的に実施）
+1. VT parity の未完了項目
+   - VT transform の GPU 実経路（Metal/CoreImage）実装
+2. VT 比較運用の固定化
+   - ffmpeg VT 比較を `warmup/repeat/verify/equal-raw-input` で定常運用
+   - 継続計測レポートを NV と同一フォーマットへ統一
+3. NV 運用タスク
+   - `NV-P1-002` safe lifetime 経路の追加最適化（保留中の再開）
+   - `VIDEO_HW_NV_PIPELINE=1` 経路の soak test（長時間・複数条件）
+4. 共通運用基盤
+   - CI での GPU ランナー常設（Windows/Linux + NVIDIA）
+   - encode 品質比較（PSNR/SSIM）と bitrate 比較の自動化
 
 ## 6.1 将来タスク（保留）
 
@@ -192,15 +220,14 @@
 
 ## 7. 次セッションで着手すること（優先順）
 
-1. `NV-P1-004/005` backend 本統合の運用検証
-   - `VIDEO_HW_NV_PIPELINE=1` 経路の soak test（長時間・複数条件）を実施
-2. raw frame 入力 API の契約具体化
-   - zero-copy 段階案に沿って `Frame` 所有形態を拡張（`Arc<[u8]>` など）
-3. `NV-P1-002` は本セッションでいったん打ち止め
-   - safe lifetime の追加最適化は次回に再開
-4. VT backend を NV 同等水準へ引き上げる専用セッションを開始
-   - 目標: decode/encode の submit/reap 分離、transform adapter 本実装、ffmpeg 比較基盤を NV と同等レベルへ揃える
-   - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
+1. VT transform GPU 実経路（Metal/CoreImage）を実装
+   - `VtTransformAdapter` の CPU fallback は維持し、GPU 優先化する
+2. VT session switch + generation 制御を追加
+   - NV と同じ操作契約で `Immediate` / `OnNextKeyframe` を揃える
+3. VT 比較基盤を固定化
+   - `ffmpeg` 比較を `warmup/repeat/verify/equal-raw-input` で継続運用
+4. NV 保留タスクを再開
+   - `NV-P1-002` safe lifetime の追加最適化 + pipeline-on soak test
 
 ## 8. 関連文書
 

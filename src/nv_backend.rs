@@ -911,8 +911,15 @@ impl VideoEncoder for NvEncoderAdapter {
         &mut self,
         request: SessionSwitchRequest,
     ) -> Result<(), BackendError> {
-        let SessionSwitchRequest::Nvidia { config, mode } = request;
-        self.apply_nvidia_session_switch(config, mode)
+        match request {
+            SessionSwitchRequest::Nvidia { config, mode } => {
+                self.apply_nvidia_session_switch(config, mode)
+            }
+            SessionSwitchRequest::VideoToolbox { .. } => Err(BackendError::UnsupportedConfig(
+                "VideoToolbox session switch request is not supported by NVIDIA backend"
+                    .to_string(),
+            )),
+        }
     }
 
     fn pipeline_generation_hint(&self) -> Option<u64> {
