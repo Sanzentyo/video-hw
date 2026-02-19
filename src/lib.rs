@@ -1,7 +1,7 @@
 mod bitstream;
 mod contract;
 #[cfg(feature = "backend-nvidia")]
-mod nvidia_backend;
+mod nv_backend;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;
@@ -40,7 +40,7 @@ impl Decoder {
             BackendKind::Nvidia => {
                 #[cfg(feature = "backend-nvidia")]
                 {
-                    Box::new(nvidia_backend::NvidiaDecoderAdapter::new(config.codec))
+                    Box::new(nv_backend::NvDecoderAdapter::new(config))
                 }
                 #[cfg(not(feature = "backend-nvidia"))]
                 {
@@ -102,8 +102,11 @@ impl Encoder {
             BackendKind::Nvidia => {
                 #[cfg(feature = "backend-nvidia")]
                 {
-                    let _ = (codec, fps, require_hardware);
-                    Box::new(nvidia_backend::NvidiaEncoderAdapter::new())
+                    Box::new(nv_backend::NvEncoderAdapter::with_config(
+                        codec,
+                        fps,
+                        require_hardware,
+                    ))
                 }
                 #[cfg(not(feature = "backend-nvidia"))]
                 {

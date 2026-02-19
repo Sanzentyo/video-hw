@@ -1,7 +1,17 @@
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    feature = "backend-nvidia"
+))]
 use std::{fs, path::PathBuf};
 
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use rstest::rstest;
-use video_hw::{BackendKind, Codec, Decoder, DecoderConfig, Encoder, Frame};
+use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    feature = "backend-nvidia"
+))]
+use video_hw::{Encoder, Frame};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 fn sample_path(name: &str) -> PathBuf {
@@ -154,7 +164,7 @@ fn e2e_vt_backend_reports_unsupported_when_unavailable() {
 
 #[cfg(feature = "backend-nvidia")]
 #[test]
-fn e2e_nvidia_backend_reports_unwired_bridge() {
+fn e2e_nv_backend_decode_and_encode_work() {
     let mut decoder = Decoder::new(
         BackendKind::Nvidia,
         DecoderConfig {
@@ -168,28 +178,99 @@ fn e2e_nvidia_backend_reports_unwired_bridge() {
         .query_capability(Codec::H264)
         .expect("capability query should not fail");
     assert!(capability.decode_supported);
+    assert!(capability.encode_supported);
     assert!(capability.hardware_acceleration);
 
-    match decoder.push_bitstream_chunk(&[0, 0, 1], Some(0)) {
-        Err(video_hw::BackendError::UnsupportedConfig(message)) => {
-            assert!(message.contains("nvidia-sdk bridge is not wired yet"));
+    let data = fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sample-videos")
+            .join("sample-10s.h264"),
+    )
+    .expect("sample bitstream should exist");
+    let mut decoded_frames = 0usize;
+    for chunk in data.chunks(4096) {
+        match decoder.push_bitstream_chunk(chunk, None) {
+            Ok(frames) => decoded_frames += frames.len(),
+            Err(video_hw::BackendError::UnsupportedConfig(message))
+                if message.contains("CUDA context") =>
+            {
+                eprintln!("skip: CUDA/NVDEC unavailable: {message}");
+                return;
+            }
+            Err(err) => panic!("unexpected decode error: {err:?}"),
         }
-        other => panic!("unexpected result: {other:?}"),
     }
+    decoded_frames += decoder.flush().expect("flush should succeed").len();
+    assert!(decoded_frames > 0);
+    assert_eq!(decoder.decode_summary().decoded_frames, decoded_frames);
 
     let mut encoder = Encoder::new(BackendKind::Nvidia, Codec::H264, 30, true);
-    let frame = Frame {
-        width: 640,
-        height: 360,
-        pixel_format: None,
-        pts_90k: Some(0),
-    };
-    match encoder.push_frame(frame) {
-        Err(video_hw::BackendError::UnsupportedConfig(message)) => {
-            assert!(message.contains("nvidia-sdk bridge is not wired yet"));
-        }
-        other => panic!("unexpected result: {other:?}"),
+    for i in 0..30 {
+        encoder
+            .push_frame(Frame {
+                width: 640,
+                height: 360,
+                pixel_format: None,
+                pts_90k: Some(i * 3000),
+            })
+            .expect("push_frame should succeed");
     }
+    match encoder.flush() {
+        Ok(packets) => assert!(!packets.is_empty()),
+        Err(video_hw::BackendError::UnsupportedConfig(message))
+            if message.contains("CUDA context") =>
+        {
+            eprintln!("skip: CUDA/NVENC unavailable: {message}");
+        }
+        Err(err) => panic!("unexpected encode error: {err:?}"),
+    }
+}
+
+#[cfg(feature = "backend-nvidia")]
+#[test]
+fn e2e_nv_backend_hevc_decode_sample() {
+    let mut decoder = Decoder::new(
+        BackendKind::Nvidia,
+        DecoderConfig {
+            codec: Codec::Hevc,
+            fps: 30,
+            require_hardware: true,
+        },
+    );
+
+    let data = fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sample-videos")
+            .join("sample-10s.h265"),
+    )
+    .expect("sample bitstream should exist");
+    let mut decoded_frames = 0usize;
+    for chunk in data.chunks(4096) {
+        match decoder.push_bitstream_chunk(chunk, None) {
+            Ok(frames) => decoded_frames += frames.len(),
+            Err(video_hw::BackendError::UnsupportedConfig(message))
+                if message.contains("CUDA context") || message.contains("unsupported") =>
+            {
+                eprintln!("skip: HEVC decode unsupported on this machine: {message}");
+                return;
+            }
+            Err(err) => panic!("unexpected decode error: {err:?}"),
+        }
+    }
+
+    match decoder.flush() {
+        Ok(frames) => decoded_frames += frames.len(),
+        Err(video_hw::BackendError::UnsupportedConfig(message))
+            if message.contains("CUDA context") || message.contains("unsupported") =>
+        {
+            eprintln!("skip: HEVC decode unsupported on this machine: {message}");
+            return;
+        }
+        Err(err) => panic!("unexpected decode flush error: {err:?}"),
+    }
+
+    assert!(decoded_frames > 0);
+    assert_eq!(decoder.decode_summary().decoded_frames, decoded_frames);
 }
 
 #[cfg(not(feature = "backend-nvidia"))]

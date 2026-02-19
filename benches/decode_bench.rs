@@ -40,21 +40,22 @@ fn decode_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(2));
 
-    for (label, codec, data) in [
-        ("h264", Codec::H264, &h264),
-        ("hevc", Codec::Hevc, &hevc),
-    ] {
+    for (label, codec, data) in [("h264", Codec::H264, &h264), ("hevc", Codec::Hevc, &hevc)] {
         for require_hardware in [false, true] {
-            let mode = if require_hardware { "hw_required" } else { "hw_optional" };
+            let mode = if require_hardware {
+                "hw_required"
+            } else {
+                "hw_optional"
+            };
             for chunk_bytes in [4096usize, 1024 * 1024] {
-            group.throughput(Throughput::Bytes(data.len() as u64));
-            group.bench_with_input(
-                BenchmarkId::new(label, format!("{mode}/chunk_{chunk_bytes}")),
-                &chunk_bytes,
-                |b, &chunk| {
-                    b.iter(|| run_decode(codec, data, chunk, require_hardware));
-                },
-            );
+                group.throughput(Throughput::Bytes(data.len() as u64));
+                group.bench_with_input(
+                    BenchmarkId::new(label, format!("{mode}/chunk_{chunk_bytes}")),
+                    &chunk_bytes,
+                    |b, &chunk| {
+                        b.iter(|| run_decode(codec, data, chunk, require_hardware));
+                    },
+                );
             }
         }
     }

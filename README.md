@@ -1,6 +1,6 @@
 # video-hw
 
-`video-hw` は、複数のハードウェア backend（現状: VideoToolbox / NVIDIA）を同一 API で扱う単一 crate です。
+`video-hw` は、複数のハードウェア backend（VideoToolbox / NVIDIA）を同一 API で扱う単一 crate です。
 
 ## 主要構成
 
@@ -10,12 +10,15 @@ src/
   contract.rs         # 共通 trait / type / error
   bitstream.rs        # Annex-B 増分パースと AU 組み立て
   vt_backend.rs       # VideoToolbox 実装（macOS + feature）
-  nvidia_backend.rs   # NVIDIA 実装（feature、SDK bridge未接続）
+  nv_backend.rs       # NVIDIA 実装（Windows/Linux + backend-nvidia）
 examples/
   decode_annexb.rs
   encode_synthetic.rs
 tests/
   e2e_video_hw.rs
+scripts/
+  benchmark_ffmpeg_nv.rs
+  README.md
 ```
 
 ## feature / platform 切替
@@ -24,50 +27,63 @@ tests/
 - NVIDIA を有効化: `--features backend-nvidia`
 - 実行時は `BackendKind` で backend を選択
 
-## 統一 API
+## NVIDIA backend 依存
 
-```rust
-use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
+`backend-nvidia` では次の依存を固定しています。
 
-let mut decoder = Decoder::new(
-    BackendKind::VideoToolbox,
-    DecoderConfig {
-        codec: Codec::H264,
-        fps: 30,
-        require_hardware: false,
-    },
-);
-let _ = decoder.push_bitstream_chunk(&[], None);
-let summary = decoder.decode_summary();
+- `nvidia-video-codec-sdk`
+  - `git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk"`
+  - `rev = "d2d0fec631365106d26adfe462f3ce15b043b879"`
+- `cudarc = 0.19.2`（`driver` + `cuda-version-from-build-system`）
+
+### NVIDIA Video Codec SDK ビルド前提（Windows）
+
+- NVIDIA Driver / CUDA が有効であること
+- `nvidia-video-codec-sdk` の build script が SDK の lib を見つけられること
+- 必要に応じて環境変数を設定
+
+```powershell
+$env:NVIDIA_VIDEO_CODEC_SDK_PATH = "C:\Path\To\Video_Codec_SDK\Lib\x64"
 ```
+
+`NVIDIA_VIDEO_CODEC_SDK_PATH` は `nvEncodeAPI.lib` / `nvcuvid.lib` があるディレクトリを指します。
 
 ## 検証コマンド
 
 ```bash
 cargo fmt --all
 cargo check
+cargo check --features backend-nvidia
 cargo test -- --nocapture
-
-# examples
-cargo run --example decode_annexb -- --codec h264 --chunk-bytes 4096
-cargo run --example encode_synthetic -- --codec h264 --output ./encoded-output.h264
+cargo test --features backend-nvidia -- --nocapture
 ```
 
-## ドキュメント配置
+## 実行例
 
-- ドキュメントは `docs/` 配下に整理済み
+```bash
+# NVDEC decode
+cargo run --features backend-nvidia --example decode_annexb -- --backend nv --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --require-hardware
+
+# NVENC encode
+cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-h264.bin
+```
+
+## ffmpeg 比較ベンチ
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec h264 --release
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
+```
+
+## スクリプト実装方針
+
+- `scripts/` は RFC 3424 / Cargo issue #12207 の `cargo -Zscript` 形式を基本とします。
+- 新規スクリプトは原則 `scripts/*.rs` で追加してください。
+- 詳細: `scripts/README.md`
+
+## ドキュメント
+
 - インデックス: `docs/README.md`
-- ベンチ詳細: `docs/status/BENCHMARK_2026-02-18.md`
-- ffmpeg 比較: `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
-
-## クリーンアップ状況
-
-- 旧 workspace の重複実装（`crates/`）は root 実装での動作確認後に削除済み
-- 旧バックアップ（`legacy-root-backup/`）は機能カバレッジ確認後に削除済み
-
-## 現在の実装状況
-
-- VideoToolbox: decode/encode 実装あり（E2E テストあり）
-- NVIDIA: contract と packer 接続済み（SDK 連携部分は未実装）
-- bitstream: chunk 増分処理と parameter set 抽出の unit test あり
-- benchmark: `decode_bench` で `hw_optional` / `hw_required` の比較計測が可能
+- 全体状態: `docs/status/STATUS.md`
+- VT 比較: `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
+- NV 比較: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`

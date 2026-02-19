@@ -7,6 +7,8 @@
 - `status/STATUS.md`
 - `status/BENCHMARK_2026-02-18.md`
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
+- `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
+- `../scripts/README.md`（スクリプト実装方針）
 - `plan/ROADMAP.md`
 - `plan/TEST_PLAN_MULTIBACKEND.md`
 

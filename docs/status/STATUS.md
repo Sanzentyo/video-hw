@@ -13,50 +13,49 @@
 ## 2. 実装済み
 
 - VideoToolbox decode/encode 実装
+- NVIDIA decode/encode 実装（`src/nv_backend.rs`）
+  - decode: `nvidia-video-codec-sdk` safe `Decoder` を接続
+  - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
 - 増分 Annex-B parser + AU 組み立て
 - root examples
   - `examples/decode_annexb.rs`
   - `examples/encode_synthetic.rs`
 - E2E
-  - `tests/e2e_video_hw.rs`（VT経路）
+  - `tests/e2e_video_hw.rs`（VT + NVIDIA）
 - decode benchmark（Criterion）
   - `benches/decode_bench.rs`
-  - `hw_optional` / `hw_required` を分離して計測可能
 
 ## 3. 検証結果（最新）
 
+- `cargo fmt --all`: pass
 - `cargo check`: pass
-- `cargo test -- --nocapture`: pass
-- `cargo run --example decode_annexb`（H264/HEVC）: pass
-- `cargo run --example encode_synthetic`（H264）: pass
 - `cargo check --features backend-nvidia`: pass
-  - 実行時は NVIDIA SDK bridge 未接続のため UnsupportedConfig を返す（想定どおり）
-- `cargo bench --bench decode_bench -- --noplot`: pass
-  - `hw_required` 条件を含む計測に更新済み
+- `cargo test -- --nocapture`: pass
+- `cargo test --features backend-nvidia -- --nocapture`: pass
+  - NVIDIA E2E は CUDA/NVDEC/NVENC が使えない環境では skip 分岐あり
 
-## 4. パフォーマンス比較の現状
+## 4. NVIDIA 依存固定
 
-- `video-hw` 側
-  - 関数レベル（Criterion）とプロセス実行（`decode_annexb`）の両計測を実施
-- `ffmpeg` 側
-  - `videotoolbox` の hwaccel と `h264_videotoolbox` / `hevc_videotoolbox` の利用可を確認
-  - 同一素材で decode/encode 計測を実施
-- 主要な知見
-  - 比較対象の粒度（関数ベンチ vs 外部コマンド）で差が出るため、絶対値比較は注意が必要
-  - decode の同一素材比較では `video-hw` は `ffmpeg VT decode` より速いが `ffmpeg SW decode` には届かない
+- `nvidia-video-codec-sdk`
+  - `https://github.com/Sanzentyo/nvidia-video-codec-sdk`
+  - rev: `d2d0fec631365106d26adfe462f3ce15b043b879`
+- `cudarc = 0.19.2`
 
-## 5. クリーンアップ
+## 5. ffmpeg 比較
 
-- 旧重複実装の `crates/` を退避検証後に削除
-- `legacy-root-backup/` を削除
-- Markdown は `docs/` 配下へ再配置
+- スクリプト: `scripts/benchmark_ffmpeg_nv.rs`（cargo script）
+- 生成レポート: `output/benchmark-nv-<codec>-<timestamp>.txt`
+- 手順詳細: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
+- 現状結果:
+  - H264 decode/encode は `video-hw` / `ffmpeg` ともに比較可能
+  - HEVC decode は比較可能
+  - HEVC encode は `video-hw` 側がハングし比較不能（既知課題）
 
 ## 6. 残課題
 
-- NVIDIA SDK bridge の実装
-- NVIDIA 実機での E2E 回帰テスト
-- CI の macOS / Linux+GPU 分離
-- encode の公平比較用に「同一素材入力 encode」経路を `video-hw` 側へ追加
+- CI での GPU ランナー常設（Windows + NVIDIA）
+- encode の品質比較（PSNR/SSIM）とビットレート比較の自動化
+- NVENC HEVC encode ハングの解消（`src/nv_backend.rs`）
 
 ## 7. 関連文書
 
@@ -64,6 +63,7 @@
 - `docs/README.md`
 - `docs/status/BENCHMARK_2026-02-18.md`
 - `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
+- `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
 - `docs/plan/ROADMAP.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/research/RESEARCH.md`

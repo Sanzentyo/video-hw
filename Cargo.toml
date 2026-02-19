@@ -12,12 +12,14 @@ backend-vt = [
 	"dep:core-video",
 	"dep:video-toolbox",
 ]
-backend-nvidia = []
+backend-nvidia = ["dep:nvidia-video-codec-sdk", "dep:cudarc"]
 
 [dependencies]
 thiserror = "2.0.18"
 anyhow = "1.0.101"
 clap = { version = "4.5.59", features = ["derive"] }
+cudarc = { version = "0.19.2", default-features = false, features = ["driver", "cuda-version-from-build-system"], optional = true }
+nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk", rev = "d2d0fec631365106d26adfe462f3ce15b043b879", version = "0.4.0", default-features = false, optional = true }
 
 [dev-dependencies]
 rstest = "0.26.1"
