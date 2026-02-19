@@ -29,14 +29,14 @@
 - video-hw decode (NVDEC)
   - `cargo run --release --features backend-nvidia --example decode_annexb -- --backend nv --codec <h264|hevc> --input <input> --chunk-bytes 4096 --require-hardware`
 
-### 結果
+### 結果（最新）
 
 | Codec | Path | real(s) | fps (303/real) | ms/frame |
 |---|---|---:|---:|---:|
-| H264 | ffmpeg cuvid decode | 0.515 | 588.3 | 1.700 |
-| H264 | video-hw nv decode | 2.898 | 104.6 | 9.564 |
-| HEVC | ffmpeg cuvid decode | 0.562 | 539.1 | 1.855 |
-| HEVC | video-hw nv decode | 2.976 | 101.8 | 9.822 |
+| H264 | ffmpeg cuvid decode | 0.485 | 624.7 | 1.601 |
+| H264 | video-hw nv decode | 2.958 | 102.4 | 9.762 |
+| HEVC | ffmpeg cuvid decode | 0.491 | 616.9 | 1.621 |
+| HEVC | video-hw nv decode | 2.773 | 109.3 | 9.152 |
 
 ## 5. encode 計測
 
@@ -47,25 +47,26 @@
 - video-hw encode (NVENC)
   - `cargo run --release --features backend-nvidia --example encode_synthetic -- --backend nv --codec <h264|hevc> --fps 30 --frame-count 300 --require-hardware --output <output>`
 
-### 結果
+### 結果（最新）
 
 | Codec | Path | real(s) | fps (300/real) | ms/frame | 備考 |
 |---|---|---:|---:|---:|---|
-| H264 | ffmpeg nvenc encode | 0.213 | 1408.5 | 0.710 | 正常完了 |
-| H264 | video-hw nv encode | 0.590 | 508.5 | 1.967 | 正常完了 |
-| HEVC | ffmpeg nvenc encode | 0.275 | 1090.9 | 0.917 | 正常完了 |
-| HEVC | video-hw nv encode | timeout | - | - | 30秒以内に完了せず（30 framesでもtimeout） |
+| H264 | ffmpeg nvenc encode | 0.203 | 1477.8 | 0.677 | 正常完了 |
+| H264 | video-hw nv encode | 0.745 | 402.7 | 2.483 | 正常完了 |
+| HEVC | ffmpeg nvenc encode | 0.201 | 1492.5 | 0.670 | 正常完了 |
+| HEVC | video-hw nv encode | 0.713 | 420.8 | 2.377 | 正常完了 |
 
 ## 6. 解釈
 
 - decode は H264/HEVC ともに、現状の `video-hw` NVDEC 実装より `ffmpeg cuvid` が高速。
-- H264 encode は `video-hw` でも完了し、`ffmpeg nvenc` がより高速。
-- HEVC encode は `video-hw` 側でハングが再現し、比較不能。
+- encode は H264/HEVC ともに `video-hw` が完走し、`ffmpeg nvenc` がより高速。
+- HEVC encode の異常終了は解消し、比較計測が可能になった。
 
-## 7. 既知課題（要修正）
+## 7. 実装メモ（今回の修正）
 
-- `video-hw` の HEVC encode (`encode_synthetic --codec hevc`) が進行停止する。
-- 挙動上、`src/nv_backend.rs` の NVENC flush/EOS 周辺（`NeedMoreInput` / `EncoderBusy` の扱い）に改善余地がある可能性が高い。
+- NVIDIA encode の出力回収を「submit順に `lock()` で回収する」方式へ変更。
+- `try_lock` と複雑なリトライ分岐を除去し、NVENC の同期的な取得順に合わせた。
+- この変更で HEVC encode (`encode_synthetic --codec hevc`) の `STATUS_ACCESS_VIOLATION` は再現しなくなった。
 
 ## 8. 重要な注意（公平比較）
 
@@ -80,5 +81,6 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec h264 --release
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
 ```
 
-- `h264` は完了し、結果は `output/benchmark-nv-h264-1771486740.txt` に保存済み。
-- `hevc` は現在の既知課題により script 完走不可。
+- 最新結果ファイル:
+  - `output/benchmark-nv-h264-1771489556.txt`
+  - `output/benchmark-nv-hevc-1771489564.txt`

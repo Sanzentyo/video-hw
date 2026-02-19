@@ -48,14 +48,16 @@
 - 手順詳細: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
 - 現状結果:
   - H264 decode/encode は `video-hw` / `ffmpeg` ともに比較可能
-  - HEVC decode は比較可能
-  - HEVC encode は `video-hw` 側がハングし比較不能（既知課題）
+  - HEVC decode/encode も比較可能（異常終了問題は解消済み）
+  - 最新レポート:
+    - `output/benchmark-nv-h264-1771489556.txt`
+    - `output/benchmark-nv-hevc-1771489564.txt`
 
 ## 6. 残課題
 
 - CI での GPU ランナー常設（Windows + NVIDIA）
 - encode の品質比較（PSNR/SSIM）とビットレート比較の自動化
-- NVENC HEVC encode ハングの解消（`src/nv_backend.rs`）
+- encode 公平比較のための raw frame 入力 API の整理
 
 ## 7. 関連文書
 

@@ -1,4 +1,4 @@
-use std::{thread, time::Duration};
+use std::collections::VecDeque;
 
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
@@ -10,9 +10,6 @@ use crate::{
     BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
     VideoDecoder, VideoEncoder,
 };
-
-const NVENC_RETRY_SLEEP_MS: u64 = 1;
-const NVENC_FINAL_DRAIN_ATTEMPTS: usize = 16;
 
 pub struct PackedSample {
     pub data: Vec<u8>,
@@ -209,7 +206,7 @@ impl NvEncoderAdapter {
         &self,
         width: usize,
         height: usize,
-    ) -> Result<nvidia_video_codec_sdk::Session, BackendError> {
+    ) -> Result<(nvidia_video_codec_sdk::Session, NvInputLayout, usize), BackendError> {
         let _ = self.require_hardware;
 
         let cuda_ctx = CudaContext::new(0).map_err(|err| {
@@ -223,6 +220,7 @@ impl NvEncoderAdapter {
         if !encode_guids.contains(&encode_guid) {
             return Err(BackendError::UnsupportedCodec(self.codec));
         }
+        let input_layout = NvInputLayout::Argb;
 
         let preset_guid = nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_PRESET_P1_GUID;
         let tuning_info =
@@ -231,21 +229,31 @@ impl NvEncoderAdapter {
         let mut preset_config = encoder
             .get_preset_config(encode_guid, preset_guid, tuning_info)
             .map_err(map_encode_error)?;
+        let frame_interval_p = usize::try_from(preset_config.presetCfg.frameIntervalP).unwrap_or(1);
+        let lookahead_depth =
+            usize::try_from(preset_config.presetCfg.rcParams.lookaheadDepth).unwrap_or(0);
+        let pool_size = frame_interval_p
+            .saturating_add(lookahead_depth)
+            .saturating_add(1)
+            .max(3);
 
         let mut init_params = EncoderInitParams::new(encode_guid, width as u32, height as u32);
         init_params
             .preset_guid(preset_guid)
             .tuning_info(tuning_info)
+            .display_aspect_ratio(16, 9)
             .framerate(self.fps.max(1) as u32, 1)
             .enable_picture_type_decision()
             .encode_config(&mut preset_config.presetCfg);
 
-        encoder
+        let session = encoder
             .start_session(
                 nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
                 init_params,
             )
-            .map_err(map_encode_error)
+            .map_err(map_encode_error)?;
+
+        Ok((session, input_layout, pool_size))
     }
 }
 
@@ -299,20 +307,22 @@ impl VideoEncoder for NvEncoderAdapter {
         let width = self.width.take().unwrap_or(640);
         let height = self.height.take().unwrap_or(360);
 
-        let session = self.make_session(width, height)?;
+        let (session, input_layout, _pool_size) = self.make_session(width, height)?;
         let mut input = session.create_input_buffer().map_err(map_encode_error)?;
-        let mut output = session
-            .create_output_bitstream()
-            .map_err(map_encode_error)?;
-
+        let mut pending_outputs = VecDeque::<PendingOutput>::new();
         let mut packets = Vec::new();
 
         for (index, frame) in pending_frames.iter().enumerate() {
-            let argb = generate_synthetic_argb(width, height, index);
+            let mut output = session
+                .create_output_bitstream()
+                .map_err(map_encode_error)?;
+            let input_bytes = match input_layout {
+                NvInputLayout::Argb => generate_synthetic_argb(width, height, index),
+            };
             {
                 let mut lock = input.lock().map_err(map_encode_error)?;
                 unsafe {
-                    lock.write_pitched(&argb, width.saturating_mul(4), height);
+                    lock.write(&input_bytes);
                 }
             }
 
@@ -331,74 +341,59 @@ impl VideoEncoder for NvEncoderAdapter {
                     },
                 ) {
                     Ok(()) => break true,
-                    Err(err) if err.kind() == ErrorKind::EncoderBusy => {
-                        thread::sleep(Duration::from_millis(NVENC_RETRY_SLEEP_MS));
-                    }
                     Err(err) if err.kind() == ErrorKind::NeedMoreInput => break false,
                     Err(err) => return Err(map_encode_error(err)),
                 }
             };
 
+            pending_outputs.push_back(PendingOutput {
+                output,
+                pts_90k: frame.pts_90k,
+                is_keyframe: index == 0,
+            });
+
             if produced_output {
-                let data = loop {
-                    match output.lock() {
-                        Ok(lock) => break lock.data().to_vec(),
-                        Err(err) if err.kind() == ErrorKind::LockBusy => {
-                            thread::sleep(Duration::from_millis(NVENC_RETRY_SLEEP_MS));
-                        }
-                        Err(err) => return Err(map_encode_error(err)),
-                    }
-                };
-
-                if !data.is_empty() {
-                    packets.push(EncodedPacket {
-                        codec: self.codec,
-                        data,
-                        pts_90k: frame.pts_90k,
-                        is_keyframe: index == 0,
-                    });
-                }
+                let pending = pending_outputs.pop_front().ok_or_else(|| {
+                    BackendError::Backend(
+                        "missing pending output after encode submission".to_string(),
+                    )
+                })?;
+                packets.push(lock_output_packet(self.codec, pending)?);
             }
         }
 
-        loop {
-            match session.end_of_stream() {
-                Ok(()) => break,
-                Err(err)
-                    if err.kind() == ErrorKind::EncoderBusy
-                        || err.kind() == ErrorKind::NeedMoreInput =>
-                {
-                    thread::sleep(Duration::from_millis(NVENC_RETRY_SLEEP_MS));
-                }
-                Err(err) => return Err(map_encode_error(err)),
-            }
-        }
+        session.end_of_stream().map_err(map_encode_error)?;
 
-        for _ in 0..NVENC_FINAL_DRAIN_ATTEMPTS {
-            match output.try_lock() {
-                Ok(lock) => {
-                    let data = lock.data().to_vec();
-                    if !data.is_empty() {
-                        packets.push(EncodedPacket {
-                            codec: self.codec,
-                            data,
-                            pts_90k: None,
-                            is_keyframe: false,
-                        });
-                    }
-                }
-                Err(err)
-                    if err.kind() == ErrorKind::LockBusy
-                        || err.kind() == ErrorKind::EncoderBusy =>
-                {
-                    break;
-                }
-                Err(err) => return Err(map_encode_error(err)),
-            }
+        while let Some(pending) = pending_outputs.pop_front() {
+            packets.push(lock_output_packet(self.codec, pending)?);
         }
 
         Ok(packets)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NvInputLayout {
+    Argb,
+}
+
+struct PendingOutput<'a> {
+    output: nvidia_video_codec_sdk::Bitstream<'a>,
+    pts_90k: Option<i64>,
+    is_keyframe: bool,
+}
+
+fn lock_output_packet(
+    codec: Codec,
+    mut pending: PendingOutput<'_>,
+) -> Result<EncodedPacket, BackendError> {
+    let lock = pending.output.lock().map_err(map_encode_error)?;
+    Ok(EncodedPacket {
+        codec,
+        data: lock.data().to_vec(),
+        pts_90k: pending.pts_90k,
+        is_keyframe: pending.is_keyframe,
+    })
 }
 
 fn to_decode_codec(codec: Codec) -> DecodeCodec {
