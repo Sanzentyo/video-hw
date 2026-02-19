@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
 use nvidia_video_codec_sdk::{
@@ -11,33 +12,44 @@ use crate::{
     VideoDecoder, VideoEncoder,
 };
 
-pub struct PackedSample {
-    pub data: Vec<u8>,
-}
-
-pub trait SamplePacker {
-    fn pack(&mut self, access_unit: &AccessUnit) -> Result<PackedSample, BackendError>;
-}
-
 #[derive(Debug, Default)]
-pub struct AnnexBPacker;
+pub struct AnnexBPacker {
+    data: Vec<u8>,
+}
 
-impl SamplePacker for AnnexBPacker {
-    fn pack(&mut self, access_unit: &AccessUnit) -> Result<PackedSample, BackendError> {
+impl AnnexBPacker {
+    fn pack<'a>(&'a mut self, access_unit: &AccessUnit) -> &'a [u8] {
+        self.data.clear();
         let total_size: usize = access_unit
             .nalus
             .iter()
             .map(|nal| nal.len().saturating_add(4))
             .sum();
-        let mut data = Vec::with_capacity(total_size);
+        self.data
+            .reserve(total_size.saturating_sub(self.data.capacity()));
 
         for nal in &access_unit.nalus {
-            data.extend_from_slice(&[0, 0, 0, 1]);
-            data.extend_from_slice(nal);
+            self.data.extend_from_slice(&[0, 0, 0, 1]);
+            self.data.extend_from_slice(nal);
         }
 
-        Ok(PackedSample { data })
+        &self.data
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct StageTiming {
+    pack: Duration,
+    sdk: Duration,
+    upload: Duration,
+    synth: Duration,
+    output_lock: Duration,
+}
+
+fn should_report_metrics() -> bool {
+    std::env::var("VIDEO_HW_NV_METRICS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 pub struct NvDecoderAdapter {
@@ -93,26 +105,41 @@ impl NvDecoderAdapter {
         }
 
         self.ensure_decoder()?;
-        let mut packer = AnnexBPacker;
+        let mut packer = AnnexBPacker::default();
         let mut frames = Vec::new();
+        let mut timing = StageTiming::default();
 
         for au in access_units {
-            let packed = packer.pack(au)?;
+            let pack_start = Instant::now();
+            let packed = packer.pack(au);
+            timing.pack += pack_start.elapsed();
             let pts_90k = au
                 .pts_90k
                 .or(fallback_pts_90k)
                 .unwrap_or_else(|| self.bump_pts_90k());
 
+            let decode_start = Instant::now();
             let decoded = {
                 let decoder = self.decoder.as_mut().ok_or_else(|| {
                     BackendError::Backend("decoder should be initialized".to_string())
                 })?;
                 decoder
-                    .push_access_unit(&packed.data, pts_90k)
+                    .push_access_unit(packed, pts_90k)
                     .map_err(map_decode_error)?
             };
+            timing.sdk += decode_start.elapsed();
             self.apply_decoded_summary(&decoded);
             frames.extend(decoded.into_iter().map(to_frame));
+        }
+
+        if should_report_metrics() {
+            eprintln!(
+                "[nv.decode] access_units={}, frames={}, pack_ms={:.3}, sdk_ms={:.3}",
+                access_units.len(),
+                frames.len(),
+                timing.pack.as_secs_f64() * 1_000.0,
+                timing.sdk.as_secs_f64() * 1_000.0
+            );
         }
 
         Ok(frames)
@@ -311,19 +338,26 @@ impl VideoEncoder for NvEncoderAdapter {
         let mut input = session.create_input_buffer().map_err(map_encode_error)?;
         let mut pending_outputs = VecDeque::<PendingOutput>::new();
         let mut packets = Vec::new();
+        let mut timing = StageTiming::default();
+        let mut output_depth_peak = 0usize;
+        let mut input_bytes = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
 
         for (index, frame) in pending_frames.iter().enumerate() {
             let mut output = session
                 .create_output_bitstream()
                 .map_err(map_encode_error)?;
-            let input_bytes = match input_layout {
-                NvInputLayout::Argb => generate_synthetic_argb(width, height, index),
-            };
+            let synth_start = Instant::now();
+            match input_layout {
+                NvInputLayout::Argb => fill_synthetic_argb(&mut input_bytes, width, height, index),
+            }
+            timing.synth += synth_start.elapsed();
             {
+                let upload_start = Instant::now();
                 let mut lock = input.lock().map_err(map_encode_error)?;
                 unsafe {
                     lock.write(&input_bytes);
                 }
+                timing.upload += upload_start.elapsed();
             }
 
             let input_timestamp = frame
@@ -331,6 +365,7 @@ impl VideoEncoder for NvEncoderAdapter {
                 .unwrap_or_else(|| (index as i64).saturating_mul(3_000))
                 .max(0) as u64;
 
+            let encode_start = Instant::now();
             let produced_output = loop {
                 match session.encode_picture(
                     &mut input,
@@ -345,12 +380,14 @@ impl VideoEncoder for NvEncoderAdapter {
                     Err(err) => return Err(map_encode_error(err)),
                 }
             };
+            timing.sdk += encode_start.elapsed();
 
             pending_outputs.push_back(PendingOutput {
                 output,
                 pts_90k: frame.pts_90k,
                 is_keyframe: index == 0,
             });
+            output_depth_peak = output_depth_peak.max(pending_outputs.len());
 
             if produced_output {
                 let pending = pending_outputs.pop_front().ok_or_else(|| {
@@ -358,14 +395,31 @@ impl VideoEncoder for NvEncoderAdapter {
                         "missing pending output after encode submission".to_string(),
                     )
                 })?;
+                let lock_start = Instant::now();
                 packets.push(lock_output_packet(self.codec, pending)?);
+                timing.output_lock += lock_start.elapsed();
             }
         }
 
         session.end_of_stream().map_err(map_encode_error)?;
 
         while let Some(pending) = pending_outputs.pop_front() {
+            let lock_start = Instant::now();
             packets.push(lock_output_packet(self.codec, pending)?);
+            timing.output_lock += lock_start.elapsed();
+        }
+
+        if should_report_metrics() {
+            eprintln!(
+                "[nv.encode] frames={}, packets={}, queue_peak={}, synth_ms={:.3}, upload_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}",
+                pending_frames.len(),
+                packets.len(),
+                output_depth_peak,
+                timing.synth.as_secs_f64() * 1_000.0,
+                timing.upload.as_secs_f64() * 1_000.0,
+                timing.sdk.as_secs_f64() * 1_000.0,
+                timing.output_lock.as_secs_f64() * 1_000.0
+            );
         }
 
         Ok(packets)
@@ -448,9 +502,7 @@ fn to_frame(frame: nvidia_video_codec_sdk::DecodedRgbFrame) -> Frame {
     }
 }
 
-fn generate_synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
-    let mut buffer = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-
+fn fill_synthetic_argb(buffer: &mut [u8], width: usize, height: usize, frame_index: usize) {
     for y in 0..height {
         for x in 0..width {
             let offset = (y * width + x) * 4;
@@ -460,6 +512,4 @@ fn generate_synthetic_argb(width: usize, height: usize, frame_index: usize) -> V
             buffer[offset + 3] = 255;
         }
     }
-
-    buffer
 }
