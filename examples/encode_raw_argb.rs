@@ -33,6 +33,14 @@ struct Args {
     nv_gop_length: Option<u32>,
     #[arg(long)]
     nv_frame_interval_p: Option<i32>,
+    #[arg(long)]
+    nv_report_metrics: Option<bool>,
+    #[arg(long)]
+    nv_safe_lifetime_mode: Option<bool>,
+    #[arg(long)]
+    nv_enable_pipeline_scheduler: Option<bool>,
+    #[arg(long)]
+    nv_pipeline_queue_capacity: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -67,6 +75,10 @@ fn main() -> Result<()> {
         }
         options.gop_length = args.nv_gop_length;
         options.frame_interval_p = args.nv_frame_interval_p;
+        options.report_metrics = args.nv_report_metrics;
+        options.safe_lifetime_mode = args.nv_safe_lifetime_mode;
+        options.enable_pipeline_scheduler = args.nv_enable_pipeline_scheduler;
+        options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
     let mut encoder = Encoder::with_config(backend, config);
