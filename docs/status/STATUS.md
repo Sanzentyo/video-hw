@@ -16,6 +16,7 @@
 - NVIDIA decode/encode 実装（`src/nv_backend.rs`）
   - decode: `nvidia-video-codec-sdk` safe `Decoder` を接続
   - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
+  - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 4）
 - 増分 Annex-B parser + AU 組み立て
 - root examples
   - `examples/decode_annexb.rs`
@@ -51,6 +52,7 @@
 - 現状結果:
   - H264 decode/encode は `video-hw` / `ffmpeg` ともに比較可能
   - HEVC decode/encode も比較可能（異常終了問題は解消済み）
+  - encode は in-flight reap + bitstream 再利用で大幅改善
   - lock 回収最適化後の精密レポート:
     - `output/benchmark-nv-precise-h264-1771493200.md`
     - `output/benchmark-nv-precise-hevc-1771493244.md`

@@ -33,10 +33,10 @@
 
 | Codec | Path | real(s) | fps (303/real) | ms/frame |
 |---|---|---:|---:|---:|
-| H264 | ffmpeg cuvid decode | 0.485 | 624.7 | 1.601 |
-| H264 | video-hw nv decode | 2.958 | 102.4 | 9.762 |
-| HEVC | ffmpeg cuvid decode | 0.491 | 616.9 | 1.621 |
-| HEVC | video-hw nv decode | 2.773 | 109.3 | 9.152 |
+| H264 | ffmpeg cuvid decode | 0.509 | 595.3 | 1.680 |
+| H264 | video-hw nv decode | 2.678 | 113.1 | 8.838 |
+| HEVC | ffmpeg cuvid decode | 0.502 | 603.6 | 1.657 |
+| HEVC | video-hw nv decode | 2.587 | 117.1 | 8.538 |
 
 ## 5. encode 計測
 
@@ -51,10 +51,10 @@
 
 | Codec | Path | real(s) | fps (300/real) | ms/frame | 備考 |
 |---|---|---:|---:|---:|---|
-| H264 | ffmpeg nvenc encode | 0.203 | 1477.8 | 0.677 | 正常完了 |
-| H264 | video-hw nv encode | 0.745 | 402.7 | 2.483 | 正常完了 |
-| HEVC | ffmpeg nvenc encode | 0.201 | 1492.5 | 0.670 | 正常完了 |
-| HEVC | video-hw nv encode | 0.713 | 420.8 | 2.377 | 正常完了 |
+| H264 | ffmpeg nvenc encode | 0.212 | 1415.1 | 0.707 | 正常完了 |
+| H264 | video-hw nv encode | 0.279 | 1075.3 | 0.930 | 正常完了 |
+| HEVC | ffmpeg nvenc encode | 0.209 | 1435.4 | 0.697 | 正常完了 |
+| HEVC | video-hw nv encode | 0.260 | 1153.8 | 0.867 | 正常完了 |
 
 ## 6. 解釈
 
@@ -64,9 +64,9 @@
 
 ## 7. 実装メモ（今回の修正）
 
-- NVIDIA encode の出力回収を「submit順に `lock()` で回収する」方式へ変更。
-- `try_lock` と複雑なリトライ分岐を除去し、NVENC の同期的な取得順に合わせた。
-- この変更で HEVC encode (`encode_synthetic --codec hevc`) の `STATUS_ACCESS_VIOLATION` は再現しなくなった。
+- NVIDIA encode の出力回収を in-flight 化（submit/reap 分離）し、bitstream を再利用。
+- `max_in_flight_outputs` は NVIDIA backend 固有パラメータとして公開し、default は `4`。
+- この変更で `lock_ms` が大幅に低下し、H264/HEVC encode の wall time が改善した。
 
 ## 8. 重要な注意（公平比較）
 
@@ -82,5 +82,6 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
 ```
 
 - 最新結果ファイル:
-  - `output/benchmark-nv-h264-1771489556.txt`
-  - `output/benchmark-nv-hevc-1771489564.txt`
+  - `output/benchmark-nv-precise-h264-1771493200.md`
+  - `output/benchmark-nv-precise-hevc-1771493244.md`
+  - 詳細分析: `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`
