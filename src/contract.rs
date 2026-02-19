@@ -20,6 +20,46 @@ pub struct DecoderConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct EncoderConfig {
+    pub codec: Codec,
+    pub fps: i32,
+    pub require_hardware: bool,
+    pub backend_options: BackendEncoderOptions,
+}
+
+impl EncoderConfig {
+    #[must_use]
+    pub fn new(codec: Codec, fps: i32, require_hardware: bool) -> Self {
+        Self {
+            codec,
+            fps,
+            require_hardware,
+            backend_options: BackendEncoderOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum BackendEncoderOptions {
+    #[default]
+    Default,
+    Nvidia(NvidiaEncoderOptions),
+}
+
+#[derive(Debug, Clone)]
+pub struct NvidiaEncoderOptions {
+    pub max_in_flight_outputs: usize,
+}
+
+impl Default for NvidiaEncoderOptions {
+    fn default() -> Self {
+        Self {
+            max_in_flight_outputs: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DecodeSummary {
     pub decoded_frames: usize,
     pub width: Option<usize>,

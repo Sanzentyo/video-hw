@@ -37,6 +37,19 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec hevc --release
 
 - 生成レポート: `output/benchmark-nv-<codec>-<epoch>.txt`
 
+### 3) NVIDIA 精密ベンチ（反復 + 統計）
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --release --warmup 2 --repeat 9
+```
+
+- 生成レポート: `output/benchmark-nv-precise-<codec>-<epoch>.md`
+- `--include-internal-metrics` を付けると `VIDEO_HW_NV_METRICS=1` を有効化し、
+  `nv_backend` の decode/encode ステージ内訳も集計する。
+- NVIDIA backend 固有パラメータ（`max_in_flight_outputs`）を変える場合は
+  `--nv-max-in-flight <N>` を使用する（未指定時は default `4`）。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること

@@ -44,14 +44,18 @@
 ## 5. ffmpeg 比較
 
 - スクリプト: `scripts/benchmark_ffmpeg_nv.rs`（cargo script）
+- 精密計測スクリプト: `scripts/benchmark_ffmpeg_nv_precise.rs`（cargo script）
 - 生成レポート: `output/benchmark-nv-<codec>-<timestamp>.txt`
 - 手順詳細: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
+- 精密分析: `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`
 - 現状結果:
   - H264 decode/encode は `video-hw` / `ffmpeg` ともに比較可能
   - HEVC decode/encode も比較可能（異常終了問題は解消済み）
-  - 最新レポート:
-    - `output/benchmark-nv-h264-1771489556.txt`
-    - `output/benchmark-nv-hevc-1771489564.txt`
+  - lock 回収最適化後の精密レポート:
+    - `output/benchmark-nv-precise-h264-1771493200.md`
+    - `output/benchmark-nv-precise-hevc-1771493244.md`
+    - `output/benchmark-nv-precise-h264-1771493302.md`
+    - `output/benchmark-nv-precise-hevc-1771493327.md`
 
 ## 6. 残課題
 
@@ -66,6 +70,8 @@
 - `docs/status/BENCHMARK_2026-02-18.md`
 - `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`
+- `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`
+- `docs/plan/MASTER_INTEGRATION_STEPS_2026-02-19.md`
 - `docs/plan/ROADMAP.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/research/RESEARCH.md`

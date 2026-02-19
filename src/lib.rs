@@ -7,8 +7,8 @@ mod nv_backend;
 mod vt_backend;
 
 pub use contract::{
-    BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
-    VideoDecoder, VideoEncoder,
+    BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
+    EncodedPacket, EncoderConfig, Frame, NvidiaEncoderOptions, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,19 +81,24 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(kind: BackendKind, codec: Codec, fps: i32, require_hardware: bool) -> Self {
+        let config = EncoderConfig::new(codec, fps, require_hardware);
+        Self::with_config(kind, config)
+    }
+
+    pub fn with_config(kind: BackendKind, config: EncoderConfig) -> Self {
         let inner: Box<dyn VideoEncoder> = match kind {
             BackendKind::VideoToolbox => {
                 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
                 {
                     Box::new(vt_backend::VtEncoderAdapter::with_config(
-                        codec,
-                        fps,
-                        require_hardware,
+                        config.codec,
+                        config.fps,
+                        config.require_hardware,
                     ))
                 }
                 #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
                 {
-                    let _ = (codec, fps, require_hardware);
+                    let _ = config;
                     Box::new(UnsupportedEncoder::new(
                         "VideoToolbox backend requires macOS + backend-vt feature",
                     ))
@@ -103,14 +108,15 @@ impl Encoder {
                 #[cfg(feature = "backend-nvidia")]
                 {
                     Box::new(nv_backend::NvEncoderAdapter::with_config(
-                        codec,
-                        fps,
-                        require_hardware,
+                        config.codec,
+                        config.fps,
+                        config.require_hardware,
+                        config.backend_options,
                     ))
                 }
                 #[cfg(not(feature = "backend-nvidia"))]
                 {
-                    let _ = (codec, fps, require_hardware);
+                    let _ = config;
                     Box::new(UnsupportedEncoder::new(
                         "NVIDIA backend requires backend-nvidia feature",
                     ))
