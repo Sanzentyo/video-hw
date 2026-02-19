@@ -13,11 +13,7 @@ use video_hw::{BackendKind, Codec, Decoder, DecoderConfig};
 fn run_decode(codec: Codec, data: &[u8], chunk_bytes: usize, require_hardware: bool) {
     let mut decoder = Decoder::new(
         BackendKind::VideoToolbox,
-        DecoderConfig {
-            codec,
-            fps: 30,
-            require_hardware,
-        },
+        DecoderConfig::new(codec, 30, require_hardware),
     );
 
     for chunk in data.chunks(chunk_bytes.max(1)) {

@@ -6,11 +6,11 @@ use std::{fs, path::PathBuf};
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use rstest::rstest;
-use video_hw::{BackendDecoderOptions, BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(feature = "backend-nvidia")]
 use video_hw::NvidiaSessionConfig;
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use video_hw::VtSessionConfig;
+use video_hw::{BackendDecoderOptions, BackendKind, Codec, Decoder, DecoderConfig};
 #[cfg(feature = "backend-nvidia")]
 use video_hw::{BackendEncoderOptions, EncoderConfig, NvidiaEncoderOptions};
 #[cfg(any(
