@@ -15,10 +15,23 @@
 - VideoToolbox decode/encode 実装
 - NVIDIA decode/encode 実装（`src/nv_backend.rs`）
   - decode: NVDEC メタデータ専用経路を接続（NV12->RGB 変換を回避）
+  - decode: call ごとの reaper thread 生成を除去し、metadata 集計をインライン化
   - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
-  - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 4）
+  - encode: input/output buffer を in-flight 数に応じてプール再利用
+  - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 6 に更新）
   - metrics: decode/encode stage 時間 + queue/jitter + p95/p99 出力に対応
   - 設計追補: RGB 変換を非同期 worker へ切り出す分散パイプライン設計を追加
+- 分散パイプライン基盤（実装）
+  - `src/pipeline.rs`: bounded queue（depth/peak 統計付き）
+  - `src/pipeline.rs`: in-flight credit 制御（スロット制）
+  - `src/transform.rs`: `TransformDispatcher`（NV12->RGB を CPU worker で非同期実行）
+  - `src/transform.rs`: `ColorRequest::KeepNative` fast-path 判定を追加
+  - `src/backend_transform_adapter.rs`: backend 差分 adapter（NV-P1-006 Phase 1）
+    - `BackendTransformAdapter` trait / `DecodedUnit` 抽象
+    - `NvidiaTransformAdapter`: fast-path + NV12->RGB 非同期 dispatch
+    - `VtTransformAdapter`: passthrough stub
+  - `examples/transform_nv12_rgb.rs`: worker 分散動作の実行例
+  - `src/nv_backend.rs`: decode/encode の submit/reap 分離（worker thread）を導入
 - 増分 Annex-B parser + AU 組み立て
 - root examples
   - `examples/decode_annexb.rs`
@@ -66,6 +79,20 @@
     - `output/benchmark-nv-precise-hevc-1771493327.md`
     - `output/benchmark-nv-precise-h264-1771498123.md`
     - `output/benchmark-nv-precise-hevc-1771498128.md`
+    - `output/benchmark-nv-precise-h264-1771499558.md`
+    - `output/benchmark-nv-precise-hevc-1771499564.md`
+    - `output/benchmark-nv-precise-h264-1771500342.md`
+    - `output/benchmark-nv-precise-hevc-1771500342.md`
+    - `output/benchmark-nv-precise-h264-1771500639.md`
+    - `output/benchmark-nv-precise-hevc-1771500639.md`
+    - `output/benchmark-nv-precise-h264-1771501008.md`
+    - `output/benchmark-nv-precise-hevc-1771501008.md`
+    - `output/benchmark-nv-precise-h264-1771505433.md`
+    - `output/benchmark-nv-precise-hevc-1771505433.md`
+  - 最新 mean（warmup 1 / repeat 3 / verify）
+    - h264: video-hw decode 0.338s, encode 0.320s / ffmpeg decode 0.538s, encode 0.259s
+    - hevc: video-hw decode 0.371s, encode 0.321s / ffmpeg decode 0.536s, encode 0.232s
+  - verify: h264/hevc とも `ffprobe` + `ffmpeg -v error` で decode=ok
 
 ## 6. 残課題
 
@@ -79,8 +106,8 @@
    - `NV-P0-005` の再現スクリプトを作り、再現有無と条件を記録
    - 成果物: `docs/status/` に外れ値切り分けメモを追加
 2. 分散パイプライン実装に着手
-   - `NV-P1-004/005/006`（scheduler + transform + backend差分）を順に実装
-   - 成果物: decode/encode の submit-reap と RGB 変換が別スレッドで動作すること
+   - `NV-P1-004/005` の本統合と `NV-P1-006` Phase 2（NVIDIA CUDA / VT Metal-CoreImage）を実装
+   - 成果物: adapter 経由で backend 実装差分を吸収しつつ decode/encode 本線を非ブロッキング化
 3. 公平比較のための raw frame 入力 API 設計に着手
    - `NV-P1-001` の API 案を先に固め、`NV-P1-003` ベンチ設計へ接続
 

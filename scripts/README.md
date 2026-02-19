@@ -48,7 +48,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 - `--include-internal-metrics` を付けると `VIDEO_HW_NV_METRICS=1` を有効化し、
   `nv_backend` の decode/encode ステージ内訳も集計する。
 - NVIDIA backend 固有パラメータ（`max_in_flight_outputs`）を変える場合は
-  `--nv-max-in-flight <N>` を使用する（未指定時は default `4`）。
+  `--nv-max-in-flight <N>` を使用する（未指定時は default `6`）。
 
 ## 前提
 

@@ -65,7 +65,7 @@
 ## 7. 実装メモ（今回の修正）
 
 - NVIDIA encode の出力回収を in-flight 化（submit/reap 分離）し、bitstream を再利用。
-- `max_in_flight_outputs` は NVIDIA backend 固有パラメータとして公開し、default は `4`。
+- `max_in_flight_outputs` は NVIDIA backend 固有パラメータとして公開し、default は `6`。
 - synthetic 入力の生成をフレームごとの全画素更新から再利用方式に変更し、encode wall time を追加改善。
 - decode ベンチの既定 chunk を `65536` に更新し、HEVC decode は再計測で改善（2.587s -> 2.536s）。
 - `NV-P0-004`: NVDEC のメタデータ専用経路を導入し、SDK 側の NV12->RGB 変換を回避。

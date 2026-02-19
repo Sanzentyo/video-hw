@@ -1,16 +1,30 @@
+mod backend_transform_adapter;
 mod bitstream;
 mod contract;
 #[cfg(feature = "backend-nvidia")]
 mod nv_backend;
 #[cfg(feature = "backend-nvidia")]
 mod nv_meta_decoder;
+mod pipeline;
+mod transform;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;
 
+pub use backend_transform_adapter::{
+    BackendTransformAdapter, DecodedUnit, NvidiaTransformAdapter, VtTransformAdapter,
+};
 pub use contract::{
     BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
     EncodedPacket, EncoderConfig, Frame, NvidiaEncoderOptions, VideoDecoder, VideoEncoder,
+};
+pub use pipeline::{
+    BoundedQueueRx, BoundedQueueTx, InFlightCredits, QueueRecvError, QueueSendError, QueueStats,
+    bounded_queue,
+};
+pub use transform::{
+    ColorRequest, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob, TransformResult,
+    make_argb_to_nv12_dummy, nv12_to_rgb24, should_enqueue_transform,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

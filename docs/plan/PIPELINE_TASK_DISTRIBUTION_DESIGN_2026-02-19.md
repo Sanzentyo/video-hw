@@ -55,12 +55,18 @@ RGB 変換などの重い処理を decode/encode 本線から切り離し、CPU/
 - tail latency 増大時は transform を間引き、metadata/surface 経路を優先
 - drop は ingress ではなく encode 手前で行い、GOP 破壊を避ける
 
+### 5.1 クレジット制（in-flight slots）
+- queue 深さ監視だけでなく、decode/encode それぞれに in-flight credit を持つ
+- `try_acquire()` に失敗した submit は待機し、reap 完了で `release()` する
+- これにより queue の過剰蓄積より先に submit rate を自動抑制する
+
 ## 6. RGB 変換戦略
 
 ### 6.1 方針
 - 変換要求がない限り `NV12/P010` のまま通す
 - RGB が必要な場合のみ `TransformLayer` に job を投げる
 - decode callback 内で RGB 変換しない
+- `ColorRequest::KeepNative` は fast-path とし、Transform queue を経由しない
 
 ### 6.2 実行優先順位
 1. GPU 変換
@@ -118,6 +124,8 @@ pub struct TransformJob {
 - in-flight: decode/encode 各深さ
 - jitter/drop: mean/p95/p99
 - utilization: GPU busy、CPU worker busy
+- transform 実行率: 要求件数 / 実行件数 / downgrade 件数
+- end-to-end latency: ingest PTS -> packet_out PTS（p95/p99）
 
 SLO 例:
 - 1080p30 で `drop_rate < 0.1%`
@@ -137,11 +145,18 @@ SLO 例:
 - RGB 要求ありでも decode/encode スレッドの待ちが増えない
 - backend 切替時に上位 API は不変
 - `--verify` 付きベンチで出力妥当性が常時確認できる
+- KeepNative 経路で不要な CPU copy/transform queue 経由が発生しない
+- drop 発生時も PTS 単調増加と IDR からの復帰が維持される
 
 ## 12. 既知のリスク
 - queue 容量過小でスループット低下、過大で遅延増大
 - backend ごとの surface 互換差により zero-copy 経路が分岐
 - CPU fallback が有効な環境で worker 過負荷になる可能性
+
+## 12.1 drop policy（最小仕様）
+- encode 手前で drop が必要な場合、非IDR を優先して drop し、次 IDR で復帰する
+- drop 後は `force_next_idr` フラグを encode adapter に伝播する
+- telemetry に `dropped_count`, `drop_reason`, `last_output_pts` を残す
 
 ## 13. 関連
 - `docs/plan/NV_BOTTLENECK_REMEDIATION_2026-02-19.md`

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
@@ -44,6 +45,14 @@ struct StageTiming {
     synth: Duration,
     output_lock: Duration,
     reap: Duration,
+}
+
+#[derive(Debug)]
+struct DecodeReapSummary {
+    frames: Vec<Frame>,
+    map_samples: SampleStats,
+    queue_depth_samples: SampleStats,
+    jitter_samples: SampleStats,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -153,18 +162,18 @@ impl NvDecoderAdapter {
         }
 
         self.ensure_decoder()?;
-        let mut frames = Vec::new();
         let mut timing = StageTiming::default();
         let mut pack_samples = SampleStats::default();
         let mut sdk_samples = SampleStats::default();
-        let mut map_samples = SampleStats::default();
-        let mut queue_depth_samples = SampleStats::default();
-        let mut jitter_samples = SampleStats::default();
         let expected_frame_ms = if self.config.fps > 0 {
             1_000.0 / self.config.fps as f64
         } else {
             33.333
         };
+        let mut frames = Vec::new();
+        let mut map_samples = SampleStats::default();
+        let mut queue_depth_samples = SampleStats::default();
+        let mut jitter_samples = SampleStats::default();
         let mut last_pts_90k = None;
 
         for au in access_units {
@@ -190,8 +199,8 @@ impl NvDecoderAdapter {
             timing.sdk += sdk_elapsed;
             sdk_samples.push_duration_ms(sdk_elapsed);
             self.apply_decoded_summary(&decoded);
-            queue_depth_samples.push_value(decoded.len() as f64);
 
+            queue_depth_samples.push_value(decoded.len() as f64);
             let map_start = Instant::now();
             for frame in decoded {
                 update_jitter_samples(
@@ -202,34 +211,39 @@ impl NvDecoderAdapter {
                 );
                 frames.push(frame);
             }
-            let map_elapsed = map_start.elapsed();
-            map_samples.push_duration_ms(map_elapsed);
+            map_samples.push_duration_ms(map_start.elapsed());
         }
+        let reap_summary = DecodeReapSummary {
+            frames,
+            map_samples,
+            queue_depth_samples,
+            jitter_samples,
+        };
 
         if should_report_metrics() {
             eprintln!(
                 "[nv.decode] access_units={}, frames={}, pack_ms={:.3}, sdk_ms={:.3}, map_ms={:.3}, pack_p95_ms={:.3}, pack_p99_ms={:.3}, sdk_p95_ms={:.3}, sdk_p99_ms={:.3}, map_p95_ms={:.3}, map_p99_ms={:.3}, queue_depth_peak={:.0}, queue_depth_p95={:.3}, queue_depth_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
                 access_units.len(),
-                frames.len(),
+                reap_summary.frames.len(),
                 timing.pack.as_secs_f64() * 1_000.0,
                 timing.sdk.as_secs_f64() * 1_000.0,
-                map_samples.samples.iter().sum::<f64>(),
+                reap_summary.map_samples.samples.iter().sum::<f64>(),
                 pack_samples.p95(),
                 pack_samples.p99(),
                 sdk_samples.p95(),
                 sdk_samples.p99(),
-                map_samples.p95(),
-                map_samples.p99(),
-                queue_depth_samples.peak(),
-                queue_depth_samples.p95(),
-                queue_depth_samples.p99(),
-                jitter_samples.mean(),
-                jitter_samples.p95(),
-                jitter_samples.p99()
+                reap_summary.map_samples.p95(),
+                reap_summary.map_samples.p99(),
+                reap_summary.queue_depth_samples.peak(),
+                reap_summary.queue_depth_samples.p95(),
+                reap_summary.queue_depth_samples.p99(),
+                reap_summary.jitter_samples.mean(),
+                reap_summary.jitter_samples.p95(),
+                reap_summary.jitter_samples.p99()
             );
         }
 
-        Ok(frames)
+        Ok(reap_summary.frames)
     }
 
     fn bump_pts_90k(&mut self) -> i64 {
@@ -314,7 +328,7 @@ impl NvEncoderAdapter {
     ) -> Self {
         let max_in_flight_outputs = match backend_options {
             BackendEncoderOptions::Nvidia(options) => options.max_in_flight_outputs.clamp(1, 64),
-            BackendEncoderOptions::Default => 4,
+            BackendEncoderOptions::Default => 6,
         };
         Self {
             codec,
@@ -434,8 +448,11 @@ impl VideoEncoder for NvEncoderAdapter {
 
         let (session, input_layout, _pool_size) = self.make_session(width, height)?;
         let max_in_flight = self.max_in_flight_outputs;
-        let mut input = session.create_input_buffer().map_err(map_encode_error)?;
         let mut pending_outputs = VecDeque::<PendingOutput>::new();
+        let mut reusable_inputs = Vec::with_capacity(max_in_flight);
+        for _ in 0..max_in_flight {
+            reusable_inputs.push(session.create_input_buffer().map_err(map_encode_error)?);
+        }
         let mut reusable_outputs = Vec::with_capacity(max_in_flight);
         for _ in 0..max_in_flight {
             reusable_outputs.push(
@@ -456,101 +473,150 @@ impl VideoEncoder for NvEncoderAdapter {
         };
         let mut last_output_pts_90k = None;
         let input_bytes = make_synthetic_argb(width, height);
+        let (ready_tx, ready_rx) = mpsc::channel::<PendingOutput<'_>>();
+        let (reaped_tx, reaped_rx) = mpsc::channel::<Result<ReapedOutput<'_>, BackendError>>();
+        let mut dispatched_outputs = 0usize;
 
-        for (index, frame) in pending_frames.iter().enumerate() {
-            let mut output = if let Some(bitstream) = reusable_outputs.pop() {
-                bitstream
-            } else {
-                session
-                    .create_output_bitstream()
-                    .map_err(map_encode_error)?
-            };
-            let synth_start = Instant::now();
-            let _ = index;
-            let _ = input_layout;
-            timing.synth += synth_start.elapsed();
-            {
-                let upload_start = Instant::now();
-                let mut lock = input.lock().map_err(map_encode_error)?;
-                unsafe {
-                    lock.write(&input_bytes);
-                }
-                timing.upload += upload_start.elapsed();
-            }
-
-            let input_timestamp = frame
-                .pts_90k
-                .unwrap_or_else(|| (index as i64).saturating_mul(3_000))
-                .max(0) as u64;
-
-            let encode_start = Instant::now();
-            let produced_output = loop {
-                match session.encode_picture(
-                    &mut input,
-                    &mut output,
-                    nvidia_video_codec_sdk::EncodePictureParams {
-                        input_timestamp,
-                        ..Default::default()
-                    },
-                ) {
-                    Ok(()) => break true,
-                    Err(err) if err.kind() == ErrorKind::NeedMoreInput => break false,
-                    Err(err) => return Err(map_encode_error(err)),
-                }
-            };
-            timing.sdk += encode_start.elapsed();
-
-            pending_outputs.push_back(PendingOutput {
-                output,
-                pts_90k: frame.pts_90k,
-                is_keyframe: index == 0,
-            });
-            output_depth_peak = output_depth_peak.max(pending_outputs.len());
-            queue_depth_samples.push_value(pending_outputs.len() as f64);
-
-            if produced_output {
-                while pending_outputs.len() >= max_in_flight {
-                    let pending = pending_outputs.pop_front().ok_or_else(|| {
-                        BackendError::Backend(
-                            "missing pending output after encode submission".to_string(),
-                        )
-                    })?;
+        std::thread::scope(|scope| -> Result<(), BackendError> {
+            let codec = self.codec;
+            let reaper = scope.spawn(move || {
+                while let Ok(pending) = ready_rx.recv() {
                     let lock_start = Instant::now();
-                    let (packet, output) = lock_output_packet(self.codec, pending)?;
-                    let lock_elapsed = lock_start.elapsed();
-                    timing.output_lock += lock_elapsed;
-                    timing.reap += lock_elapsed;
-                    update_jitter_samples(
-                        &mut output_jitter_samples,
-                        &mut last_output_pts_90k,
-                        packet.pts_90k,
-                        expected_frame_ms,
+                    let result = lock_output_packet(codec, pending).map(
+                        |(packet, input, output)| ReapedOutput {
+                            packet,
+                            input,
+                            output,
+                            lock_elapsed: lock_start.elapsed(),
+                        },
                     );
-                    packets.push(packet);
-                    reusable_outputs.push(output);
-                    queue_depth_samples.push_value(pending_outputs.len() as f64);
+                    if reaped_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            for (index, frame) in pending_frames.iter().enumerate() {
+                let mut input = if let Some(buffer) = reusable_inputs.pop() {
+                    buffer
+                } else {
+                    session.create_input_buffer().map_err(map_encode_error)?
+                };
+                let mut output = if let Some(bitstream) = reusable_outputs.pop() {
+                    bitstream
+                } else {
+                    session
+                        .create_output_bitstream()
+                        .map_err(map_encode_error)?
+                };
+                let synth_start = Instant::now();
+                let _ = index;
+                let _ = input_layout;
+                timing.synth += synth_start.elapsed();
+                {
+                    let upload_start = Instant::now();
+                    let mut lock = input.lock().map_err(map_encode_error)?;
+                    unsafe {
+                        lock.write(&input_bytes);
+                    }
+                    timing.upload += upload_start.elapsed();
+                }
+
+                let input_timestamp = frame
+                    .pts_90k
+                    .unwrap_or_else(|| (index as i64).saturating_mul(3_000))
+                    .max(0) as u64;
+
+                let encode_start = Instant::now();
+                let produced_output = loop {
+                    match session.encode_picture(
+                        &mut input,
+                        &mut output,
+                        nvidia_video_codec_sdk::EncodePictureParams {
+                            input_timestamp,
+                            ..Default::default()
+                        },
+                    ) {
+                        Ok(()) => break true,
+                        Err(err) if err.kind() == ErrorKind::NeedMoreInput => break false,
+                        Err(err) => return Err(map_encode_error(err)),
+                    }
+                };
+                timing.sdk += encode_start.elapsed();
+
+                pending_outputs.push_back(PendingOutput {
+                    input,
+                    output,
+                    pts_90k: frame.pts_90k,
+                    is_keyframe: index == 0,
+                });
+                output_depth_peak = output_depth_peak.max(pending_outputs.len());
+                queue_depth_samples.push_value(pending_outputs.len() as f64);
+
+                if produced_output {
+                    while pending_outputs.len() >= max_in_flight {
+                        let pending = pending_outputs.pop_front().ok_or_else(|| {
+                            BackendError::Backend(
+                                "missing pending output after encode submission".to_string(),
+                            )
+                        })?;
+                        ready_tx.send(pending).map_err(|_| {
+                            BackendError::Backend("encode reap channel disconnected".to_string())
+                        })?;
+                        dispatched_outputs = dispatched_outputs.saturating_add(1);
+                        while let Ok(result) = reaped_rx.try_recv() {
+                            let reaped = result?;
+                            timing.output_lock += reaped.lock_elapsed;
+                            timing.reap += reaped.lock_elapsed;
+                            update_jitter_samples(
+                                &mut output_jitter_samples,
+                                &mut last_output_pts_90k,
+                                reaped.packet.pts_90k,
+                                expected_frame_ms,
+                            );
+                            packets.push(reaped.packet);
+                            reusable_inputs.push(reaped.input);
+                            reusable_outputs.push(reaped.output);
+                            queue_depth_samples.push_value(pending_outputs.len() as f64);
+                        }
+                    }
                 }
             }
-        }
 
-        session.end_of_stream().map_err(map_encode_error)?;
+            session.end_of_stream().map_err(map_encode_error)?;
 
-        while let Some(pending) = pending_outputs.pop_front() {
-            let lock_start = Instant::now();
-            let (packet, output) = lock_output_packet(self.codec, pending)?;
-            let lock_elapsed = lock_start.elapsed();
-            timing.output_lock += lock_elapsed;
-            timing.reap += lock_elapsed;
-            update_jitter_samples(
-                &mut output_jitter_samples,
-                &mut last_output_pts_90k,
-                packet.pts_90k,
-                expected_frame_ms,
-            );
-            packets.push(packet);
-            reusable_outputs.push(output);
-            queue_depth_samples.push_value(pending_outputs.len() as f64);
-        }
+            while let Some(pending) = pending_outputs.pop_front() {
+                ready_tx.send(pending).map_err(|_| {
+                    BackendError::Backend("encode reap channel disconnected".to_string())
+                })?;
+                dispatched_outputs = dispatched_outputs.saturating_add(1);
+            }
+            drop(ready_tx);
+
+            while packets.len() < dispatched_outputs {
+                let result = reaped_rx.recv().map_err(|_| {
+                    BackendError::Backend("encode reap result channel disconnected".to_string())
+                })?;
+                let reaped = result?;
+                timing.output_lock += reaped.lock_elapsed;
+                timing.reap += reaped.lock_elapsed;
+                update_jitter_samples(
+                    &mut output_jitter_samples,
+                    &mut last_output_pts_90k,
+                    reaped.packet.pts_90k,
+                    expected_frame_ms,
+                );
+                packets.push(reaped.packet);
+                reusable_inputs.push(reaped.input);
+                reusable_outputs.push(reaped.output);
+                queue_depth_samples.push_value(pending_outputs.len() as f64);
+            }
+
+            reaper
+                .join()
+                .map_err(|_| BackendError::Backend("encode reap worker panicked".to_string()))?;
+            Ok(())
+        })?;
 
         if should_report_metrics() {
             eprintln!(
@@ -583,16 +649,32 @@ enum NvInputLayout {
 }
 
 struct PendingOutput<'a> {
+    input: nvidia_video_codec_sdk::Buffer<'a>,
     output: nvidia_video_codec_sdk::Bitstream<'a>,
     pts_90k: Option<i64>,
     is_keyframe: bool,
 }
 
+struct ReapedOutput<'a> {
+    packet: EncodedPacket,
+    input: nvidia_video_codec_sdk::Buffer<'a>,
+    output: nvidia_video_codec_sdk::Bitstream<'a>,
+    lock_elapsed: Duration,
+}
+
 fn lock_output_packet(
     codec: Codec,
     pending: PendingOutput<'_>,
-) -> Result<(EncodedPacket, nvidia_video_codec_sdk::Bitstream<'_>), BackendError> {
+) -> Result<
+    (
+        EncodedPacket,
+        nvidia_video_codec_sdk::Buffer<'_>,
+        nvidia_video_codec_sdk::Bitstream<'_>,
+    ),
+    BackendError,
+> {
     let PendingOutput {
+        input,
         mut output,
         pts_90k,
         is_keyframe,
@@ -608,6 +690,7 @@ fn lock_output_packet(
             pts_90k,
             is_keyframe,
         },
+        input,
         output,
     ))
 }

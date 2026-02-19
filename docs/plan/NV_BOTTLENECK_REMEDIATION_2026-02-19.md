@@ -111,6 +111,11 @@
 - [ ] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
 - [ ] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
 - [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
+  - Phase 1 実装済み: `src/backend_transform_adapter.rs`
+    - 共通 `BackendTransformAdapter` trait
+    - `DecodedUnit`（`MetadataOnly | Nv12Cpu | RgbCpu`）
+    - NVIDIA 側: KeepNative fast-path + NV12->RGB 非同期 dispatch（`TransformDispatcher` 連携）
+    - VT 側: パススルー stub（Metal/CoreImage 実装は未着手）
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
 
@@ -135,3 +140,26 @@
 注記（今回実施）:
 - `warmup 0 --repeat 1` 条件で `--include-internal-metrics` のスモーク計測は実施済み。
 - `NV-P0-004` 実装後に `--warmup 1 --repeat 3 --include-internal-metrics --verify` を h264/hevc で実行済み（Step 2/3 の repeat=5 は未実施）。
+- `NV-P1-004/005` の基盤として `src/pipeline.rs`（bounded queue）と `src/transform.rs`（CPU worker 変換）を追加済み。backend への本統合は次段。
+- レビュー指摘の反映:
+  - スロット制（in-flight credits）を `src/pipeline.rs` に追加
+  - KeepNative fast-path 判定を `src/transform.rs` に追加
+  - decode/encode submit-reap 分離を `src/nv_backend.rs` に反映（thread 分離）
+  - decode metadata 経路で call 単位 reaper thread 生成を除去（`src/nv_backend.rs`）
+  - encode 入力/出力バッファを in-flight 数に応じてプール再利用（`src/nv_backend.rs`）
+- 再計測（`--warmup 1 --repeat 3 --include-internal-metrics --verify`）:
+  - `output/benchmark-nv-precise-h264-1771499558.md`
+  - `output/benchmark-nv-precise-hevc-1771499564.md`
+  - `output/benchmark-nv-precise-h264-1771500342.md`
+  - `output/benchmark-nv-precise-hevc-1771500342.md`
+  - `output/benchmark-nv-precise-h264-1771500639.md`
+  - `output/benchmark-nv-precise-hevc-1771500639.md`
+  - `output/benchmark-nv-precise-h264-1771501008.md`
+  - `output/benchmark-nv-precise-hevc-1771501008.md`
+  - `output/benchmark-nv-precise-h264-1771505433.md`
+  - `output/benchmark-nv-precise-hevc-1771505433.md`
+  - mean（最新）:
+    - h264: video-hw decode 0.338s / encode 0.320s, ffmpeg decode 0.538s / encode 0.259s
+    - hevc: video-hw decode 0.371s / encode 0.321s, ffmpeg decode 0.536s / encode 0.232s
+  - verify:
+    - h264/hevc とも `ffprobe` + `ffmpeg -v error` 検証で decode=ok

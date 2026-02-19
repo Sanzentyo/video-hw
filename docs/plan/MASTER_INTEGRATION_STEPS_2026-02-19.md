@@ -7,7 +7,7 @@
 - `src/nv_backend.rs`
   - encode 出力回収の in-flight 化
   - bitstream 再利用
-  - NVIDIA backend 固有パラメータ `max_in_flight_outputs` 対応（default=4）
+  - NVIDIA backend 固有パラメータ `max_in_flight_outputs` 対応（default=6）
 - `scripts/benchmark_ffmpeg_nv_precise.rs`
 - ドキュメント更新
   - `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`

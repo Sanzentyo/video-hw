@@ -54,7 +54,7 @@ pub struct NvidiaEncoderOptions {
 impl Default for NvidiaEncoderOptions {
     fn default() -> Self {
         Self {
-            max_in_flight_outputs: 4,
+            max_in_flight_outputs: 6,
         }
     }
 }

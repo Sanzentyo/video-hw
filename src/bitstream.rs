@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::mem;
 
 use crate::{BackendError, Codec};
