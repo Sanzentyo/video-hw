@@ -16,11 +16,14 @@
 
 ## 直近の優先タスク
 
-1. E2E の NVIDIA 実機検証拡充
+1. パイプライン分散化（CPU/GPU）
+   - `PipelineScheduler` による submit/reap/transform/egress の分離
+   - RGB 変換を非同期 worker（GPU優先、CPU fallback）へ移動
+2. E2E の NVIDIA 実機検証拡充
    - Linux + GPU 環境で sample video ベースの回帰テストを追加
-2. CI 分離
+3. CI 分離
    - macOS (VT) / Linux+GPU (NVIDIA) を分離して安定運用
-3. encode 比較の公平化
+4. encode 比較の公平化
    - `video-hw` に同一素材入力 encode 経路を追加し、`ffmpeg` 比較条件を統一
 
 ## 受け入れ条件
@@ -33,6 +36,7 @@
 
 - `docs/status/STATUS.md`
 - `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
+- `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/plan/MIGRATION_AND_REBUILD_GUIDE.md`
 - `docs/research/RESEARCH.md`

@@ -77,7 +77,13 @@
 - encode は現状、`video-hw` が synthetic ARGB 入力で、ffmpeg は `testsrc2` 入力を使用。
 - encode の完全公平比較には、`video-hw` 側へ同一入力データ経路（raw frame input API）の追加が必要。
 
-## 9. 自動実行
+## 9. 次段の実装方針（分散パイプライン）
+
+- RGB 変換や resize などの CPU/GPU タスクは decode/encode 本線と別スレッドへオフロードする。
+- backend 差分（NVIDIA / VT）は adapter 層で吸収し、上位は共通 queue/scheduler 契約で扱う。
+- 設計詳細: `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
+
+## 10. 自動実行
 
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv.rs --codec h264 --release

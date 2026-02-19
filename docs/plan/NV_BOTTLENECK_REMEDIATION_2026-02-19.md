@@ -92,6 +92,13 @@
 4. SLO 逸脱時は自動で旧経路へフェイルバック。
 5. 週次で性能/安定性レビューし、P1/P2 の着手判定。
 
+### 8.1 追補: スレッド分散設計
+
+- RGB 変換を decode callback / encode submit から切り離し、専用 worker へオフロードする設計を追加。
+- 入出力 CPU タスク（ingress/egress）と GPU 本線（decode/encode submit-reap）を分離し、queue/backpressure で制御。
+- backend 差分（NVIDIA / VideoToolbox）は adapter 層に閉じ、上位契約は共通化。
+- 詳細: `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
+
 ## 9. Issue 分解に使える具体タスク
 
 - [x] NV-P0-001: stage 別計測（decode pack/decode map, encode submit/reap）を追加
@@ -101,6 +108,9 @@
 - [ ] NV-P1-001: Frame 契約の拡張案（raw frame payload / zero-copy 方針）設計
 - [ ] NV-P1-002: encode/decode セッション常駐化とバッファプール再利用
 - [ ] NV-P1-003: ffmpeg 同条件比較ベンチ（同一入力・同一フレーム列）作成
+- [ ] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
+- [ ] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
+- [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
 

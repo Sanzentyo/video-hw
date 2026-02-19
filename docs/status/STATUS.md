@@ -18,6 +18,7 @@
   - encode: `nvidia-video-codec-sdk` safe `Encoder/Session` を接続
   - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 4）
   - metrics: decode/encode stage 時間 + queue/jitter + p95/p99 出力に対応
+  - 設計追補: RGB 変換を非同期 worker へ切り出す分散パイプライン設計を追加
 - 増分 Annex-B parser + AU 組み立て
 - root examples
   - `examples/decode_annexb.rs`
@@ -77,7 +78,10 @@
 1. 外れ値（24.677s）再現条件を固定化
    - `NV-P0-005` の再現スクリプトを作り、再現有無と条件を記録
    - 成果物: `docs/status/` に外れ値切り分けメモを追加
-2. 公平比較のための raw frame 入力 API 設計に着手
+2. 分散パイプライン実装に着手
+   - `NV-P1-004/005/006`（scheduler + transform + backend差分）を順に実装
+   - 成果物: decode/encode の submit-reap と RGB 変換が別スレッドで動作すること
+3. 公平比較のための raw frame 入力 API 設計に着手
    - `NV-P1-001` の API 案を先に固め、`NV-P1-003` ベンチ設計へ接続
 
 ## 8. 関連文書
@@ -90,5 +94,6 @@
 - `docs/status/NV_PRECISE_ANALYSIS_2026-02-19.md`
 - `docs/plan/MASTER_INTEGRATION_STEPS_2026-02-19.md`
 - `docs/plan/ROADMAP.md`
+- `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/research/RESEARCH.md`

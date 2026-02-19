@@ -10,6 +10,7 @@
 - `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
 - `../scripts/README.md`（スクリプト実装方針）
 - `plan/ROADMAP.md`
+- `plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
 - `plan/TEST_PLAN_MULTIBACKEND.md`
 
 ## 設計・調査メモ
