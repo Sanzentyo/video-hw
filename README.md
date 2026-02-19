@@ -115,6 +115,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 ## ドキュメント
 
 - インデックス: `docs/README.md`
+- 利用ガイド（厳密 I/O 仕様）: `docs/USAGE_STRICT.md`
 - 全体状態: `docs/status/STATUS.md`
 - VT 比較: `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - NV 比較: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`

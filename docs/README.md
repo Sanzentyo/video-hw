@@ -4,6 +4,7 @@
 
 ## 現行ドキュメント
 
+- `USAGE_STRICT.md`（厳密 I/O 仕様つき利用ガイド）
 - `status/STATUS.md`
 - `status/BENCHMARK_2026-02-18.md`
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
