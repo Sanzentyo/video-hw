@@ -9,13 +9,14 @@ use nvidia_video_codec_sdk::{
     DecodeCodec, Encoder, EncoderInitParams, ErrorKind, ReconfigureParams,
 };
 
+use crate::backend_transform_adapter::{DecodedUnit, NvidiaTransformAdapter};
 use crate::bitstream::{AccessUnit, StatefulBitstreamAssembler};
 use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
-    BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
-    EncodedPacket, Frame, NvidiaSessionConfig, SessionSwitchMode, SessionSwitchRequest,
-    VideoDecoder, VideoEncoder,
+    BackendEncoderOptions, BackendError, CapabilityReport, Codec, ColorRequest, DecodeSummary,
+    DecoderConfig, EncodedPacket, Frame, NvidiaSessionConfig, SessionSwitchMode,
+    SessionSwitchRequest, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Default)]
@@ -124,10 +125,32 @@ fn should_use_safe_lifetime_mode() -> bool {
         .unwrap_or(false)
 }
 
+fn should_enable_pipeline_scheduler() -> bool {
+    std::env::var("VIDEO_HW_NV_PIPELINE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn pipeline_queue_capacity(max_in_flight_outputs: usize) -> usize {
+    std::env::var("VIDEO_HW_NV_PIPELINE_QUEUE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 1024))
+        .unwrap_or_else(|| (max_in_flight_outputs.saturating_mul(2)).clamp(4, 128))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NvBufferLifetimeMode {
     ReusablePoolUnsafe,
     PerFrameSafe,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct CopyStats {
+    input_upload_bytes: u64,
+    input_upload_frames: u64,
+    output_copy_bytes: u64,
+    output_copy_packets: u64,
 }
 
 pub struct NvDecoderAdapter {
@@ -346,6 +369,7 @@ pub struct NvEncoderAdapter {
     width: Option<usize>,
     height: Option<usize>,
     buffer_lifetime_mode: NvBufferLifetimeMode,
+    pipeline_scheduler: Option<PipelineScheduler>,
 }
 
 impl NvEncoderAdapter {
@@ -386,6 +410,15 @@ impl NvEncoderAdapter {
             } else {
                 NvBufferLifetimeMode::ReusablePoolUnsafe
             },
+            pipeline_scheduler: if should_enable_pipeline_scheduler() {
+                let capacity = pipeline_queue_capacity(max_in_flight_outputs);
+                Some(PipelineScheduler::new(
+                    NvidiaTransformAdapter::new(1, capacity),
+                    capacity,
+                ))
+            } else {
+                None
+            },
         }
     }
 
@@ -410,6 +443,33 @@ impl NvEncoderAdapter {
             .pending_switch_generation()
             .unwrap_or_else(|| self.configured_generation());
         scheduler.set_generation(generation.max(1));
+    }
+
+    fn preprocess_frame_via_pipeline(&mut self, frame: Frame) -> Result<Frame, BackendError> {
+        let Some(scheduler) = &self.pipeline_scheduler else {
+            return Ok(frame);
+        };
+        self.sync_pipeline_generation(scheduler);
+        let generation = self.pipeline_generation_hint().unwrap_or(1);
+        scheduler.submit_with_generation(
+            generation,
+            DecodedUnit::MetadataOnly(frame),
+            ColorRequest::KeepNative,
+            None,
+        )?;
+        let output = scheduler
+            .recv_timeout(Duration::from_millis(100))?
+            .ok_or_else(|| {
+                BackendError::TemporaryBackpressure(
+                    "pipeline scheduler timed out while preprocessing frame".to_string(),
+                )
+            })??;
+        match output {
+            DecodedUnit::MetadataOnly(frame) => Ok(frame),
+            other => Err(BackendError::Backend(format!(
+                "unexpected pipeline output for encoder preprocess: {other:?}"
+            ))),
+        }
     }
 
     fn ensure_cuda_ctx(&mut self) -> Result<Arc<CudaContext>, BackendError> {
@@ -587,6 +647,7 @@ impl VideoEncoder for NvEncoderAdapter {
             self.height = Some(frame.height);
         }
 
+        frame = self.preprocess_frame_via_pipeline(frame)?;
         self.pending_frames.push(frame);
         Ok(Vec::new())
     }
@@ -619,6 +680,7 @@ impl VideoEncoder for NvEncoderAdapter {
         let mut pending_outputs = VecDeque::<PendingOutput>::new();
         let mut packets = Vec::new();
         let mut timing = StageTiming::default();
+        let mut copy_stats = CopyStats::default();
         let mut output_depth_peak = 0usize;
         let mut queue_depth_samples = SampleStats::default();
         let mut output_jitter_samples = SampleStats::default();
@@ -672,7 +734,13 @@ impl VideoEncoder for NvEncoderAdapter {
                         reaped.packet.pts_90k,
                         expected_frame_ms,
                     );
-                    packets.push(reaped.packet);
+                    let packet = reaped.packet;
+                    copy_stats.output_copy_bytes = copy_stats
+                        .output_copy_bytes
+                        .saturating_add(packet.data.len() as u64);
+                    copy_stats.output_copy_packets =
+                        copy_stats.output_copy_packets.saturating_add(1);
+                    packets.push(packet);
                     session.checkin_pair(reaped.pair);
                     queue_depth_samples.push_value(pending_outputs.len() as f64);
                 }
@@ -691,6 +759,10 @@ impl VideoEncoder for NvEncoderAdapter {
                     )));
                 }
                 timing.synth += synth_start.elapsed();
+                copy_stats.input_upload_bytes = copy_stats
+                    .input_upload_bytes
+                    .saturating_add(argb.len() as u64);
+                copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
                 {
                     let upload_start = Instant::now();
                     let mut lock = pair.input.lock().map_err(map_encode_error)?;
@@ -754,7 +826,13 @@ impl VideoEncoder for NvEncoderAdapter {
                                 reaped.packet.pts_90k,
                                 expected_frame_ms,
                             );
-                            packets.push(reaped.packet);
+                            let packet = reaped.packet;
+                            copy_stats.output_copy_bytes = copy_stats
+                                .output_copy_bytes
+                                .saturating_add(packet.data.len() as u64);
+                            copy_stats.output_copy_packets =
+                                copy_stats.output_copy_packets.saturating_add(1);
+                            packets.push(packet);
                             session.checkin_pair(reaped.pair);
                             queue_depth_samples.push_value(pending_outputs.len() as f64);
                         }
@@ -785,7 +863,12 @@ impl VideoEncoder for NvEncoderAdapter {
                     reaped.packet.pts_90k,
                     expected_frame_ms,
                 );
-                packets.push(reaped.packet);
+                let packet = reaped.packet;
+                copy_stats.output_copy_bytes = copy_stats
+                    .output_copy_bytes
+                    .saturating_add(packet.data.len() as u64);
+                copy_stats.output_copy_packets = copy_stats.output_copy_packets.saturating_add(1);
+                packets.push(packet);
                 session.checkin_pair(reaped.pair);
                 queue_depth_samples.push_value(pending_outputs.len() as f64);
             }
@@ -798,7 +881,7 @@ impl VideoEncoder for NvEncoderAdapter {
 
         if should_report_metrics() {
             eprintln!(
-                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
+                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),
                 packets.len(),
                 output_depth_peak,
@@ -813,7 +896,11 @@ impl VideoEncoder for NvEncoderAdapter {
                 queue_depth_samples.p99(),
                 output_jitter_samples.mean(),
                 output_jitter_samples.p95(),
-                output_jitter_samples.p99()
+                output_jitter_samples.p99(),
+                copy_stats.input_upload_bytes,
+                copy_stats.input_upload_frames,
+                copy_stats.output_copy_bytes,
+                copy_stats.output_copy_packets
             );
         }
 
@@ -851,6 +938,7 @@ impl NvEncoderAdapter {
     ) -> Result<Vec<EncodedPacket>, BackendError> {
         let mut packets = Vec::with_capacity(pending_frames.len());
         let mut timing = StageTiming::default();
+        let mut copy_stats = CopyStats::default();
         let mut queue_depth_samples = SampleStats::default();
         let mut output_jitter_samples = SampleStats::default();
         let expected_frame_ms = if fps > 0 {
@@ -892,6 +980,10 @@ impl NvEncoderAdapter {
                     packet.pts_90k,
                     expected_frame_ms,
                 );
+                copy_stats.output_copy_bytes = copy_stats
+                    .output_copy_bytes
+                    .saturating_add(packet.data.len() as u64);
+                copy_stats.output_copy_packets = copy_stats.output_copy_packets.saturating_add(1);
                 packets.push(packet);
                 free_pairs.push_back(pair);
                 queue_depth_samples.push_value(pending_outputs.len() as f64);
@@ -913,6 +1005,10 @@ impl NvEncoderAdapter {
                 )));
             }
             timing.synth += synth_start.elapsed();
+            copy_stats.input_upload_bytes = copy_stats
+                .input_upload_bytes
+                .saturating_add(argb.len() as u64);
+            copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
 
             let upload_start = Instant::now();
             {
@@ -969,6 +1065,10 @@ impl NvEncoderAdapter {
                 packet.pts_90k,
                 expected_frame_ms,
             );
+            copy_stats.output_copy_bytes = copy_stats
+                .output_copy_bytes
+                .saturating_add(packet.data.len() as u64);
+            copy_stats.output_copy_packets = copy_stats.output_copy_packets.saturating_add(1);
             packets.push(packet);
             free_pairs.push_back(pair);
             queue_depth_samples.push_value(pending_outputs.len() as f64);
@@ -976,7 +1076,7 @@ impl NvEncoderAdapter {
 
         if should_report_metrics() {
             eprintln!(
-                "[nv.encode.safe] frames={}, packets={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}",
+                "[nv.encode.safe] frames={}, packets={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),
                 packets.len(),
                 timing.synth.as_secs_f64() * 1_000.0,
@@ -988,7 +1088,11 @@ impl NvEncoderAdapter {
                 queue_depth_samples.p99(),
                 output_jitter_samples.mean(),
                 output_jitter_samples.p95(),
-                output_jitter_samples.p99()
+                output_jitter_samples.p99(),
+                copy_stats.input_upload_bytes,
+                copy_stats.input_upload_frames,
+                copy_stats.output_copy_bytes,
+                copy_stats.output_copy_packets
             );
         }
 
@@ -1060,7 +1164,8 @@ impl NvEncoderAdapter {
                 let width = existing.width;
                 let height = existing.height;
                 drop(existing);
-                self.active_session = Some(self.build_session(width, height, pending.target_generation)?);
+                self.active_session =
+                    Some(self.build_session(width, height, pending.target_generation)?);
                 self.active_generation = pending.target_generation;
                 self.config_generation = pending.target_generation;
                 self.session_reconfigure_pending = false;
@@ -1419,5 +1524,34 @@ mod tests {
             .unwrap();
         adapter.sync_pipeline_generation(&scheduler);
         assert_eq!(scheduler.generation(), adapter.configured_generation());
+    }
+
+    #[test]
+    fn push_frame_succeeds_with_integrated_pipeline_scheduler() {
+        let mut adapter =
+            NvEncoderAdapter::with_config(Codec::H264, 30, true, BackendEncoderOptions::Default);
+        let scheduler = PipelineScheduler::new(NvidiaTransformAdapter::new(1, 8), 8);
+        scheduler.set_generation(999);
+        adapter.pipeline_scheduler = Some(scheduler);
+
+        adapter
+            .push_frame(Frame {
+                width: 640,
+                height: 360,
+                pixel_format: None,
+                pts_90k: Some(0),
+                argb: None,
+                force_keyframe: false,
+            })
+            .unwrap();
+
+        assert_eq!(adapter.pending_frames.len(), 1);
+        assert_eq!(
+            adapter
+                .pipeline_scheduler
+                .as_ref()
+                .map(PipelineScheduler::generation),
+            Some(adapter.configured_generation())
+        );
     }
 }

@@ -29,8 +29,10 @@
   - encode: session generation（`active/config/next`）を導入し、切替適用世代を明示管理
   - encode: `VIDEO_HW_NV_SAFE_LIFETIME=1` で safe lifetime 経路（per-frame buffer）を選択可能化
   - encode: safe lifetime 経路を flush 内ローカルプール再利用に最適化（per-frame buffer 作成を回避）
+  - encode: `VIDEO_HW_NV_PIPELINE=1` で `PipelineScheduler` を encode 本線前処理に接続（generation 同期つき）
   - encode tuning: backend 固有パラメータ `max_in_flight_outputs`（default: 6 に更新）
   - metrics: decode/encode stage 時間 + queue/jitter + p95/p99 出力に対応
+  - metrics: encode copy 計測（`input_copy_bytes`, `output_copy_bytes`）を追加
   - 設計追補: RGB 変換を非同期 worker へ切り出す分散パイプライン設計を追加
 - 分散パイプライン基盤（実装）
   - `src/pipeline.rs`: bounded queue（depth/peak 統計付き）
@@ -44,6 +46,7 @@
   - `src/cuda_transform.rs`: CUDA kernel（NVRTC）による NV12->RGB 変換実体
   - `src/pipeline_scheduler.rs`: `BackendTransformAdapter` を使う submit/reap スケジューラ
   - `src/pipeline_scheduler.rs`: generation 制御（`submit_with_generation` / `set_generation` / stale drop）を追加
+  - `src/nv_backend.rs`: `PipelineScheduler` 連携前処理（KeepNative fast-path）を接続
   - `examples/transform_nv12_rgb.rs`: worker 分散動作の実行例
   - `examples/encode_raw_argb.rs`: raw ARGB 入力で encode する実行例
   - `src/nv_backend.rs`: decode/encode の submit/reap 分離（worker thread）を導入
@@ -133,6 +136,8 @@
     - `output/benchmark-nv-precise-h264-1771522805.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
     - `output/benchmark-nv-precise-hevc-1771522818.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
     - `output/benchmark-nv-precise-h264-1771522938.md`（repeat=3, verify, equal-raw-input, 最新）
+    - `output/benchmark-nv-precise-h264-1771523551.md`（repeat=1, verify, equal-raw-input, pipeline-on）
+    - `output/benchmark-nv-precise-h264-1771523753.md`（repeat=1, verify, equal-raw-input, pipeline-on, 最新）
     - `output/benchmark-nv-precise-h264-1771515386.md`（repeat=3, verify, equal-raw-input）
     - `output/benchmark-nv-precise-hevc-1771515398.md`（repeat=3, verify, equal-raw-input）
   - 最新 mean（warmup 1 / repeat 3 / verify）
@@ -173,17 +178,29 @@
 
 - CI での GPU ランナー常設（Windows + NVIDIA）
 - encode の品質比較（PSNR/SSIM）とビットレート比較の自動化
-- encode 公平比較のための raw frame 入力 API の整理
+- encode 公平比較のための raw frame 入力 API の整理（契約は文書化済み）
+- `NV-P1-002`: safe lifetime 経路の追加最適化（本セッションでは進捗確認のうえ打ち止め）
+- VT backend の NV 同等化（別セッションで集中的に実施）
+
+## 6.1 将来タスク（保留）
+
+- `NV-P1-002` の safe lifetime 追加最適化は保留（現状は運用可能、最適化は次回）
+- 品質比較（PSNR/SSIM）と bitrate 比較の自動化は保留
+- GPU ランナー常設 CI は保留（運用基盤タスク）
+- マルチストリーム backpressure 最適化（`NV-P2-001`）は保留
+- canary/rollback 手順の整備（`NV-P2-002`）は保留
 
 ## 7. 次セッションで着手すること（優先順）
 
-1. 分散パイプライン実装に着手
-   - `NV-P1-004/005` の backend 本統合（`PipelineScheduler` を `nv_backend` decode/encode 本線へ接続）
-   - 成果物: adapter 経由で backend 実装差分を吸収しつつ decode/encode 本線を非ブロッキング化
-2. 公平比較のための raw frame 入力 API 設計に着手
-   - `NV-P1-001` / `NV-P1-003` は実装済み。次は zero-copy 契約と copy 計測の明文化
-3. セッション常駐化の実装
-   - `NV-P1-002` として NVENC session 常駐化（safe API 制約の回避設計）を実装し、起動スパイクを評価
+1. `NV-P1-004/005` backend 本統合の運用検証
+   - `VIDEO_HW_NV_PIPELINE=1` 経路の soak test（長時間・複数条件）を実施
+2. raw frame 入力 API の契約具体化
+   - zero-copy 段階案に沿って `Frame` 所有形態を拡張（`Arc<[u8]>` など）
+3. `NV-P1-002` は本セッションでいったん打ち止め
+   - safe lifetime の追加最適化は次回に再開
+4. VT backend を NV 同等水準へ引き上げる専用セッションを開始
+   - 目標: decode/encode の submit/reap 分離、transform adapter 本実装、ffmpeg 比較基盤を NV と同等レベルへ揃える
+   - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 
 ## 8. 関連文書
 
@@ -196,5 +213,8 @@
 - `docs/plan/MASTER_INTEGRATION_STEPS_2026-02-19.md`
 - `docs/plan/ROADMAP.md`
 - `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
+- `docs/plan/NV_SESSION_ARCHITECTURE_REDESIGN_2026-02-19.md`
+- `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
+- `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/research/RESEARCH.md`

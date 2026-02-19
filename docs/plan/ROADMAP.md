@@ -25,6 +25,8 @@
    - macOS (VT) / Linux+GPU (NVIDIA) を分離して安定運用
 4. encode 比較の公平化
    - `video-hw` に同一素材入力 encode 経路を追加し、`ffmpeg` 比較条件を統一
+5. VT parity セッション
+   - `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md` に沿って VT を NV 同等水準へ引き上げる
 
 ## 受け入れ条件
 
@@ -37,6 +39,7 @@
 - `docs/status/STATUS.md`
 - `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `docs/plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`
+- `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 - `docs/plan/TEST_PLAN_MULTIBACKEND.md`
 - `docs/plan/MIGRATION_AND_REBUILD_GUIDE.md`
 - `docs/research/RESEARCH.md`

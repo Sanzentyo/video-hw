@@ -120,15 +120,18 @@
   - 進捗: `PipelineScheduler` に generation 制御（stale generation drop）を追加し、`NvEncoderAdapter::sync_pipeline_generation` で接続
   - 進捗: safe API lifetime 制約に対して `VIDEO_HW_NV_SAFE_LIFETIME=1` の per-frame buffer 経路を追加（unsafe transmute 再利用プールを回避可能）
   - 進捗: safe 経路を flush 内ローカルプール再利用へ最適化し、h264 encode 1.011s -> 0.391s（repeat=1, verify）
+  - 状態: 本セッションでは進捗確認を行い、追加最適化は打ち止めとして次回へ持ち越し
   - 未完: safe 経路のさらなる最適化（依然として再利用プール経路より不利）
   - 設計: `docs/plan/NV_SESSION_ARCHITECTURE_REDESIGN_2026-02-19.md`
 - [x] NV-P1-003: ffmpeg 同条件比較ベンチ（同一入力・同一フレーム列）作成
   - `scripts/benchmark_ffmpeg_nv_precise.rs` に `--equal-raw-input` を追加
   - `examples/encode_raw_argb.rs` を追加（同一 ARGB 入力列を video-hw 側へ投入）
-- [ ] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
-  - 進捗: `src/pipeline_scheduler.rs` を追加（submit/reap + transform 分離）
-- [ ] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
-  - 進捗: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
+- [x] NV-P1-004: `PipelineScheduler` 導入（submit/reap/transform/egress のスレッド分離）
+  - 実装: `src/pipeline_scheduler.rs`（submit/reap + transform 分離）
+  - 実装: `src/nv_backend.rs` encode 本線前処理へオプション接続（`VIDEO_HW_NV_PIPELINE=1`）
+  - 実装: generation 同期（`NvEncoderAdapter::sync_pipeline_generation`）
+- [x] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
+  - 実装: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
 - [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
   - Phase 1 実装済み: `src/backend_transform_adapter.rs`
     - 共通 `BackendTransformAdapter` trait
@@ -144,8 +147,24 @@
     - 運用乖離のある「1回だけ入力 upload」最適化は採用しない
   - 追補（今回2）:
     - `src/pipeline_scheduler.rs` を追加し、NVIDIA adapter との submit/reap 駆動を実装
+  - 追補（今回3）:
+    - `src/nv_backend.rs` encode 本線で `PipelineScheduler` を利用可能化（Windows/NVIDIA 範囲）
+    - encode metrics に copy 計測（`input_copy_bytes`, `output_copy_bytes`）を追加
+  - 契約文書:
+    - `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
+  - 方針（保留）:
+    - VT 実体（Metal/CoreImage）は別セッションで NV 同等水準まで引き上げる
+    - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
+
+## 9.1 将来タスク（保留・次回以降）
+
+- `NV-P1-002` safe lifetime 追加最適化（本セッションでは打ち止め）
+- `NV-P1-006` VT 実体（Metal/CoreImage）の実装完了
+- 品質比較（PSNR/SSIM）と bitrate 比較の自動化
+- GPU ランナー常設 CI（Windows + NVIDIA）
+- `NV-P2-001` / `NV-P2-002` の運用段階タスク
 
 注記（2026-02-19 再計測）:
 - `output/benchmark-nv-precise-h264-1771496033.md`: encode mean は video-hw 0.303s / ffmpeg 0.221s（約 1.37x）
@@ -168,7 +187,7 @@
 注記（今回実施）:
 - `warmup 0 --repeat 1 --verify` で h264 を 1 回実施し、24.677s 外れ値は非再現（`output/benchmark-nv-precise-h264-1771514429.md`）。
 - `NV-P0-004` 実装後に `--warmup 1 --repeat 5 --include-internal-metrics` を h264/hevc で実行済み。
-- `NV-P1-004/005` の基盤として `src/pipeline.rs`（bounded queue）と `src/transform.rs`（CPU worker 変換）を追加済み。backend への本統合は次段。
+- `NV-P1-004/005` は `src/pipeline_scheduler.rs` と `src/nv_backend.rs`（`VIDEO_HW_NV_PIPELINE=1`）で backend 本統合まで実施済み。
 - レビュー指摘の反映:
   - スロット制（in-flight credits）を `src/pipeline.rs` に追加
   - KeepNative fast-path 判定を `src/transform.rs` に追加
@@ -216,6 +235,8 @@
   - `output/benchmark-nv-precise-h264-1771522805.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
   - `output/benchmark-nv-precise-hevc-1771522818.md`（repeat=3, verify, equal-raw-input, safe-lifetime）
   - `output/benchmark-nv-precise-h264-1771522938.md`（repeat=3, verify, equal-raw-input, 最新）
+  - `output/benchmark-nv-precise-h264-1771523551.md`（repeat=1, verify, equal-raw-input, pipeline-on）
+  - `output/benchmark-nv-precise-h264-1771523753.md`（repeat=1, verify, equal-raw-input, pipeline-on, 最新）
   - `output/benchmark-nv-precise-h264-1771515386.md`（repeat=3, verify, equal-raw-input）
   - `output/benchmark-nv-precise-hevc-1771515398.md`（repeat=3, verify, equal-raw-input）
   - mean（最新）:

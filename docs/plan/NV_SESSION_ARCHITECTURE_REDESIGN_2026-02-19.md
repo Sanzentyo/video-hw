@@ -232,6 +232,8 @@ pub trait SessionController {
 - VT 実装は Windows でコンパイル不能のため設計のみに留める
 - NV では `Session` 専用構造体への移行を許容する
 - `signage-backend` 方式（session struct + ring + split thread）を基盤として採用する
+- 追加方針: VT は別セッションで NV 同等水準（submit/reap 分離、adapter 本実装、比較計測）まで引き上げる
+  - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 
 ## 13. 関連
 
@@ -263,3 +265,7 @@ pub trait SessionController {
   - update: `VIDEO_HW_NV_SAFE_LIFETIME=1` で per-frame buffer 経路を有効化し、safe API lifetime 制約の回避経路を追加
   - update: safe lifetime 経路は flush 内ローカルプール再利用へ最適化し、per-frame create/destroy オーバーヘッドを削減
   - update: `PipelineScheduler` 側 generation 制御と `NvEncoderAdapter::sync_pipeline_generation` を接続
+  - update: `VIDEO_HW_NV_PIPELINE=1` で `PipelineScheduler` を encode 本線前処理へ接続
+  - update: 本セッションでは `NV-P1-002` の追加最適化は打ち止めとし、進捗確認まで
+  - update: raw input zero-copy 契約と copy 計測の文書を追加
+    - `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
