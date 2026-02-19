@@ -1,8 +1,8 @@
 mod backend_transform_adapter;
 mod bitstream;
+mod contract;
 #[cfg(feature = "backend-nvidia")]
 mod cuda_transform;
-mod contract;
 #[cfg(feature = "backend-nvidia")]
 mod nv_backend;
 #[cfg(feature = "backend-nvidia")]
@@ -19,7 +19,8 @@ pub use backend_transform_adapter::{
 };
 pub use contract::{
     BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeSummary, DecoderConfig,
-    EncodedPacket, EncoderConfig, Frame, NvidiaEncoderOptions, VideoDecoder, VideoEncoder,
+    EncodedPacket, EncoderConfig, Frame, NvidiaEncoderOptions, NvidiaSessionConfig,
+    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
 };
 pub use pipeline::{
     BoundedQueueRx, BoundedQueueTx, InFlightCredits, QueueRecvError, QueueSendError, QueueStats,
@@ -156,6 +157,19 @@ impl Encoder {
 
     pub fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
         self.inner.query_capability(codec)
+    }
+
+    pub fn request_session_switch(
+        &mut self,
+        request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        self.inner.request_session_switch(request)
+    }
+
+    pub fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
+        if let Some(generation) = self.inner.pipeline_generation_hint() {
+            scheduler.set_generation(generation.max(1));
+        }
     }
 }
 

@@ -11,6 +11,7 @@ pub struct Frame {
     pub pixel_format: Option<u32>,
     pub pts_90k: Option<i64>,
     pub argb: Option<Vec<u8>>,
+    pub force_keyframe: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,12 +51,38 @@ pub enum BackendEncoderOptions {
 #[derive(Debug, Clone)]
 pub struct NvidiaEncoderOptions {
     pub max_in_flight_outputs: usize,
+    pub gop_length: Option<u32>,
+    pub frame_interval_p: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSwitchMode {
+    Immediate,
+    OnNextKeyframe,
+    DrainThenSwap,
+}
+
+#[derive(Debug, Clone)]
+pub struct NvidiaSessionConfig {
+    pub gop_length: Option<u32>,
+    pub frame_interval_p: Option<i32>,
+    pub force_idr_on_activate: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionSwitchRequest {
+    Nvidia {
+        config: NvidiaSessionConfig,
+        mode: SessionSwitchMode,
+    },
 }
 
 impl Default for NvidiaEncoderOptions {
     fn default() -> Self {
         Self {
             max_in_flight_outputs: 6,
+            gop_length: None,
+            frame_interval_p: None,
         }
     }
 }
@@ -122,4 +149,17 @@ pub trait VideoEncoder {
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError>;
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError>;
+
+    fn request_session_switch(
+        &mut self,
+        _request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "session switching is not supported by this backend".to_string(),
+        ))
+    }
+
+    fn pipeline_generation_hint(&self) -> Option<u64> {
+        None
+    }
 }
