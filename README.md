@@ -23,9 +23,23 @@ scripts/
 
 ## feature / platform 切替
 
-- デフォルト: `backend-vt`（macOS 前提）
+- デフォルト: なし（`default = []`）
+- macOS は `backend-vt` を有効化
+- Linux/Windows は `backend-nvidia` を有効化
 - NVIDIA を有効化: `--features backend-nvidia`
 - 実行時は `BackendKind` で backend を選択
+
+### 利用側 Cargo.toml（推奨, git rev 固定）
+
+```toml
+[target.'cfg(target_os = "macos")'.dependencies]
+video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-vt"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] }
+```
+
+単一OS向けプロジェクトであれば、通常の `[dependencies]` に同じ指定（`git` + `rev` + `default-features = false` + 必要feature）でも問題ありません。
 
 ## NVIDIA backend 依存
 

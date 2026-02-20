@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-#[cfg(feature = "backend-nvidia")]
+#[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
 use crate::cuda_transform::CudaNv12ToRgb;
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use crate::vt_metal_transform::VtMetalNv12ToRgb;
@@ -30,7 +30,7 @@ pub trait BackendTransformAdapter {
 #[derive(Debug)]
 pub struct NvidiaTransformAdapter {
     dispatcher: TransformDispatcher,
-    #[cfg(feature = "backend-nvidia")]
+    #[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
     cuda: Option<CudaNv12ToRgb>,
 }
 
@@ -38,7 +38,7 @@ impl NvidiaTransformAdapter {
     pub fn new(worker_count: usize, queue_capacity: usize) -> Self {
         Self {
             dispatcher: TransformDispatcher::new(worker_count, queue_capacity),
-            #[cfg(feature = "backend-nvidia")]
+            #[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
             cuda: CudaNv12ToRgb::new().ok(),
         }
     }
@@ -57,7 +57,7 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
 
         match (input, color) {
             (DecodedUnit::Nv12Cpu(frame), ColorRequest::Rgb8 | ColorRequest::Rgba8) => {
-                #[cfg(feature = "backend-nvidia")]
+                #[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
                 if let Some(cuda) = &self.cuda
                     && let Ok(rgb) = cuda.convert(&frame)
                 {

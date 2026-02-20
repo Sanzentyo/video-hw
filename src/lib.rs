@@ -1,11 +1,11 @@
 mod backend_transform_adapter;
 mod bitstream;
 mod contract;
-#[cfg(feature = "backend-nvidia")]
+#[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
 mod cuda_transform;
-#[cfg(feature = "backend-nvidia")]
+#[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
 mod nv_backend;
-#[cfg(feature = "backend-nvidia")]
+#[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
 mod nv_meta_decoder;
 mod pipeline;
 mod pipeline_scheduler;
@@ -62,15 +62,15 @@ impl Decoder {
                 }
             }
             BackendKind::Nvidia => {
-                #[cfg(feature = "backend-nvidia")]
+                #[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
                 {
                     Box::new(nv_backend::NvDecoderAdapter::new(config))
                 }
-                #[cfg(not(feature = "backend-nvidia"))]
+                #[cfg(not(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows"))))]
                 {
                     let _ = config;
                     Box::new(UnsupportedDecoder::new(
-                        "NVIDIA backend requires backend-nvidia feature",
+                        "NVIDIA backend requires Linux/Windows + backend-nvidia feature",
                     ))
                 }
             }
@@ -129,7 +129,7 @@ impl Encoder {
                 }
             }
             BackendKind::Nvidia => {
-                #[cfg(feature = "backend-nvidia")]
+                #[cfg(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows")))]
                 {
                     Box::new(nv_backend::NvEncoderAdapter::with_config(
                         config.codec,
@@ -138,11 +138,11 @@ impl Encoder {
                         config.backend_options,
                     ))
                 }
-                #[cfg(not(feature = "backend-nvidia"))]
+                #[cfg(not(all(feature = "backend-nvidia", any(target_os = "linux", target_os = "windows"))))]
                 {
                     let _ = config;
                     Box::new(UnsupportedEncoder::new(
-                        "NVIDIA backend requires backend-nvidia feature",
+                        "NVIDIA backend requires Linux/Windows + backend-nvidia feature",
                     ))
                 }
             }

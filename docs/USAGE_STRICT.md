@@ -224,14 +224,14 @@ cargo run --features backend-nvidia --example encode_streaming_probe -- --backen
 
 ### VideoToolbox
 
-- feature: `backend-vt`（default）
+- feature: `backend-vt`（macOSで明示的に有効化）
 - 前提: macOS
 - encode 入力は ARGB、内部で BGRA ピクセルバッファへ変換して VT に投入
 - encode 出力は AVCC/HVCC
 
 ### NVIDIA
 
-- feature: `backend-nvidia`
+- feature: `backend-nvidia`（Linux/Windowsで明示的に有効化）
 - 前提: CUDA / NVENC / NVDEC が利用可能
 - decode は NVDEC メタデータ経路（現状 `Frame.argb=None`）
 - encode は ARGB 入力を NVENC バッファへ upload

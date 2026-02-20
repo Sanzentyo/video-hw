@@ -7,8 +7,9 @@
 - root の `src/` に実装を集約した単一 crate 構成
 - `BackendKind`（VideoToolbox / NVIDIA）で実行時切替
 - feature で backend 実装を有効化
-  - default: `backend-vt`
-  - optional: `backend-nvidia`
+  - default: なし（`default = []`）
+  - macOS: `backend-vt` を明示有効化
+  - Linux/Windows: `backend-nvidia` を明示有効化
 
 ## 2. 実装済み
 
