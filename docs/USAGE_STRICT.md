@@ -83,6 +83,20 @@ backend は `BackendKind::{VideoToolbox, Nvidia}` で実行時に切り替えま
 
 実運用上は backend 混在で payload 形式を揃えるため、必要なら自前で変換層を入れてください。
 
+### 2.5 Encode の取り出しタイミング（streaming 利用時の厳密挙動）
+
+現行実装の `Encoder` は、**`push_frame` 呼び出し時には packet を返さず**、内部キューにフレームを積みます。
+
+- `push_frame(...)` の返り値は通常 `Vec::new()`
+- 実際の `EncodedPacket` 回収は `flush()` で行う
+
+したがって、1 フレームごとに「投入してすぐ取り出す」運用は次の形になります。
+
+- `push_frame(frame)`
+- 直後に `flush()`
+
+この方式で 1 フレーム単位の回収は可能ですが、毎回 flush するため backend 内部のバッチ効率は下がる可能性があります。
+
 ## 3. 最小コード例
 
 ### 3.1 Annex-B を decode する
@@ -187,6 +201,25 @@ fn avcc_or_hvcc_to_annexb(mut payload: &[u8]) -> Result<Vec<u8>, String> {
 }
 ```
 
+### 3.4 streaming 適性を測る（backend 共通 probe）
+
+`examples/encode_streaming_probe.rs` は、次の 2 モードを同条件で比較します。
+
+- `batch_flush_once`: 全フレーム投入後に 1 回だけ flush
+- `streaming_flush_each_frame`: 毎フレーム `push_frame -> flush`
+
+実行例（VT）:
+
+```bash
+cargo run --example encode_streaming_probe -- --backend vt --codec h264 --fps 30 --width 640 --height 360 --frame-count 120
+```
+
+実行例（NV）:
+
+```bash
+cargo run --features backend-nvidia --example encode_streaming_probe -- --backend nv --codec h264 --fps 30 --width 640 --height 360 --frame-count 120
+```
+
 ## 4. backend 別の注意点
 
 ### VideoToolbox
@@ -203,7 +236,83 @@ fn avcc_or_hvcc_to_annexb(mut payload: &[u8]) -> Result<Vec<u8>, String> {
 - decode は NVDEC メタデータ経路（現状 `Frame.argb=None`）
 - encode は ARGB 入力を NVENC バッファへ upload
 
-## 5. エラーの見方
+## 5. Metrics（取得できる情報）
+
+メトリクスは標準エラー出力（`stderr`）に 1 行ログとして出ます。
+
+### 5.1 有効化方法
+
+NVIDIA:
+
+- 環境変数: `VIDEO_HW_NV_METRICS=1`
+- または API 設定:
+  - decode: `BackendDecoderOptions::Nvidia(NvidiaDecoderOptions { report_metrics: Some(true) })`
+  - encode: `BackendEncoderOptions::Nvidia(NvidiaEncoderOptions { report_metrics: Some(true), .. })`
+
+VideoToolbox:
+
+- 環境変数: `VIDEO_HW_VT_METRICS=1`
+
+### 5.2 NVIDIA decode（`[nv.decode]`）
+
+主な項目:
+
+- `access_units`, `frames`
+- `pack_ms`, `sdk_ms`, `map_ms`（総時間, ms）
+- `pack_p95_ms`, `pack_p99_ms`, `sdk_p95_ms`, `sdk_p99_ms`, `map_p95_ms`, `map_p99_ms`
+- `queue_depth_peak`, `queue_depth_p95`, `queue_depth_p99`
+- `jitter_ms_mean`, `jitter_ms_p95`, `jitter_ms_p99`
+
+補足:
+
+- `jitter_ms_*` は `pts_90k` 差分から計算したフレーム間隔のゆらぎ（期待フレーム間隔との差の絶対値, ms）です。
+
+### 5.3 NVIDIA encode（`[nv.encode]` / `[nv.encode.safe]`）
+
+通常経路（`[nv.encode]`）:
+
+- `frames`, `packets`, `queue_peak`, `max_in_flight`
+- `synth_ms`, `upload_ms`, `submit_ms`, `reap_ms`, `encode_ms`, `lock_ms`
+- `queue_p95`, `queue_p99`
+- `jitter_ms_mean`, `jitter_ms_p95`, `jitter_ms_p99`
+- `input_copy_bytes`, `input_copy_frames`, `output_copy_bytes`, `output_copy_packets`
+
+safe lifetime 経路（`[nv.encode.safe]`）:
+
+- `frames`, `packets`
+- `synth_ms`, `upload_ms`, `submit_ms`, `reap_ms`, `lock_ms`
+- `queue_p95`, `queue_p99`
+- `jitter_ms_mean`, `jitter_ms_p95`, `jitter_ms_p99`
+- `input_copy_bytes`, `input_copy_frames`, `output_copy_bytes`, `output_copy_packets`
+
+### 5.4 VideoToolbox decode（`[vt.decode.submit]` / `[vt.decode]`）
+
+submit 側（`[vt.decode.submit]`）:
+
+- `flush`（`true/false`）
+- `access_units`
+- `input_copy_bytes`
+- `submit_ms`
+
+出力側（`[vt.decode]`）:
+
+- `wait`, `delta_frames`, `total_frames`
+- `width`, `height`
+- `elapsed_ms`
+- `jitter_ms_mean`, `jitter_ms_p95`, `jitter_ms_p99`
+- `output_copy_frames`
+
+### 5.5 VideoToolbox encode（`[vt.encode]`）
+
+主な項目:
+
+- `frames`, `packets`, `output_bytes`, `width`, `height`
+- `ensure_ms`, `frame_prep_ms`, `submit_ms`, `complete_ms`, `total_ms`
+- `queue_peak`, `queue_p95`, `queue_p99`
+- `jitter_ms_mean`, `jitter_ms_p95`, `jitter_ms_p99`
+- `input_copy_bytes`, `input_copy_frames`, `output_copy_bytes`, `output_copy_packets`
+
+## 6. エラーの見方
 
 - `BackendError::InvalidInput`
   - 寸法 0、ARGB サイズ不一致、bitstream 形式不整合
@@ -214,9 +323,10 @@ fn avcc_or_hvcc_to_annexb(mut payload: &[u8]) -> Result<Vec<u8>, String> {
 - `BackendError::DeviceLost`
   - GPU デバイス喪失
 
-## 6. 既存 example の参照先
+## 7. 既存 example の参照先
 
 - decode: `examples/decode_annexb.rs`
 - encode (synthetic): `examples/encode_synthetic.rs`
 - encode (raw ARGB): `examples/encode_raw_argb.rs`
+- encode (streaming probe): `examples/encode_streaming_probe.rs`
 - transform: `examples/transform_nv12_rgb.rs`

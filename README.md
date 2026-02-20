@@ -79,6 +79,12 @@ cargo run --features backend-nvidia --example encode_synthetic -- --backend nv -
 
 # NVENC encode (backend 固有パラメータ)
 cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --nv-max-in-flight 4 --output output/video-hw-h264.bin
+
+# streaming 挙動の確認（VT）
+cargo run --example encode_streaming_probe -- --backend vt --codec h264 --fps 30 --width 640 --height 360 --frame-count 120
+
+# streaming 挙動の確認（NV）
+cargo run --features backend-nvidia --example encode_streaming_probe -- --backend nv --codec h264 --fps 30 --width 640 --height 360 --frame-count 120
 ```
 
 Rust API から設定する場合:
