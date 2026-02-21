@@ -1,6 +1,7 @@
 use backend_contract::{
     Codec, DecoderConfig, EncodedPacket, Frame, VideoDecoder, VideoEncoder,
 };
+use std::fmt;
 
 pub use backend_contract::{BackendError, CapabilityReport, DecodeSummary};
 
@@ -8,6 +9,15 @@ pub use backend_contract::{BackendError, CapabilityReport, DecodeSummary};
 pub enum BackendKind {
     VideoToolbox,
     Nvidia,
+}
+
+impl fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::VideoToolbox => f.write_str("videotoolbox"),
+            Self::Nvidia => f.write_str("nvidia"),
+        }
+    }
 }
 
 enum DecoderInner {

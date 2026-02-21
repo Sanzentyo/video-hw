@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::Duration;
 
 #[cfg(any(
@@ -82,6 +83,48 @@ pub enum BackendKind {
         any(target_os = "linux", target_os = "windows")
     ))]
     Nvidia,
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+impl fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(any(
+                all(target_os = "macos", feature = "backend-vt"),
+                all(
+                    feature = "backend-nvidia",
+                    any(target_os = "linux", target_os = "windows")
+                )
+            ))]
+            Self::Auto => f.write_str("auto"),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox => f.write_str("videotoolbox"),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia => f.write_str("nvidia"),
+        }
+    }
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+impl fmt::Display for BackendKind {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
+    }
 }
 
 #[cfg(any(
@@ -818,7 +861,9 @@ fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> DecoderInner
     match kind {
         BackendKind::Auto => build_decoder_inner(BackendKind::os_default(), config),
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        BackendKind::VideoToolbox => DecoderInner::VideoToolbox(vt_backend::VtDecoderAdapter::new(config)),
+        BackendKind::VideoToolbox => {
+            DecoderInner::VideoToolbox(vt_backend::VtDecoderAdapter::new(config))
+        }
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
@@ -850,11 +895,13 @@ fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> EncoderInner
     match kind {
         BackendKind::Auto => build_encoder_inner(BackendKind::os_default(), config),
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        BackendKind::VideoToolbox => EncoderInner::VideoToolbox(vt_backend::VtEncoderAdapter::with_config(
-            config.codec,
-            config.fps,
-            config.require_hardware,
-        )),
+        BackendKind::VideoToolbox => {
+            EncoderInner::VideoToolbox(vt_backend::VtEncoderAdapter::with_config(
+                config.codec,
+                config.fps,
+                config.require_hardware,
+            ))
+        }
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")

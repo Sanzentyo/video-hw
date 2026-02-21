@@ -211,3 +211,34 @@ cargo run --example encode_synthetic -- --backend auto --codec h264 --fps 30 --f
 2. decode frame 数と `summary().decoded_frames` が一致すること。
 3. encode 出力の `layout` が backend/codec 契約と一致すること。
 4. 入力妥当性エラーが `InvalidInput` として表面化すること。
+
+## 11. Display 実装の利用例（ログ用途）
+
+主要な公開型は `Display` で読みやすく出力できます。
+
+```rust
+use video_hw::{
+  Backend, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedLayout, EncoderConfig,
+  SessionSwitchMode, SessionSwitchRequest, VtSessionConfig,
+};
+
+fn log_examples(report: CapabilityReport, summary: DecodeSummary) {
+  let backend = Backend::Auto;
+  let dec_cfg = DecoderConfig::new(Codec::H264, 30, true);
+  let enc_cfg = EncoderConfig::new(Codec::Hevc, 60, true);
+  let switch = SessionSwitchRequest::VideoToolbox {
+    config: VtSessionConfig {
+      force_keyframe_on_activate: true,
+    },
+    mode: SessionSwitchMode::OnNextKeyframe,
+  };
+
+  println!("backend={}", backend);
+  println!("decoder_config={}", dec_cfg);
+  println!("encoder_config={}", enc_cfg);
+  println!("layout={}", EncodedLayout::Avcc);
+  println!("capability={}", report);
+  println!("summary={}", summary);
+  println!("session_switch={}", switch);
+}
+```
