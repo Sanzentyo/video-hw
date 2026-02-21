@@ -1,16 +1,126 @@
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     H264,
     Hevc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dimensions {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timestamp90k(pub i64);
+
 #[derive(Debug, Clone)]
-pub struct Frame {
+pub enum BitstreamInput {
+    AnnexBChunk {
+        chunk: Vec<u8>,
+        pts_90k: Option<Timestamp90k>,
+    },
+    AccessUnitRawNal {
+        codec: Codec,
+        nalus: Vec<Vec<u8>>,
+        pts_90k: Option<Timestamp90k>,
+    },
+    LengthPrefixedSample {
+        codec: Codec,
+        sample: Vec<u8>,
+        pts_90k: Option<Timestamp90k>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum RawFrameBuffer {
+    Argb8888(Vec<u8>),
+    Argb8888Shared(Arc<[u8]>),
+    Nv12 { pitch: usize, data: Vec<u8> },
+    Rgb24(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodeFrame {
+    pub dims: Dimensions,
+    pub pts_90k: Option<Timestamp90k>,
+    pub buffer: RawFrameBuffer,
+    pub force_keyframe: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodedLayout {
+    AnnexB,
+    Avcc,
+    Hvcc,
+    Opaque,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodedChunk {
+    pub codec: Codec,
+    pub layout: EncodedLayout,
+    pub data: Vec<u8>,
+    pub pts_90k: Option<Timestamp90k>,
+    pub is_keyframe: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DecodedFrame {
+    Metadata {
+        dims: Option<Dimensions>,
+        pts_90k: Option<Timestamp90k>,
+        pixel_format: Option<u32>,
+        decode_info_flags: Option<u32>,
+        color: Option<ColorMetadata>,
+    },
+    Nv12 {
+        dims: Dimensions,
+        pitch: usize,
+        pts_90k: Option<Timestamp90k>,
+        data: Vec<u8>,
+    },
+    Rgb24 {
+        dims: Dimensions,
+        pts_90k: Option<Timestamp90k>,
+        data: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorMetadata {
+    pub color_primaries: Option<i32>,
+    pub transfer_function: Option<i32>,
+    pub ycbcr_matrix: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Frame {
     pub width: usize,
     pub height: usize,
     pub pixel_format: Option<u32>,
     pub pts_90k: Option<i64>,
+    pub decode_info_flags: Option<u32>,
+    pub color_primaries: Option<i32>,
+    pub transfer_function: Option<i32>,
+    pub ycbcr_matrix: Option<i32>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     pub argb: Option<Vec<u8>>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     pub force_keyframe: bool,
 }
 
@@ -138,12 +248,29 @@ pub struct DecodeSummary {
 }
 
 #[derive(Debug, Clone)]
-pub struct EncodedPacket {
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+pub(crate) struct EncodedPacket {
     pub codec: Codec,
     pub data: Vec<u8>,
     pub pts_90k: Option<i64>,
     pub is_keyframe: bool,
 }
+
+#[derive(Debug, Clone)]
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+pub(crate) struct EncodedPacket;
 
 #[derive(Debug, Clone)]
 pub struct CapabilityReport {
@@ -171,7 +298,7 @@ pub enum BackendError {
     Backend(String),
 }
 
-pub trait VideoDecoder {
+pub(crate) trait VideoDecoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_bitstream_chunk(
@@ -185,7 +312,7 @@ pub trait VideoDecoder {
     fn decode_summary(&self) -> DecodeSummary;
 }
 
-pub trait VideoEncoder {
+pub(crate) trait VideoEncoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError>;
@@ -200,7 +327,13 @@ pub trait VideoEncoder {
             "session switching is not supported by this backend".to_string(),
         ))
     }
-
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     fn pipeline_generation_hint(&self) -> Option<u64> {
         None
     }

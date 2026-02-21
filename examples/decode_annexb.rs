@@ -3,13 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
-    BackendDecoderOptions, BackendKind, Codec, Decoder, DecoderConfig, NvidiaDecoderOptions,
+    Backend, BackendDecoderOptions, BitstreamInput, Codec, DecodeSession, DecoderConfig,
+    NvidiaDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
 #[command(about = "Decode Annex-B stream")]
 struct Args {
-    #[arg(long, default_value = "vt")]
+    #[arg(long, default_value = "auto")]
     backend: String,
     #[arg(long, default_value = "h264")]
     codec: String,
@@ -30,7 +31,7 @@ fn main() -> Result<()> {
     let codec = parse_codec(&args.codec)?;
     let backend = parse_backend(&args.backend)?;
     let input_path = args.input.unwrap_or_else(|| default_decode_input(codec));
-    let backend_options = if matches!(backend, BackendKind::Nvidia) {
+    let backend_options = if backend_is_nvidia(backend) {
         BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
             report_metrics: args.nv_report_metrics,
         })
@@ -38,7 +39,7 @@ fn main() -> Result<()> {
         BackendDecoderOptions::Default
     };
 
-    let mut decoder = Decoder::new(
+    let mut decoder = DecodeSession::new(
         backend,
         DecoderConfig {
             codec,
@@ -54,14 +55,19 @@ fn main() -> Result<()> {
 
     let mut total_decoded = 0usize;
     for chunk in data.chunks(step) {
-        let frames = decoder
-            .push_bitstream_chunk(chunk, None)
-            .context("push_bitstream_chunk failed")?;
-        total_decoded += frames.len();
+        decoder
+            .submit(BitstreamInput::AnnexBChunk {
+                chunk: chunk.to_vec(),
+                pts_90k: None,
+            })
+            .context("decode submit failed")?;
+        while decoder.try_reap().context("try_reap failed")?.is_some() {
+            total_decoded += 1;
+        }
     }
 
     total_decoded += decoder.flush().context("flush failed")?.len();
-    let summary = decoder.decode_summary();
+    let summary = decoder.summary();
 
     println!(
         "decoded_frames={}, width={:?}, height={:?}, pixel_format={:?}, input={}, chunk_bytes={}, backend={}",
@@ -85,11 +91,38 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     }
 }
 
-fn parse_backend(raw: &str) -> Result<BackendKind> {
+fn parse_backend(raw: &str) -> Result<Backend> {
     match raw.to_ascii_lowercase().as_str() {
-        "vt" | "videotoolbox" => Ok(BackendKind::VideoToolbox),
-        "nvidia" | "nv" => Ok(BackendKind::Nvidia),
+        #[cfg(any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            )
+        ))]
+        "auto" => Ok(Backend::Auto),
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        "vt" | "videotoolbox" => Ok(Backend::VideoToolbox),
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        "nvidia" | "nv" => Ok(Backend::Nvidia),
         other => anyhow::bail!("unsupported backend: {other}"),
+    }
+}
+
+fn backend_is_nvidia(backend: Backend) -> bool {
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    {
+        return matches!(backend, Backend::Nvidia);
+    }
+    {
+        let _ = backend;
+        false
     }
 }
 

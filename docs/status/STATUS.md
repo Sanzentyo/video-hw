@@ -1,6 +1,6 @@
 # video-hw Status
 
-更新日: 2026-02-19
+更新日: 2026-02-21
 
 ## 1. 現在の構成
 
@@ -54,6 +54,7 @@
   - `src/backend_transform_adapter.rs`: `VIDEO_HW_VT_GPU_TRANSFORM` トグルを追加（既定有効）
   - `src/vt_backend.rs`: `VIDEO_HW_VT_METRICS` で decode/encode 計測ログを追加
   - `src/vt_backend.rs`: VT decode/encode 計測に queue/jitter/copy 指標を追加
+  - `src/vt_backend.rs`: VT decode metadata に callback 由来の `pts/decode_info_flags/color` を追加
   - `src/vt_backend.rs`: VT encode session の flush 跨ぎ再利用を実装（解像度変更時のみ再生成）
   - `src/vt_backend.rs`: VT encode の session switch + generation 制御を実装
   - `src/vt_backend.rs`: `configured_generation` / `pending_switch_generation` / `sync_pipeline_generation` を追加（NV と同契約）
@@ -77,7 +78,9 @@
 - `cargo check`: pass
 - `cargo test -- --nocapture`: pass
 - `cargo test --features backend-vt -- --nocapture`: pass
-- `cargo bench --features backend-vt --bench decode_bench`: pass（ケースごとの直列実行で完走）
+- `cargo test --features backend-vt --test e2e_video_hw --no-run`: pass
+- `cargo bench --features backend-vt --bench decode_bench --no-run`: pass
+  - `decode_bench` は VT/NV の両 backend マトリクス実行に対応（有効 feature/OS に応じて自動選択）
 - `cargo check --all-targets --features backend-nvidia`: fail（実行環境依存）
   - `nvcc --version` が見つからない
   - `NVIDIA_VIDEO_CODEC_SDK_PATH` 未設定で `libnvidia-encode` / `libnvcuvid` 未検出
@@ -195,9 +198,14 @@
   - 直近再計測（warmup 1 / repeat 3 / verify / equal-raw-input）:
     - h264: video-hw decode 0.172s, encode 0.328s / ffmpeg decode 0.895s, encode 0.307s
     - hevc: video-hw decode 0.162s, encode 0.382s / ffmpeg decode 0.757s, encode 0.352s
+  - 再計測（2026-02-21, warmup 1 / repeat 3 / verify / equal-raw-input）:
+    - h264: video-hw decode 0.176s, encode 0.334s / ffmpeg decode 0.853s, encode 0.304s
+    - hevc: video-hw decode 0.168s, encode 0.381s / ffmpeg decode 0.825s, encode 0.356s
   - レポート:
     - `output/benchmark-vt-precise-h264-1771530053.md`
     - `output/benchmark-vt-precise-hevc-1771530065.md`
+    - `output/benchmark-vt-precise-h264-1771651558.md`
+    - `output/benchmark-vt-precise-hevc-1771651567.md`
   - 注意:
     - `video-hw` 出力は raw payload 形式のため、`ffprobe` が直接解釈できない場合がある
     - スクリプトでは fallback として `output_bytes > 0` の検証を併用

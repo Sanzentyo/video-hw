@@ -1,15 +1,24 @@
-#![allow(dead_code)]
-
 use std::mem;
 
 use crate::{BackendError, Codec};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AccessUnit {
     pub nalus: Vec<Vec<u8>>,
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub codec: Codec,
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub pts_90k: Option<i64>,
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub is_keyframe: bool,
 }
 
@@ -29,12 +38,16 @@ pub struct StatefulBitstreamAssembler {
     saw_aud: bool,
     current_nalus: Vec<Vec<u8>>,
     current_has_vcl: bool,
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     current_has_key_vcl: bool,
     parameter_sets: ParameterSetCache,
 }
 
 impl StatefulBitstreamAssembler {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -88,8 +101,7 @@ impl StatefulBitstreamAssembler {
                     out.push(self.finish_current_access_unit(codec));
                 } else {
                     self.current_nalus.clear();
-                    self.current_has_vcl = false;
-                    self.current_has_key_vcl = false;
+                    self.clear_current_flags();
                 }
                 continue;
             }
@@ -103,17 +115,20 @@ impl StatefulBitstreamAssembler {
             }
 
             let nal_is_vcl = is_vcl(codec, &nal);
-            let nal_is_key = is_key_vcl(codec, &nal);
+            let nal_is_key = self.nal_is_key(codec, &nal);
             self.current_nalus.push(nal);
             if nal_is_vcl {
-                self.current_has_vcl = true;
-                self.current_has_key_vcl = self.current_has_key_vcl || nal_is_key;
+                self.record_vcl(nal_is_key);
             }
         }
 
         out
     }
 
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
         let au = AccessUnit {
             nalus: mem::take(&mut self.current_nalus),
@@ -121,9 +136,71 @@ impl StatefulBitstreamAssembler {
             pts_90k: None,
             is_keyframe: self.current_has_key_vcl,
         };
+        self.clear_current_flags();
+        au
+    }
+
+    #[cfg(not(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )))]
+    fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
+        let _ = codec;
+        let au = AccessUnit {
+            nalus: mem::take(&mut self.current_nalus),
+        };
+        self.clear_current_flags();
+        au
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    fn record_vcl(&mut self, nal_is_key: bool) {
+        self.current_has_vcl = true;
+        self.current_has_key_vcl = self.current_has_key_vcl || nal_is_key;
+    }
+
+    #[cfg(not(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )))]
+    fn record_vcl(&mut self, _nal_is_key: bool) {
+        self.current_has_vcl = true;
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    fn nal_is_key(&self, codec: Codec, nal: &[u8]) -> bool {
+        is_key_vcl(codec, nal)
+    }
+
+    #[cfg(not(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )))]
+    fn nal_is_key(&self, _codec: Codec, _nal: &[u8]) -> bool {
+        false
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    fn clear_current_flags(&mut self) {
         self.current_has_vcl = false;
         self.current_has_key_vcl = false;
-        au
+    }
+
+    #[cfg(not(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )))]
+    fn clear_current_flags(&mut self) {
+        self.current_has_vcl = false;
     }
 
     fn take_complete_nals(&mut self, finalize: bool) -> Vec<Vec<u8>> {
@@ -252,6 +329,10 @@ fn is_vcl(codec: Codec, nal: &[u8]) -> bool {
     }
 }
 
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn is_key_vcl(codec: Codec, nal: &[u8]) -> bool {
     if nal.is_empty() {
         return false;
@@ -286,7 +367,7 @@ mod tests {
     #[test]
     fn chunked_parse_converges() {
         let data = h264_sample_annexb();
-        let mut assembler = StatefulBitstreamAssembler::new();
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::H264);
         let mut emitted = Vec::new();
 
         for chunk in data.chunks(3) {
@@ -297,8 +378,17 @@ mod tests {
         emitted.extend(flush_aus);
 
         assert_eq!(emitted.len(), 2);
-        assert!(emitted[0].is_keyframe);
-        assert!(!emitted[1].is_keyframe);
+        assert!(!emitted[0].nalus.is_empty());
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        {
+            assert_eq!(emitted[0].codec, Codec::H264);
+            assert!(emitted[0].pts_90k.is_none());
+            assert!(emitted[0].is_keyframe);
+            assert!(!emitted[1].is_keyframe);
+        }
     }
 
     #[test]

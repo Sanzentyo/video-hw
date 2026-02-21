@@ -3,13 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
-    BackendEncoderOptions, BackendKind, Codec, Encoder, EncoderConfig, Frame, NvidiaEncoderOptions,
+    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncoderConfig,
+    NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Parser, Debug)]
 #[command(about = "Encode raw ARGB frames")]
 struct Args {
-    #[arg(long, default_value = "nv")]
+    #[arg(long, default_value = "auto")]
     backend: String,
     #[arg(long, default_value = "h264")]
     codec: String,
@@ -68,7 +69,7 @@ fn main() -> Result<()> {
     }
 
     let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
-    if matches!(backend, BackendKind::Nvidia) {
+    if backend_is_nvidia(backend) {
         let mut options = NvidiaEncoderOptions::default();
         if let Some(value) = args.nv_max_in_flight {
             options.max_in_flight_outputs = value.clamp(1, 64);
@@ -81,32 +82,31 @@ fn main() -> Result<()> {
         options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
-    let mut encoder = Encoder::with_config(backend, config);
+    let mut encoder = EncodeSession::new(backend, config);
 
     let mut total_packets = 0usize;
     let mut out = Vec::new();
+    let dims = dims(args.width as u32, args.height as u32)?;
     for i in 0..args.frame_count {
         let start = i * frame_size;
         let end = start + frame_size;
-        let frame = Frame {
-            width: args.width,
-            height: args.height,
-            pixel_format: None,
-            pts_90k: Some((i as i64) * 3000),
-            argb: Some(input[start..end].to_vec()),
-            force_keyframe: false,
-        };
-        let packets = encoder.push_frame(frame)?;
-        total_packets += packets.len();
-        for p in packets {
-            out.extend_from_slice(&p.data);
+
+        encoder.submit(EncodeFrame {
+            dims,
+            pts_90k: Some(Timestamp90k((i as i64) * 3000)),
+            buffer: RawFrameBuffer::Argb8888(input[start..end].to_vec()),
+            force_keyframe: i == 0,
+        })?;
+
+        while let Some(packet) = encoder.try_reap()? {
+            total_packets += 1;
+            out.extend_from_slice(&packet.data);
         }
     }
 
-    let packets = encoder.flush()?;
-    total_packets += packets.len();
-    for p in packets {
-        out.extend_from_slice(&p.data);
+    for packet in encoder.flush()? {
+        total_packets += 1;
+        out.extend_from_slice(&packet.data);
     }
 
     fs::write(&args.output, &out)
@@ -131,10 +131,43 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     }
 }
 
-fn parse_backend(raw: &str) -> Result<BackendKind> {
+fn parse_backend(raw: &str) -> Result<Backend> {
     match raw.to_ascii_lowercase().as_str() {
-        "vt" | "videotoolbox" => Ok(BackendKind::VideoToolbox),
-        "nvidia" | "nv" => Ok(BackendKind::Nvidia),
+        #[cfg(any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            )
+        ))]
+        "auto" => Ok(Backend::Auto),
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        "vt" | "videotoolbox" => Ok(Backend::VideoToolbox),
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        "nvidia" | "nv" => Ok(Backend::Nvidia),
         other => anyhow::bail!("unsupported backend: {other}"),
     }
+}
+
+fn backend_is_nvidia(backend: Backend) -> bool {
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    {
+        return matches!(backend, Backend::Nvidia);
+    }
+    {
+        let _ = backend;
+        false
+    }
+}
+
+fn dims(width: u32, height: u32) -> Result<Dimensions> {
+    let width = std::num::NonZeroU32::new(width).context("width must be > 0")?;
+    let height = std::num::NonZeroU32::new(height).context("height must be > 0")?;
+    Ok(Dimensions { width, height })
 }

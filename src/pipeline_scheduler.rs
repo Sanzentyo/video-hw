@@ -23,7 +23,7 @@ enum SchedulerTask {
 }
 
 #[derive(Debug)]
-pub struct PipelineScheduler {
+pub(crate) struct PipelineScheduler {
     in_tx: BoundedQueueTx<SchedulerTask>,
     out_rx: BoundedQueueRx<Result<DecodedUnit, BackendError>>,
     generation: Arc<AtomicU64>,
@@ -31,7 +31,7 @@ pub struct PipelineScheduler {
 }
 
 impl PipelineScheduler {
-    pub fn new<A>(adapter: A, queue_capacity: usize) -> Self
+    pub(crate) fn new<A>(adapter: A, queue_capacity: usize) -> Self
     where
         A: BackendTransformAdapter + Send + 'static,
     {
@@ -49,7 +49,12 @@ impl PipelineScheduler {
         }
     }
 
-    pub fn submit(
+    #[cfg(all(
+        test,
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    pub(crate) fn submit(
         &self,
         input: DecodedUnit,
         color: ColorRequest,
@@ -58,7 +63,7 @@ impl PipelineScheduler {
         self.submit_with_generation(self.generation(), input, color, resize)
     }
 
-    pub fn submit_with_generation(
+    pub(crate) fn submit_with_generation(
         &self,
         generation: u64,
         input: DecodedUnit,
@@ -75,21 +80,31 @@ impl PipelineScheduler {
             .map_err(map_send_err)
     }
 
-    pub fn generation(&self) -> u64 {
+    #[cfg(all(
+        test,
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
 
-    pub fn set_generation(&self, generation: u64) {
+    pub(crate) fn set_generation(&self, generation: u64) {
         self.generation.store(generation.max(1), Ordering::Relaxed);
     }
 
-    pub fn advance_generation(&self) -> u64 {
+    #[cfg(all(
+        test,
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    pub(crate) fn advance_generation(&self) -> u64 {
         self.generation
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1)
     }
 
-    pub fn recv_timeout(
+    pub(crate) fn recv_timeout(
         &self,
         timeout: Duration,
     ) -> Result<Option<Result<DecodedUnit, BackendError>>, BackendError> {
@@ -194,6 +209,10 @@ fn map_send_err(err: QueueSendError) -> BackendError {
 }
 
 #[cfg(test)]
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
 mod tests {
     use super::*;
     use crate::{Frame, Nv12Frame, backend_transform_adapter::NvidiaTransformAdapter};

@@ -1,0 +1,12 @@
+{
+  "folders": [
+    { "path": ".." }
+  ],
+  "settings": {
+    "rust-analyzer.cargo.features": ["backend-vt"],
+    "rust-analyzer.check.features": ["backend-vt"],
+    "rust-analyzer.check.allTargets": true,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.cargo.target": "aarch64-apple-darwin"
+  }
+}

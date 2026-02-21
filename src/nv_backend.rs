@@ -432,22 +432,18 @@ impl NvEncoderAdapter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn active_generation(&self) -> u64 {
         self.active_generation
     }
 
-    #[allow(dead_code)]
     pub fn configured_generation(&self) -> u64 {
         self.config_generation
     }
 
-    #[allow(dead_code)]
     pub fn pending_switch_generation(&self) -> Option<u64> {
         self.pending_switch.as_ref().map(|p| p.target_generation)
     }
 
-    #[allow(dead_code)]
     pub fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
         let generation = self
             .pending_switch_generation()

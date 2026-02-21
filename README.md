@@ -27,7 +27,7 @@ scripts/
 - macOS は `backend-vt` を有効化
 - Linux/Windows は `backend-nvidia` を有効化
 - NVIDIA を有効化: `--features backend-nvidia`
-- 実行時は `BackendKind` で backend を選択
+- 実行時は `BackendKind` で backend を選択（`Backend::Auto` で OS 既定を自動選択）
 
 ### 利用側 Cargo.toml（推奨, git rev 固定）
 
@@ -88,6 +88,9 @@ cargo test --features backend-nvidia -- --nocapture
 # NVDEC decode
 cargo run --features backend-nvidia --example decode_annexb -- --backend nv --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --require-hardware
 
+# OS既定 backend を自動選択（macOS: VT / Linux,Windows: NVIDIA）
+cargo run --example decode_annexb -- --backend auto --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --require-hardware
+
 # NVENC encode
 cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-h264.bin
 
@@ -101,18 +104,30 @@ cargo run --example encode_streaming_probe -- --backend vt --codec h264 --fps 30
 cargo run --features backend-nvidia --example encode_streaming_probe -- --backend nv --codec h264 --fps 30 --width 640 --height 360 --frame-count 120
 ```
 
-Rust API から設定する場合:
+Rust API から設定する場合（現行）:
 
 ```rust
 use video_hw::{
-    BackendEncoderOptions, BackendKind, Codec, Encoder, EncoderConfig, NvidiaEncoderOptions,
+    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncoderConfig,
+    NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 let mut config = EncoderConfig::new(Codec::H264, 30, true);
 config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
     max_in_flight_outputs: 4,
 });
-let _encoder = Encoder::with_config(BackendKind::Nvidia, config);
+let mut encoder = EncodeSession::new(Backend::Auto, config);
+
+let dims = Dimensions {
+    width: std::num::NonZeroU32::new(640).unwrap(),
+    height: std::num::NonZeroU32::new(360).unwrap(),
+};
+encoder.submit(EncodeFrame {
+    dims,
+    pts_90k: Some(Timestamp90k(0)),
+    buffer: RawFrameBuffer::Argb8888(vec![0; 640 * 360 * 4]),
+    force_keyframe: true,
+})?;
 ```
 
 ## ffmpeg 比較ベンチ
@@ -136,6 +151,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 
 - インデックス: `docs/README.md`
 - 利用ガイド（厳密 I/O 仕様）: `docs/USAGE_STRICT.md`
+- I/O 契約方針（binary + 型レベル）: `docs/spec/IO_FORMAT_CONTRACT.md`
+- テスト仕様棚卸し: `docs/spec/TEST_SPEC_INVENTORY.md`
+- 再設計ブループリント: `docs/plan/API_REDESIGN_BLUEPRINT_2026-02-21.md`
 - 全体状態: `docs/status/STATUS.md`
 - VT 比較: `docs/status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - NV 比較: `docs/status/FFMPEG_NV_COMPARISON_2026-02-19.md`

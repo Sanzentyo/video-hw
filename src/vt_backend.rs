@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ffi::c_void,
     sync::{
         Arc, Mutex,
@@ -32,7 +33,11 @@ use core_media::{
     time::{CMTime, kCMTimeInvalid},
 };
 use core_video::{
-    image_buffer::CVImageBuffer,
+    buffer::TCVBuffer,
+    image_buffer::{
+        CVColorPrimariesGetIntegerCodePointForString, CVImageBuffer, CVImageBufferKeys,
+        CVTransferFunctionGetIntegerCodePointForString, CVYCbCrMatrixGetIntegerCodePointForString,
+    },
     pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_32BGRA},
 };
 use video_toolbox::{
@@ -82,6 +87,7 @@ struct DecodeOutputState {
     width: Option<usize>,
     height: Option<usize>,
     pixel_format: Option<u32>,
+    pending_frames: VecDeque<Frame>,
 }
 
 struct VtDecoderSession {
@@ -234,6 +240,13 @@ impl VtDecoderSession {
         }
     }
 
+    fn drain_output_frames(&self) -> Vec<Frame> {
+        match self.decode_state.lock() {
+            Ok(mut state) => state.pending_frames.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn next_pts(&self) -> i64 {
         match self.next_pts.lock() {
             Ok(mut v) => {
@@ -251,8 +264,6 @@ pub struct VtDecoderAdapter {
     assembler: StatefulBitstreamAssembler,
     decoder: Option<VtDecoderSession>,
     last_summary: DecodeSummary,
-    reported_decoded_frames: usize,
-    next_output_pts_90k: i64,
     last_output_pts_90k: Option<i64>,
     pipeline_scheduler: Option<PipelineScheduler>,
 }
@@ -269,8 +280,6 @@ impl VtDecoderAdapter {
                 height: None,
                 pixel_format: None,
             },
-            reported_decoded_frames: 0,
-            next_output_pts_90k: 0,
             last_output_pts_90k: None,
             pipeline_scheduler: if should_enable_pipeline_scheduler() {
                 let capacity = pipeline_queue_capacity();
@@ -300,18 +309,10 @@ impl VtDecoderAdapter {
             if wait {
                 decoder.wait_for_completion()?;
             }
+            let frames = decoder.drain_output_frames();
             let summary = decoder.snapshot_summary();
-            let delta = summary
-                .decoded_frames
-                .saturating_sub(self.reported_decoded_frames);
-            self.reported_decoded_frames = summary.decoded_frames;
+            let delta = frames.len();
             self.last_summary = summary.clone();
-            let frame_step_90k = (90_000_i64 / i64::from(self.config.fps.max(1))).max(1);
-            let frames =
-                summary_to_frames(delta, &summary, self.next_output_pts_90k, frame_step_90k);
-            self.next_output_pts_90k = self
-                .next_output_pts_90k
-                .saturating_add(frame_step_90k.saturating_mul(delta as i64));
             let processed = self.preprocess_frames_via_pipeline(frames)?;
             if should_report_metrics() {
                 let mut jitter_stats = SampleStats::default();
@@ -377,14 +378,10 @@ impl VtDecoderAdapter {
                             .to_string(),
                     )
                 })??;
-            match piped {
-                DecodedUnit::MetadataOnly(frame) => output.push(frame),
-                other => {
-                    return Err(BackendError::Backend(format!(
-                        "unexpected pipeline output for decoder preprocess: {other:?}"
-                    )));
-                }
-            }
+            output.push(expect_metadata_only_decoded_unit(
+                piped,
+                "decoder preprocess",
+            )?);
         }
         Ok(output)
     }
@@ -560,17 +557,14 @@ impl VtEncoderAdapter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn configured_generation(&self) -> u64 {
         self.config_generation
     }
 
-    #[allow(dead_code)]
     pub fn pending_switch_generation(&self) -> Option<u64> {
         self.pending_switch.as_ref().map(|p| p.target_generation)
     }
 
-    #[allow(dead_code)]
     pub fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
         let generation = self
             .pending_switch_generation()
@@ -597,12 +591,7 @@ impl VtEncoderAdapter {
                     "pipeline scheduler timed out while preprocessing frame".to_string(),
                 )
             })??;
-        match output {
-            DecodedUnit::MetadataOnly(frame) => Ok(frame),
-            other => Err(BackendError::Backend(format!(
-                "unexpected pipeline output for encoder preprocess: {other:?}"
-            ))),
-        }
+        expect_metadata_only_decoded_unit(output, "encoder preprocess")
     }
 
     fn create_encode_session(
@@ -742,6 +731,35 @@ impl VtEncoderAdapter {
             let _ = self.encode_session.take();
         }
         Ok(())
+    }
+}
+
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn expect_metadata_only_decoded_unit(
+    unit: DecodedUnit,
+    stage: &str,
+) -> Result<Frame, BackendError> {
+    match unit {
+        DecodedUnit::MetadataOnly(frame) => Ok(frame),
+        other => Err(BackendError::Backend(format!(
+            "unexpected pipeline output for {stage}: {other:?}"
+        ))),
+    }
+}
+
+#[cfg(not(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn expect_metadata_only_decoded_unit(
+    unit: DecodedUnit,
+    _stage: &str,
+) -> Result<Frame, BackendError> {
+    match unit {
+        DecodedUnit::MetadataOnly(frame) => Ok(frame),
     }
 }
 
@@ -991,30 +1009,6 @@ impl VideoEncoder for VtEncoderAdapter {
                 .max(1),
         )
     }
-}
-
-fn summary_to_frames(
-    count: usize,
-    summary: &DecodeSummary,
-    start_pts_90k: i64,
-    frame_step_90k: i64,
-) -> Vec<Frame> {
-    let width = summary.width.unwrap_or_default();
-    let height = summary.height.unwrap_or_default();
-    let pixel_format = summary.pixel_format;
-
-    (0..count)
-        .map(|index| Frame {
-            width,
-            height,
-            pixel_format,
-            pts_90k: Some(
-                start_pts_90k.saturating_add((index as i64).saturating_mul(frame_step_90k)),
-            ),
-            argb: None,
-            force_keyframe: false,
-        })
-        .collect()
 }
 
 fn to_cm_codec_type(codec: Codec) -> CMVideoCodecType {
@@ -1271,9 +1265,9 @@ extern "C" fn vt_decode_output_callback(
     decompression_output_ref_con: *mut c_void,
     _source_frame_ref_con: *mut c_void,
     status: i32,
-    _info_flags: video_toolbox::errors::VTDecodeInfoFlags,
+    info_flags: video_toolbox::errors::VTDecodeInfoFlags,
     image_buffer: core_video::image_buffer::CVImageBufferRef,
-    _presentation_time_stamp: CMTime,
+    presentation_time_stamp: CMTime,
     _presentation_duration: CMTime,
 ) {
     if status != 0 || decompression_output_ref_con.is_null() || image_buffer.is_null() {
@@ -1284,17 +1278,77 @@ extern "C" fn vt_decode_output_callback(
     let pixel_buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(image_buffer) };
 
     if let Ok(mut s) = state.lock() {
-        s.decoded_frames += 1;
+        let width = pixel_buffer.get_width();
+        let height = pixel_buffer.get_height();
+        let pixel_format = pixel_buffer.get_pixel_format();
+        let color = extract_color_metadata(&pixel_buffer);
+        let frame = Frame {
+            width,
+            height,
+            pixel_format: Some(pixel_format),
+            pts_90k: cm_time_to_90k(presentation_time_stamp),
+            decode_info_flags: Some(info_flags.bits()),
+            color_primaries: color.color_primaries,
+            transfer_function: color.transfer_function,
+            ycbcr_matrix: color.ycbcr_matrix,
+            argb: None,
+            force_keyframe: false,
+        };
+        s.decoded_frames = s.decoded_frames.saturating_add(1);
         if s.width.is_none() {
-            s.width = Some(pixel_buffer.get_width());
+            s.width = Some(width);
         }
         if s.height.is_none() {
-            s.height = Some(pixel_buffer.get_height());
+            s.height = Some(height);
         }
         if s.pixel_format.is_none() {
-            s.pixel_format = Some(pixel_buffer.get_pixel_format());
+            s.pixel_format = Some(pixel_format);
         }
+        s.pending_frames.push_back(frame);
     }
+}
+
+fn cm_time_to_90k(time: CMTime) -> Option<i64> {
+    if time.timescale <= 0 {
+        return None;
+    }
+    let numerator = i128::from(time.value).saturating_mul(90_000);
+    let denominator = i128::from(time.timescale);
+    let scaled = numerator.checked_div(denominator)?;
+    i64::try_from(scaled).ok()
+}
+
+fn extract_color_metadata(pixel_buffer: &CVPixelBuffer) -> crate::ColorMetadata {
+    crate::ColorMetadata {
+        color_primaries: copy_color_primaries(pixel_buffer),
+        transfer_function: copy_transfer_function(pixel_buffer),
+        ycbcr_matrix: copy_ycbcr_matrix(pixel_buffer),
+    }
+}
+
+fn copy_color_primaries(pixel_buffer: &CVPixelBuffer) -> Option<i32> {
+    let value = copy_attachment_cfstring(pixel_buffer, CVImageBufferKeys::ColorPrimaries)?;
+    Some(unsafe { CVColorPrimariesGetIntegerCodePointForString(value.as_concrete_TypeRef()) })
+}
+
+fn copy_transfer_function(pixel_buffer: &CVPixelBuffer) -> Option<i32> {
+    let value = copy_attachment_cfstring(pixel_buffer, CVImageBufferKeys::TransferFunction)?;
+    Some(unsafe { CVTransferFunctionGetIntegerCodePointForString(value.as_concrete_TypeRef()) })
+}
+
+fn copy_ycbcr_matrix(pixel_buffer: &CVPixelBuffer) -> Option<i32> {
+    let value = copy_attachment_cfstring(pixel_buffer, CVImageBufferKeys::YCbCrMatrix)?;
+    Some(unsafe { CVYCbCrMatrixGetIntegerCodePointForString(value.as_concrete_TypeRef()) })
+}
+
+fn copy_attachment_cfstring(
+    pixel_buffer: &CVPixelBuffer,
+    key: CVImageBufferKeys,
+) -> Option<CFString> {
+    let value = pixel_buffer
+        .as_buffer()
+        .copy_attachment(&CFString::from(key), None)?;
+    value.downcast::<CFString>()
 }
 
 #[cfg(test)]
@@ -1362,6 +1416,10 @@ mod tests {
             height: 360,
             pixel_format: None,
             pts_90k: Some(0),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
             argb: None,
             force_keyframe: false,
         });
@@ -1387,6 +1445,10 @@ mod tests {
             height: 360,
             pixel_format: None,
             pts_90k: Some(0),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
             argb: None,
             force_keyframe: false,
         });
@@ -1400,9 +1462,6 @@ mod tests {
             .unwrap();
 
         adapter.sync_pipeline_generation(&scheduler);
-        assert_eq!(
-            scheduler.generation(),
-            adapter.pending_switch_generation().unwrap_or(1)
-        );
+        assert_eq!(adapter.pending_switch_generation(), Some(2));
     }
 }

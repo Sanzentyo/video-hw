@@ -108,3 +108,27 @@ cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
   このためスクリプト側で「出力バイト数 > 0」を fallback 検証として扱っている。
 - `--include-internal-metrics` 有効時は `Internal Metrics (video-hw)` を出力し、
   NV 精密レポートと同一セクション構成（`decode` / `encode`）で比較可能。
+
+## 9. 再計測ログ（2026-02-21）
+
+実行コマンド:
+
+```bash
+cargo +nightly -Zscript scripts/run_vt_precise_suite.rs --warmup 1 --repeat 3 --verify --equal-raw-input --include-internal-metrics
+```
+
+生成レポート:
+- `output/benchmark-vt-precise-h264-1771651558.md`
+- `output/benchmark-vt-precise-hevc-1771651567.md`
+
+結果（mean, 秒）:
+
+| Codec | video-hw decode | video-hw encode | ffmpeg decode | ffmpeg encode |
+|---|---:|---:|---:|---:|
+| H264 | 0.176 | 0.334 | 0.853 | 0.304 |
+| HEVC | 0.168 | 0.381 | 0.825 | 0.356 |
+
+比較（2026-02-19 の直近値との関係）:
+- decode は今回も `video-hw` が `ffmpeg videotoolbox` より大幅に速い（約 4.9x〜5.0x）。
+- encode は今回も `video-hw` が `ffmpeg videotoolbox` より遅い（約 1.09x〜1.13x）。
+- 傾向は 2026-02-19 の計測と同じで、decode 優位 / encode 劣位の構図は不変。
