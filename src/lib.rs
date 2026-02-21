@@ -24,11 +24,6 @@ mod contract;
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
-mod cuda_transform;
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
 mod nv_backend;
 #[cfg(all(
     feature = "backend-nvidia",
@@ -67,6 +62,16 @@ pub use transform::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        )
+    ),
+    derive(Default)
+)]
 pub enum BackendKind {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
@@ -75,6 +80,16 @@ pub enum BackendKind {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
+    #[cfg_attr(
+        any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            )
+        ),
+        default
+    )]
     Auto,
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     VideoToolbox,
@@ -127,19 +142,6 @@ impl fmt::Display for BackendKind {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", feature = "backend-vt"),
-    all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )
-))]
-impl Default for BackendKind {
-    fn default() -> Self {
-        BackendKind::Auto
-    }
-}
-
 pub type Backend = BackendKind;
 
 #[cfg(any(
@@ -156,7 +158,7 @@ enum DecoderInner {
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    Nvidia(nv_backend::NvDecoderAdapter),
+    Nvidia(Box<nv_backend::NvDecoderAdapter>),
     Unsupported(UnsupportedDecoderAdapter),
 }
 
@@ -293,7 +295,7 @@ enum EncoderInner {
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    Nvidia(nv_backend::NvEncoderAdapter),
+    Nvidia(Box<nv_backend::NvEncoderAdapter>),
     Unsupported(UnsupportedEncoderAdapter),
 }
 
@@ -753,15 +755,17 @@ fn fallback_backend_kind(requested: BackendKind) -> BackendKind {
     )
 ))]
 fn preferred_backend_order() -> Vec<BackendKind> {
-    let mut order = Vec::new();
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    order.push(BackendKind::VideoToolbox);
+    {
+        return vec![BackendKind::VideoToolbox];
+    }
     #[cfg(all(
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    order.push(BackendKind::Nvidia);
-    order
+    {
+        vec![BackendKind::Nvidia]
+    }
 }
 
 #[cfg(any(
@@ -868,7 +872,9 @@ fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> DecoderInner
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        BackendKind::Nvidia => DecoderInner::Nvidia(nv_backend::NvDecoderAdapter::new(config)),
+        BackendKind::Nvidia => {
+            DecoderInner::Nvidia(Box::new(nv_backend::NvDecoderAdapter::new(config)))
+        }
     }
 }
 
@@ -906,12 +912,14 @@ fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> EncoderInner
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        BackendKind::Nvidia => EncoderInner::Nvidia(nv_backend::NvEncoderAdapter::with_config(
-            config.codec,
-            config.fps,
-            config.require_hardware,
-            config.backend_options,
-        )),
+        BackendKind::Nvidia => {
+            EncoderInner::Nvidia(Box::new(nv_backend::NvEncoderAdapter::with_config(
+                config.codec,
+                config.fps,
+                config.require_hardware,
+                config.backend_options,
+            )))
+        }
     }
 }
 

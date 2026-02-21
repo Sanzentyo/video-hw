@@ -147,6 +147,10 @@ impl NvMetaDecoder {
                 height: height as usize,
                 pixel_format: None,
                 pts_90k: Some(entry.timestamp),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
                 argb: None,
                 force_keyframe: false,
             });

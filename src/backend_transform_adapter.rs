@@ -1,29 +1,29 @@
 use std::time::Duration;
 
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-use crate::cuda_transform::CudaNv12ToRgb;
 use crate::{BackendError, ColorRequest, Frame};
 #[cfg(all(
+    test,
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
-use crate::{
-    Nv12Frame, RgbFrame, TransformDispatcher, TransformJob, TransformResult,
-    should_enqueue_transform,
-};
+use crate::{Nv12Frame, RgbFrame, TransformJob};
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+use crate::{TransformDispatcher, TransformResult, should_enqueue_transform};
 
 #[derive(Debug, Clone)]
 pub(crate) enum DecodedUnit {
     MetadataOnly(Frame),
     #[cfg(all(
+        test,
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
     Nv12Cpu(Nv12Frame),
     #[cfg(all(
+        test,
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
@@ -48,11 +48,6 @@ pub(crate) trait BackendTransformAdapter {
 ))]
 pub(crate) struct NvidiaTransformAdapter {
     dispatcher: TransformDispatcher,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    cuda: Option<CudaNv12ToRgb>,
 }
 
 #[cfg(all(
@@ -63,11 +58,6 @@ impl NvidiaTransformAdapter {
     pub fn new(worker_count: usize, queue_capacity: usize) -> Self {
         Self {
             dispatcher: TransformDispatcher::new(worker_count, queue_capacity),
-            #[cfg(all(
-                feature = "backend-nvidia",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            cuda: CudaNv12ToRgb::new().ok(),
         }
     }
 }
@@ -88,29 +78,35 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
         }
 
         match (input, color) {
+            #[cfg(all(
+                test,
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             (DecodedUnit::Nv12Cpu(frame), ColorRequest::Rgb8 | ColorRequest::Rgba8) => {
-                #[cfg(all(
-                    feature = "backend-nvidia",
-                    any(target_os = "linux", target_os = "windows")
-                ))]
-                if let Some(cuda) = &self.cuda
-                    && let Ok(rgb) = cuda.convert(&frame)
-                {
-                    return Ok(Some(DecodedUnit::RgbCpu(rgb)));
-                }
                 self.dispatcher
                     .submit(TransformJob::Nv12ToRgb(frame))
                     .map_err(|e| BackendError::TemporaryBackpressure(format!("{e:?}")))?;
                 Ok(None)
             }
-            (DecodedUnit::MetadataOnly(frame), _) => Ok(Some(DecodedUnit::MetadataOnly(frame))),
             (other, _) => Ok(Some(other)),
         }
     }
 
     fn recv_timeout(&self, timeout: Duration) -> Result<Option<DecodedUnit>, BackendError> {
         match self.dispatcher.recv_timeout(timeout) {
+            #[cfg(all(
+                test,
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             Ok(Ok(TransformResult::Rgb(rgb))) => Ok(Some(DecodedUnit::RgbCpu(rgb))),
+            #[cfg(not(all(
+                test,
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            )))]
+            Ok(Ok(TransformResult::Rgb(_rgb))) => Ok(None),
             Ok(Err(err)) => Err(err),
             Err(crate::QueueRecvError::Timeout) | Err(crate::QueueRecvError::Empty) => Ok(None),
             Err(err) => Err(BackendError::Backend(format!(
@@ -121,42 +117,39 @@ impl BackendTransformAdapter for NvidiaTransformAdapter {
 }
 
 #[derive(Debug)]
-pub(crate) struct VtTransformAdapter {
-    _private: (),
-}
+#[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
+pub(crate) struct VtTransformAdapter;
 
+#[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
 impl VtTransformAdapter {
     pub fn new() -> Self {
         Self::with_config(1, 4)
     }
 
-    pub fn with_config(worker_count: usize, queue_capacity: usize) -> Self {
-        let _ = worker_count;
-        let _ = queue_capacity;
-        Self { _private: () }
+    pub fn with_config(_worker_count: usize, _queue_capacity: usize) -> Self {
+        Self
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
 impl Default for VtTransformAdapter {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
 impl BackendTransformAdapter for VtTransformAdapter {
     fn submit(
         &self,
         input: DecodedUnit,
-        color: ColorRequest,
-        resize: Option<(u32, u32)>,
+        _color: ColorRequest,
+        _resize: Option<(u32, u32)>,
     ) -> Result<Option<DecodedUnit>, BackendError> {
-        let _ = color;
-        let _ = resize;
         Ok(Some(input))
     }
 
-    fn recv_timeout(&self, timeout: Duration) -> Result<Option<DecodedUnit>, BackendError> {
-        let _ = timeout;
+    fn recv_timeout(&self, _timeout: Duration) -> Result<Option<DecodedUnit>, BackendError> {
         Ok(None)
     }
 }
@@ -206,12 +199,20 @@ mod tests {
         let output = adapter
             .submit(DecodedUnit::Nv12Cpu(nv12), ColorRequest::Rgb8, None)
             .unwrap();
-        if let Some(DecodedUnit::RgbCpu(_)) = output {
+        if let Some(DecodedUnit::RgbCpu(rgb)) = output {
+            assert_eq!(rgb.width, 64);
+            assert_eq!(rgb.height, 36);
             return;
         }
         assert!(output.is_none());
         let reaped = adapter.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(reaped, Some(DecodedUnit::RgbCpu(_))));
+        match reaped {
+            Some(DecodedUnit::RgbCpu(rgb)) => {
+                assert_eq!(rgb.width, 64);
+                assert_eq!(rgb.height, 36);
+            }
+            other => panic!("expected RGB output, got {other:?}"),
+        }
     }
 
     #[test]

@@ -89,14 +89,13 @@ fn decode_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(2));
 
-    let mut backends = Vec::<(&str, Backend)>::new();
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    backends.push(("vt", Backend::VideoToolbox));
+    let backends = vec![("vt", Backend::VideoToolbox)];
     #[cfg(all(
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    backends.push(("nv", Backend::Nvidia));
+    let backends = vec![("nv", Backend::Nvidia)];
 
     for (backend_label, backend) in backends {
         for (label, codec, data) in [("h264", Codec::H264, &h264), ("hevc", Codec::Hevc, &hevc)] {

@@ -240,18 +240,20 @@ fn parse_backend(raw: &str) -> Result<Backend> {
     }
 }
 
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
 fn backend_is_nvidia(backend: Backend) -> bool {
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    {
-        return matches!(backend, Backend::Nvidia);
-    }
-    {
-        let _ = backend;
-        false
-    }
+    matches!(backend, Backend::Nvidia)
+}
+
+#[cfg(not(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn backend_is_nvidia(_backend: Backend) -> bool {
+    false
 }
 
 fn mean(values: &[f64]) -> f64 {

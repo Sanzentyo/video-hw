@@ -432,10 +432,6 @@ impl NvEncoderAdapter {
         }
     }
 
-    pub fn active_generation(&self) -> u64 {
-        self.active_generation
-    }
-
     pub fn configured_generation(&self) -> u64 {
         self.config_generation
     }
@@ -470,11 +466,25 @@ impl NvEncoderAdapter {
                     "pipeline scheduler timed out while preprocessing frame".to_string(),
                 )
             })??;
+        #[cfg(all(
+            test,
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         match output {
             DecodedUnit::MetadataOnly(frame) => Ok(frame),
             other => Err(BackendError::Backend(format!(
                 "unexpected pipeline output for encoder preprocess: {other:?}"
             ))),
+        }
+        #[cfg(not(all(
+            test,
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        )))]
+        {
+            let DecodedUnit::MetadataOnly(frame) = output;
+            Ok(frame)
         }
     }
 
@@ -668,22 +678,21 @@ impl VideoEncoder for NvEncoderAdapter {
         let width = self.width.take().unwrap_or(640);
         let height = self.height.take().unwrap_or(360);
         let max_in_flight = self.max_in_flight_outputs;
-        let fps = self.fps;
-        let codec = self.codec;
-        let report_metrics = self.report_metrics;
+        let safe_flush_options = SafeFlushOptions {
+            width,
+            height,
+            fps: self.fps,
+            codec: self.codec,
+            max_in_flight,
+            report_metrics: self.report_metrics,
+        };
         let session = self.ensure_session(width, height)?;
         if session.buffer_lifetime_mode == NvBufferLifetimeMode::PerFrameSafe {
-            return Self::flush_safe_per_frame(
-                session,
-                &pending_frames,
-                width,
-                height,
-                fps,
-                codec,
-                max_in_flight,
-                report_metrics,
-            );
+            return Self::flush_safe_per_frame(session, &pending_frames, safe_flush_options);
         }
+        let fps = safe_flush_options.fps;
+        let codec = safe_flush_options.codec;
+        let report_metrics = safe_flush_options.report_metrics;
         let input_layout = session.input_layout;
         let mut pending_outputs = VecDeque::<PendingOutput>::new();
         let mut packets = Vec::new();
@@ -945,13 +954,16 @@ impl NvEncoderAdapter {
     fn flush_safe_per_frame(
         session: &mut NvEncodeSession,
         pending_frames: &[Frame],
-        width: usize,
-        height: usize,
-        fps: i32,
-        codec: Codec,
-        max_in_flight: usize,
-        report_metrics: bool,
+        options: SafeFlushOptions,
     ) -> Result<Vec<EncodedPacket>, BackendError> {
+        let SafeFlushOptions {
+            width,
+            height,
+            fps,
+            codec,
+            max_in_flight,
+            report_metrics,
+        } = options;
         let mut packets = Vec::with_capacity(pending_frames.len());
         let mut timing = StageTiming::default();
         let mut copy_stats = CopyStats::default();
@@ -1189,6 +1201,16 @@ impl NvEncoderAdapter {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+struct SafeFlushOptions {
+    width: usize,
+    height: usize,
+    fps: i32,
+    codec: Codec,
+    max_in_flight: usize,
+    report_metrics: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1484,6 +1506,10 @@ mod tests {
             height: 360,
             pixel_format: None,
             pts_90k: Some(0),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
             argb: None,
             force_keyframe: false,
         });
@@ -1556,6 +1582,10 @@ mod tests {
                 height: 360,
                 pixel_format: None,
                 pts_90k: Some(0),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
                 argb: None,
                 force_keyframe: false,
             })

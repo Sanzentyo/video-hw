@@ -9,17 +9,7 @@ pub struct AccessUnit {
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    pub codec: Codec,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
     pub pts_90k: Option<i64>,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    pub is_keyframe: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,11 +28,6 @@ pub struct StatefulBitstreamAssembler {
     saw_aud: bool,
     current_nalus: Vec<Vec<u8>>,
     current_has_vcl: bool,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    current_has_key_vcl: bool,
     parameter_sets: ParameterSetCache,
 }
 
@@ -115,10 +100,9 @@ impl StatefulBitstreamAssembler {
             }
 
             let nal_is_vcl = is_vcl(codec, &nal);
-            let nal_is_key = self.nal_is_key(codec, &nal);
             self.current_nalus.push(nal);
             if nal_is_vcl {
-                self.record_vcl(nal_is_key);
+                self.record_vcl();
             }
         }
 
@@ -130,11 +114,10 @@ impl StatefulBitstreamAssembler {
         any(target_os = "linux", target_os = "windows")
     ))]
     fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
+        let _ = codec;
         let au = AccessUnit {
             nalus: mem::take(&mut self.current_nalus),
-            codec,
             pts_90k: None,
-            is_keyframe: self.current_has_key_vcl,
         };
         self.clear_current_flags();
         au
@@ -157,33 +140,16 @@ impl StatefulBitstreamAssembler {
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    fn record_vcl(&mut self, nal_is_key: bool) {
+    fn record_vcl(&mut self) {
         self.current_has_vcl = true;
-        self.current_has_key_vcl = self.current_has_key_vcl || nal_is_key;
     }
 
     #[cfg(not(all(
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     )))]
-    fn record_vcl(&mut self, _nal_is_key: bool) {
+    fn record_vcl(&mut self) {
         self.current_has_vcl = true;
-    }
-
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    fn nal_is_key(&self, codec: Codec, nal: &[u8]) -> bool {
-        is_key_vcl(codec, nal)
-    }
-
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
-    fn nal_is_key(&self, _codec: Codec, _nal: &[u8]) -> bool {
-        false
     }
 
     #[cfg(all(
@@ -192,7 +158,6 @@ impl StatefulBitstreamAssembler {
     ))]
     fn clear_current_flags(&mut self) {
         self.current_has_vcl = false;
-        self.current_has_key_vcl = false;
     }
 
     #[cfg(not(all(
@@ -253,6 +218,7 @@ impl StatefulBitstreamAssembler {
 }
 
 impl ParameterSetCache {
+    #[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
     pub fn required_for_codec(&self, codec: Codec) -> Option<Vec<Vec<u8>>> {
         match codec {
             Codec::H264 => Some(vec![self.h264_sps.clone()?, self.h264_pps.clone()?]),
@@ -329,20 +295,6 @@ fn is_vcl(codec: Codec, nal: &[u8]) -> bool {
     }
 }
 
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-fn is_key_vcl(codec: Codec, nal: &[u8]) -> bool {
-    if nal.is_empty() {
-        return false;
-    }
-    match codec {
-        Codec::H264 => (nal[0] & 0x1f) == 5,
-        Codec::Hevc => matches!((nal[0] >> 1) & 0x3f, 16..=21),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,10 +336,7 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         ))]
         {
-            assert_eq!(emitted[0].codec, Codec::H264);
             assert!(emitted[0].pts_90k.is_none());
-            assert!(emitted[0].is_keyframe);
-            assert!(!emitted[1].is_keyframe);
         }
     }
 
