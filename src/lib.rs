@@ -106,6 +106,275 @@ pub type Backend = BackendKind;
         any(target_os = "linux", target_os = "windows")
     )
 ))]
+enum DecoderInner {
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    VideoToolbox(vt_backend::VtDecoderAdapter),
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Nvidia(nv_backend::NvDecoderAdapter),
+    Unsupported(UnsupportedDecoderAdapter),
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+enum DecoderInner {
+    NoBackend,
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+impl VideoDecoder for DecoderInner {
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.query_capability(codec),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.query_capability(codec),
+            Self::Unsupported(inner) => inner.query_capability(codec),
+        }
+    }
+
+    fn push_bitstream_chunk(
+        &mut self,
+        chunk: &[u8],
+        pts_90k: Option<i64>,
+    ) -> Result<Vec<Frame>, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
+            Self::Unsupported(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
+        }
+    }
+
+    fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.flush(),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.flush(),
+            Self::Unsupported(inner) => inner.flush(),
+        }
+    }
+
+    fn decode_summary(&self) -> DecodeSummary {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.decode_summary(),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.decode_summary(),
+            Self::Unsupported(inner) => inner.decode_summary(),
+        }
+    }
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+impl VideoDecoder for DecoderInner {
+    fn query_capability(&self, _codec: Codec) -> Result<CapabilityReport, BackendError> {
+        Ok(CapabilityReport {
+            codec: _codec,
+            decode_supported: false,
+            encode_supported: false,
+            hardware_acceleration: false,
+        })
+    }
+
+    fn push_bitstream_chunk(
+        &mut self,
+        _chunk: &[u8],
+        _pts_90k: Option<i64>,
+    ) -> Result<Vec<Frame>, BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "no backend feature enabled".to_string(),
+        ))
+    }
+
+    fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "no backend feature enabled".to_string(),
+        ))
+    }
+
+    fn decode_summary(&self) -> DecodeSummary {
+        DecodeSummary {
+            decoded_frames: 0,
+            width: None,
+            height: None,
+            pixel_format: None,
+        }
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+enum EncoderInner {
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    VideoToolbox(vt_backend::VtEncoderAdapter),
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Nvidia(nv_backend::NvEncoderAdapter),
+    Unsupported(UnsupportedEncoderAdapter),
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+enum EncoderInner {
+    NoBackend,
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+impl VideoEncoder for EncoderInner {
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.query_capability(codec),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.query_capability(codec),
+            Self::Unsupported(inner) => inner.query_capability(codec),
+        }
+    }
+
+    fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.push_frame(frame),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.push_frame(frame),
+            Self::Unsupported(inner) => inner.push_frame(frame),
+        }
+    }
+
+    fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.flush(),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.flush(),
+            Self::Unsupported(inner) => inner.flush(),
+        }
+    }
+
+    fn request_session_switch(
+        &mut self,
+        request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        match self {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(inner) => inner.request_session_switch(request),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(inner) => inner.request_session_switch(request),
+            Self::Unsupported(inner) => inner.request_session_switch(request),
+        }
+    }
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+impl VideoEncoder for EncoderInner {
+    fn query_capability(&self, _codec: Codec) -> Result<CapabilityReport, BackendError> {
+        Ok(CapabilityReport {
+            codec: _codec,
+            decode_supported: false,
+            encode_supported: false,
+            hardware_acceleration: false,
+        })
+    }
+
+    fn push_frame(&mut self, _frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "no backend feature enabled".to_string(),
+        ))
+    }
+
+    fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "no backend feature enabled".to_string(),
+        ))
+    }
+
+    fn request_session_switch(
+        &mut self,
+        _request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedConfig(
+            "no backend feature enabled".to_string(),
+        ))
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
 impl BackendKind {
     #[must_use]
     pub fn os_default() -> Self {
@@ -124,7 +393,7 @@ impl BackendKind {
 }
 
 pub struct DecodeSession {
-    decoder_inner: Box<dyn VideoDecoder>,
+    decoder_inner: DecoderInner,
     ready: VecDeque<DecodedFrame>,
 }
 
@@ -137,9 +406,9 @@ impl DecodeSession {
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
-        let decoder_inner: Box<dyn VideoDecoder> = match resolve_decoder_backend(backend, &config) {
+        let decoder_inner: DecoderInner = match resolve_decoder_backend(backend, &config) {
             Ok(selected) => build_decoder_inner(selected, config),
-            Err(err) => Box::new(UnsupportedDecoderAdapter::new(err.to_string())),
+            Err(err) => DecoderInner::Unsupported(UnsupportedDecoderAdapter::new(err.to_string())),
         };
         #[cfg(not(any(
             all(target_os = "macos", feature = "backend-vt"),
@@ -221,7 +490,7 @@ impl DecodeSession {
 
 pub struct EncodeSession {
     backend_kind: BackendKind,
-    encoder_inner: Box<dyn VideoEncoder>,
+    encoder_inner: EncoderInner,
     ready: VecDeque<EncodedChunk>,
 }
 
@@ -234,12 +503,12 @@ impl EncodeSession {
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
-        let (backend_kind, encoder_inner): (BackendKind, Box<dyn VideoEncoder>) =
+        let (backend_kind, encoder_inner): (BackendKind, EncoderInner) =
             match resolve_encoder_backend(backend, &config) {
                 Ok(selected) => (selected, build_encoder_inner(selected, config)),
                 Err(err) => (
                     fallback_backend_kind(backend),
-                    Box::new(UnsupportedEncoderAdapter::new(err.to_string())),
+                    EncoderInner::Unsupported(UnsupportedEncoderAdapter::new(err.to_string())),
                 ),
             };
         #[cfg(not(any(
@@ -545,16 +814,16 @@ fn resolve_encoder_backend(
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> Box<dyn VideoDecoder> {
+fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> DecoderInner {
     match kind {
         BackendKind::Auto => build_decoder_inner(BackendKind::os_default(), config),
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        BackendKind::VideoToolbox => Box::new(vt_backend::VtDecoderAdapter::new(config)),
+        BackendKind::VideoToolbox => DecoderInner::VideoToolbox(vt_backend::VtDecoderAdapter::new(config)),
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        BackendKind::Nvidia => Box::new(nv_backend::NvDecoderAdapter::new(config)),
+        BackendKind::Nvidia => DecoderInner::Nvidia(nv_backend::NvDecoderAdapter::new(config)),
     }
 }
 
@@ -565,8 +834,9 @@ fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> Box<dyn Vide
         any(target_os = "linux", target_os = "windows")
     )
 )))]
-fn build_decoder_inner(kind: BackendKind, _config: DecoderConfig) -> Box<dyn VideoDecoder> {
-    match kind {}
+fn build_decoder_inner(kind: BackendKind, _config: DecoderConfig) -> DecoderInner {
+    let _ = kind;
+    DecoderInner::NoBackend
 }
 
 #[cfg(any(
@@ -576,11 +846,11 @@ fn build_decoder_inner(kind: BackendKind, _config: DecoderConfig) -> Box<dyn Vid
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> Box<dyn VideoEncoder> {
+fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> EncoderInner {
     match kind {
         BackendKind::Auto => build_encoder_inner(BackendKind::os_default(), config),
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        BackendKind::VideoToolbox => Box::new(vt_backend::VtEncoderAdapter::with_config(
+        BackendKind::VideoToolbox => EncoderInner::VideoToolbox(vt_backend::VtEncoderAdapter::with_config(
             config.codec,
             config.fps,
             config.require_hardware,
@@ -589,7 +859,7 @@ fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> Box<dyn Vide
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        BackendKind::Nvidia => Box::new(nv_backend::NvEncoderAdapter::with_config(
+        BackendKind::Nvidia => EncoderInner::Nvidia(nv_backend::NvEncoderAdapter::with_config(
             config.codec,
             config.fps,
             config.require_hardware,
@@ -605,8 +875,9 @@ fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> Box<dyn Vide
         any(target_os = "linux", target_os = "windows")
     )
 )))]
-fn build_encoder_inner(kind: BackendKind, _config: EncoderConfig) -> Box<dyn VideoEncoder> {
-    match kind {}
+fn build_encoder_inner(kind: BackendKind, _config: EncoderConfig) -> EncoderInner {
+    let _ = kind;
+    EncoderInner::NoBackend
 }
 
 fn pack_access_unit_nalus_to_annexb(nalus: &[Vec<u8>]) -> Vec<u8> {
