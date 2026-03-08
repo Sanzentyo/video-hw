@@ -6,6 +6,14 @@
     )
 ))]
 use std::fs;
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+use std::path::PathBuf;
 
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -23,7 +31,7 @@ use std::time::Duration;
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -32,8 +40,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
     )
 ))]
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeSession,
-    DecoderConfig,
+    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
+    DecodeSession, DecoderConfig,
 };
 
 #[cfg(any(
@@ -56,6 +64,7 @@ fn run_decode(
             codec,
             fps: 30,
             require_hardware,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -79,10 +88,24 @@ fn run_decode(
     )
 ))]
 fn decode_benchmark(c: &mut Criterion) {
-    let h264 = fs::read("sample-videos/sample-10s.h264")
-        .expect("missing sample-videos/sample-10s.h264 for benchmark");
-    let hevc = fs::read("sample-videos/sample-10s.h265")
-        .expect("missing sample-videos/sample-10s.h265 for benchmark");
+    let sample_path = |name: &str| {
+        let local = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sample-videos")
+            .join(name);
+        if local.is_file() {
+            return local;
+        }
+
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join(name)
+    };
+    let h264 =
+        fs::read(sample_path("sample-10s.h264")).expect("missing sample-10s.h264 for benchmark");
+    let hevc =
+        fs::read(sample_path("sample-10s.h265")).expect("missing sample-10s.h265 for benchmark");
 
     let mut group = c.benchmark_group("decode_annexb");
     group.sample_size(30);

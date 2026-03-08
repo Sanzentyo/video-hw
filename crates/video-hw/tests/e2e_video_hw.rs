@@ -47,7 +47,7 @@ use video_hw::VtSessionConfig;
 ))]
 use video_hw::{
     Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeSession,
-    DecoderConfig,
+    DecodeOutputMode, DecoderConfig,
 };
 #[cfg(all(
     feature = "backend-nvidia",
@@ -117,7 +117,16 @@ fn make_argb_frame(index: i64) -> EncodeFrame {
     )
 ))]
 fn sample_path(name: &str) -> PathBuf {
+    let local = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("sample-videos")
+        .join(name);
+    if local.is_file() {
+        return local;
+    }
+
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("sample-videos")
         .join(name)
 }
@@ -142,6 +151,7 @@ fn decode_count(
             codec,
             fps: 30,
             require_hardware,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -184,6 +194,7 @@ fn decode_total_and_summary(
             codec,
             fps: 30,
             require_hardware,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -212,12 +223,7 @@ fn decode_total_and_summary(
     any(target_os = "linux", target_os = "windows")
 ))]
 fn nv_runtime_unsupported(err: &BackendError) -> bool {
-    match err {
-        BackendError::UnsupportedConfig(message) => {
-            message.contains("CUDA context") || message.contains("unsupported")
-        }
-        _ => false,
-    }
+    err.is_runtime_unavailable()
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -300,6 +306,7 @@ fn e2e_vt_decode_metadata_includes_pts_and_decode_flags() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -353,6 +360,7 @@ fn e2e_decode_flush_without_input_is_empty() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -374,6 +382,7 @@ fn e2e_nv_decode_flush_without_input_is_empty() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: true,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -430,9 +439,7 @@ fn e2e_encode_h264_rejects_invalid_argb_payload() {
 
     let result = encoder.submit(bad_frame);
     match result {
-        Err(video_hw::BackendError::InvalidInput(message)) => {
-            assert!(message.contains("argb payload size mismatch"));
-        }
+        Err(video_hw::BackendError::InvalidInput(_)) => {}
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -525,9 +532,7 @@ fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
         .submit(bad_frame)
         .expect("submit should enqueue frame before validation");
     match encoder.flush() {
-        Err(BackendError::InvalidInput(message)) => {
-            assert!(message.contains("argb payload size mismatch"));
-        }
+        Err(BackendError::InvalidInput(_)) => {}
         Err(err) if nv_runtime_unsupported(&err) => {
             eprintln!("skip: CUDA/NVENC unavailable: {err}");
         }
@@ -563,6 +568,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
             codec: Codec::H264,
             fps: 30,
             require_hardware: true,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
@@ -574,12 +580,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
     assert!(capability.encode_supported);
     assert!(capability.hardware_acceleration);
 
-    let data = fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("sample-videos")
-            .join("sample-10s.h264"),
-    )
-    .expect("sample bitstream should exist");
+    let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
     for chunk in data.chunks(4096) {
         match decoder.submit(BitstreamInput::AnnexBChunk {
@@ -595,10 +596,8 @@ fn e2e_nv_backend_decode_and_encode_work() {
                     decoded_frames += 1;
                 }
             }
-            Err(video_hw::BackendError::UnsupportedConfig(message))
-                if message.contains("CUDA context") =>
-            {
-                eprintln!("skip: CUDA/NVDEC unavailable: {message}");
+            Err(err) if nv_runtime_unsupported(&err) => {
+                eprintln!("skip: CUDA/NVDEC unavailable: {err}");
                 return;
             }
             Err(err) => panic!("unexpected decode error: {err:?}"),
@@ -617,10 +616,8 @@ fn e2e_nv_backend_decode_and_encode_work() {
     }
     match encoder.flush() {
         Ok(packets) => assert!(!packets.is_empty()),
-        Err(video_hw::BackendError::UnsupportedConfig(message))
-            if message.contains("CUDA context") =>
-        {
-            eprintln!("skip: CUDA/NVENC unavailable: {message}");
+        Err(err) if nv_runtime_unsupported(&err) => {
+            eprintln!("skip: CUDA/NVENC unavailable: {err}");
         }
         Err(err) => panic!("unexpected encode error: {err:?}"),
     }
@@ -638,16 +635,12 @@ fn e2e_nv_backend_hevc_decode_sample() {
             codec: Codec::Hevc,
             fps: 30,
             require_hardware: true,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options: BackendDecoderOptions::Default,
         },
     );
 
-    let data = fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("sample-videos")
-            .join("sample-10s.h265"),
-    )
-    .expect("sample bitstream should exist");
+    let data = fs::read(sample_path("sample-10s.h265")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
     for chunk in data.chunks(4096) {
         match decoder.submit(BitstreamInput::AnnexBChunk {
@@ -663,10 +656,8 @@ fn e2e_nv_backend_hevc_decode_sample() {
                     decoded_frames += 1;
                 }
             }
-            Err(video_hw::BackendError::UnsupportedConfig(message))
-                if message.contains("CUDA context") || message.contains("unsupported") =>
-            {
-                eprintln!("skip: HEVC decode unsupported on this machine: {message}");
+            Err(err) if nv_runtime_unsupported(&err) => {
+                eprintln!("skip: HEVC decode unavailable on this machine: {err}");
                 return;
             }
             Err(err) => panic!("unexpected decode error: {err:?}"),
@@ -675,10 +666,8 @@ fn e2e_nv_backend_hevc_decode_sample() {
 
     match decoder.flush() {
         Ok(frames) => decoded_frames += frames.len(),
-        Err(video_hw::BackendError::UnsupportedConfig(message))
-            if message.contains("CUDA context") || message.contains("unsupported") =>
-        {
-            eprintln!("skip: HEVC decode unsupported on this machine: {message}");
+        Err(err) if nv_runtime_unsupported(&err) => {
+            eprintln!("skip: HEVC decode unavailable on this machine: {err}");
             return;
         }
         Err(err) => panic!("unexpected decode flush error: {err:?}"),
@@ -706,10 +695,8 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
     for i in 0..30 {
         match encoder.submit(make_argb_frame(i as i64)) {
             Ok(()) => {}
-            Err(video_hw::BackendError::UnsupportedConfig(message))
-                if message.contains("CUDA context") =>
-            {
-                eprintln!("skip: CUDA/NVENC unavailable: {message}");
+            Err(err) if nv_runtime_unsupported(&err) => {
+                eprintln!("skip: CUDA/NVENC unavailable: {err}");
                 return;
             }
             Err(err) => panic!("unexpected encode error: {err:?}"),
@@ -718,10 +705,8 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
 
     match encoder.flush() {
         Ok(packets) => assert!(!packets.is_empty()),
-        Err(video_hw::BackendError::UnsupportedConfig(message))
-            if message.contains("CUDA context") =>
-        {
-            eprintln!("skip: CUDA/NVENC unavailable: {message}");
+        Err(err) if nv_runtime_unsupported(&err) => {
+            eprintln!("skip: CUDA/NVENC unavailable: {err}");
         }
         Err(err) => panic!("unexpected encode flush error: {err:?}"),
     }

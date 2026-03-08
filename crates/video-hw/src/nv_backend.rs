@@ -338,6 +338,15 @@ impl VideoDecoder for NvDecoderAdapter {
         Ok(frames)
     }
 
+    fn try_reap(&mut self) -> Result<Vec<Frame>, BackendError> {
+        let Some(decoder) = self.decoder.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let drained = decoder.try_drain()?;
+        self.apply_decoded_summary(&drained);
+        Ok(drained)
+    }
+
     fn decode_summary(&self) -> DecodeSummary {
         self.last_summary.clone()
     }

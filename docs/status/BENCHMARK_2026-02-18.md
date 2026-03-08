@@ -3,9 +3,9 @@
 ## 1. 実行条件
 
 - 実行コマンド
-  - `/usr/bin/time -lp cargo bench --bench decode_bench -- --noplot`
+  - `/usr/bin/time -lp cargo bench -p video-hw --bench decode_bench -- --noplot`
 - ベンチ対象
-  - `benches/decode_bench.rs`（Criterion）
+  - `crates/video-hw/benches/decode_bench.rs`（Criterion）
   - ケース: `h264/hevc × chunk_4096/chunk_1048576`
 - 入力サンプル
   - `sample-videos/sample-10s.h264`: 7,262,620 bytes

@@ -118,6 +118,12 @@ impl NvMetaDecoder {
         self.drain_display_queue()
     }
 
+    pub fn try_drain(&mut self) -> Result<Vec<Frame>, BackendError> {
+        self.ctx.bind_to_thread().map_err(map_cuda_error)?;
+        self.ensure_no_callback_error()?;
+        self.drain_display_queue()
+    }
+
     fn ensure_no_callback_error(&self) -> Result<(), BackendError> {
         let state = lock_state(&self.bridge.state);
         match &state.sticky_error {

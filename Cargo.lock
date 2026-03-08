@@ -1673,7 +1673,15 @@ dependencies = [
  "nvidia-video-codec-sdk",
  "rstest",
  "thiserror",
+ "video-hw-core",
  "video-toolbox",
+]
+
+[[package]]
+name = "video-hw-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

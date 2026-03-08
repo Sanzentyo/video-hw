@@ -3,7 +3,8 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
-    Backend, BackendDecoderOptions, BitstreamInput, Codec, DecodeSession, DecoderConfig,
+    Backend, BackendDecoderOptions, BitstreamInput, Codec, DecodeOutputMode, DecodeSession,
+    DecoderConfig,
     NvidiaDecoderOptions,
 };
 
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
             codec,
             fps: args.fps,
             require_hardware: args.require_hardware,
+            output_mode: DecodeOutputMode::Metadata,
             backend_options,
         },
     );

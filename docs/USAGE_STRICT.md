@@ -1,17 +1,12 @@
-# video-hw 利用ガイド（厳密 I/O 仕様, 自己完結版）
+# video-hw 利用ガイド（厳密 I/O 仕様, 現行実装準拠）
 
-この文書は、`video-hw` をこのページだけで導入して使い始めるための実運用ガイドです。  
-対象 API は現行の `DecodeSession` / `EncodeSession` です。
+この文書は `DecodeSession` / `EncodeSession` の現行APIを、実装準拠で使うためのガイドです。
 
 ## 1. 導入
 
-`video-hw` は backend 実装を feature で有効化します。
-
 - macOS: `backend-vt`
 - Linux/Windows: `backend-nvidia`
-- `default = []`（何も有効化しないと backend は使えません）
-
-### 1.1 Cargo.toml（推奨）
+- `default = []`
 
 ```toml
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -21,224 +16,116 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] }
 ```
 
-## 2. Backend の選択ルール
-
-`Backend` は次を持ちます。
+## 2. Backend 選択
 
 - `Backend::Auto`
 - `Backend::VideoToolbox`（macOS + `backend-vt`）
 - `Backend::Nvidia`（Linux/Windows + `backend-nvidia`）
 
-`Backend::Auto` は OS 既定 backend を選びます。
+`Backend::Auto` は OS 既定 backend を選択します。
 
-- macOS: VideoToolbox
-- Linux/Windows: NVIDIA
+### 2.1 NVIDIA backend の前提（重要）
 
-ただし最終可否は実行時 capability で判定されます。  
-利用不可の場合は `BackendError::UnsupportedConfig` を返します。
+- `backend-nvidia` は `nvidia-video-codec-sdk`（Rust bindings / ラッパー）を通じて NVIDIA SDK を利用する
+- SDK 本体（lib/headers）は同梱しない前提で、利用者が NVIDIA から別途取得して配置する
+- ビルド時は環境に応じて `NVIDIA_VIDEO_CODEC_SDK_PATH` などの設定が必要になる
 
-## 3. 公開 API
+## 3. Decode API
 
-### 3.1 Decode
+- `DecodeSession::new(Backend, DecoderConfig)`
+- `submit(BitstreamInput)`
+- `try_reap()`
+- `reap_timeout(Duration)`
+- `flush()`
+- `summary()`
+- `query_capability(Codec)`
 
-- `DecodeSession::new(Backend, DecoderConfig) -> DecodeSession`
-- `submit(BitstreamInput) -> Result<(), BackendError>`
-- `try_reap() -> Result<Option<DecodedFrame>, BackendError>`
-- `reap_timeout(Duration) -> Result<Option<DecodedFrame>, BackendError>`
-- `flush() -> Result<Vec<DecodedFrame>, BackendError>`
-- `summary() -> DecodeSummary`
-- `query_capability(Codec) -> Result<CapabilityReport, BackendError>`
+### 3.1 Decode 入力
 
-### 3.2 Encode
+- `BitstreamInput::AnnexBChunk`
+- `BitstreamInput::AccessUnitRawNal`
+- `BitstreamInput::LengthPrefixedSample`
 
-- `EncodeSession::new(Backend, EncoderConfig) -> EncodeSession`
-- `submit(EncodeFrame) -> Result<(), BackendError>`
-- `try_reap() -> Result<Option<EncodedChunk>, BackendError>`
-- `reap_timeout(Duration) -> Result<Option<EncodedChunk>, BackendError>`
-- `flush() -> Result<Vec<EncodedChunk>, BackendError>`
-- `query_capability(Codec) -> Result<CapabilityReport, BackendError>`
-- `request_session_switch(SessionSwitchRequest) -> Result<(), BackendError>`
+### 3.2 Decode 出力（重要）
 
-## 4. Decode I/O 契約
+`DecoderConfig.output_mode` で decode 出力モードを指定できます。
 
-### 4.1 入力 `BitstreamInput`
+- `DecodeOutputMode::Metadata`（既定）
+- `DecodeOutputMode::Nv12`
+- `DecodeOutputMode::Rgb24`
 
-- `AnnexBChunk { chunk, pts_90k }`
-  - `00 00 01` / `00 00 00 01` 区切り
-  - chunk 境界は任意（途中分割可）
-- `AccessUnitRawNal { codec, nalus, pts_90k }`
-  - raw NAL 配列（start code なし）
-  - 内部で Annex-B にパック
-- `LengthPrefixedSample { codec, sample, pts_90k }`
-  - `u32be length + NAL` 連結
-  - 内部で Annex-B に展開
+`DecodedFrame` は次の variant を持ちます。
 
-### 4.2 出力 `DecodedFrame`
+- `Metadata`
+- `Nv12`
+- `Rgb24`
 
-- `Metadata { dims, pts_90k, pixel_format, decode_info_flags, color }`
-- `Nv12 { dims, pitch, pts_90k, data }`
-- `Rgb24 { dims, pts_90k, data }`
+`DecodeOutputMode::Metadata` は常用サポートです。  
+`DecodeOutputMode::Nv12` / `Rgb24` は backend が ARGB payload を返す場合のみ変換出力できます。  
+ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。
 
-現行の標準 decode 経路は `Metadata` を返します。
+## 4. Encode API
 
-## 5. Encode I/O 契約
+- `EncodeSession::new(Backend, EncoderConfig)`
+- `submit(EncodeFrame)`
+- `try_reap()`
+- `reap_timeout(Duration)`
+- `flush()`
+- `query_capability(Codec)`
+- `request_session_switch(SessionSwitchRequest)`
 
-### 5.1 入力 `EncodeFrame`
+### 4.1 Encode 入力（重要）
 
-- `dims`: `NonZeroU32`（0 は不可）
-- `buffer`: 現行 encode は `RawFrameBuffer::Argb8888` / `Argb8888Shared` をサポート
-- `force_keyframe`: backend の keyframe 指示にマップ
+`RawFrameBuffer` は次を持ちます。
 
-`Argb8888` の長さは厳密に `width * height * 4` です。  
-一致しない場合は `BackendError::InvalidInput` です。
+- `Argb8888(Vec<u8>)`
+- `Argb8888Shared(Arc<[u8]>)`
+- `Nv12 { .. }`（`unstable-raw-inputs` feature 有効時のみ）
+- `Rgb24(Vec<u8>)`（`unstable-raw-inputs` feature 有効時のみ）
 
-### 5.2 出力 `EncodedChunk`
+現行 encode が受理するのは `Argb8888` / `Argb8888Shared` のみです。
 
-- `codec`
-- `layout`
-- `data`
-- `pts_90k`
-- `is_keyframe`
+- `Nv12` / `Rgb24` は `BackendError::InvalidInput`
+- ARGB 長さは厳密に `width * height * 4`
 
-`layout` は backend と codec で決まります。
+### 4.2 Encode 出力 layout
 
 - VT + H264: `EncodedLayout::Avcc`
 - VT + HEVC: `EncodedLayout::Hvcc`
 - NV: `EncodedLayout::AnnexB`
 
-## 6. submit / reap / flush の意味
+## 5. submit / reap / flush の意味
 
-- `submit`: 入力投入のみ（即時に出力が返らないことがある）
-- `try_reap` / `reap_timeout`: すでに生成済みの出力を回収
-- `flush`: EOS/遅延分の確定回収
+- `submit`: 入力投入
+- `try_reap`: non-blocking 回収
+- `reap_timeout`: timeout 上限まで待機して回収（内部キュー + backend poll）
+- `flush`: EOS/遅延分回収
 
-推奨ループは「`submit` ごとに `try_reap` で回収、最後に `flush`」です。
+推奨ループは「`submit` -> `try_reap` 回収 -> 最後に `flush`」です。
 
-## 7. 最小実装例
+## 6. 失敗時の見方
 
-### 7.1 Decode（Auto backend）
+- `UnsupportedConfig`: backend/環境依存で利用不可
+- `InvalidInput`: 入力不正（未対応 buffer, payload size mismatch）
+- `InvalidBitstream`: bitstream 形式不正
+- `TemporaryBackpressure`: 一時飽和
+- `DeviceLost`: デバイスロスト
+- `Backend`: backend 内部エラー
 
-```rust
-use video_hw::{Backend, BitstreamInput, Codec, DecodeSession, DecoderConfig};
+補足:
+- `BackendError::kind()` でエラー種別を取得できる
+- `BackendError::is_runtime_unavailable()` は `UnsupportedConfig` / `DeviceLost` を runtime unavailable として判定する
 
-fn decode_annexb(data: Vec<u8>) -> Result<usize, video_hw::BackendError> {
-    let mut sess = DecodeSession::new(
-        Backend::Auto,
-        DecoderConfig::new(Codec::H264, 30, false),
-    );
-
-    sess.submit(BitstreamInput::AnnexBChunk {
-        chunk: data,
-        pts_90k: None,
-    })?;
-
-    let mut count = 0usize;
-    while sess.try_reap()?.is_some() {
-        count += 1;
-    }
-    count += sess.flush()?.len();
-
-    let summary = sess.summary();
-    assert_eq!(summary.decoded_frames, count);
-    Ok(count)
-}
-```
-
-### 7.2 Encode（Auto backend）
-
-```rust
-use video_hw::{
-    Backend, Codec, Dimensions, EncodeFrame, EncodeSession, EncoderConfig, RawFrameBuffer,
-    Timestamp90k,
-};
-
-fn encode_one_frame() -> Result<usize, video_hw::BackendError> {
-    let dims = Dimensions {
-        width: std::num::NonZeroU32::new(640).expect("non-zero width"),
-        height: std::num::NonZeroU32::new(360).expect("non-zero height"),
-    };
-    let argb = vec![0_u8; (dims.width.get() * dims.height.get() * 4) as usize];
-
-    let mut sess = EncodeSession::new(
-        Backend::Auto,
-        EncoderConfig::new(Codec::H264, 30, true),
-    );
-
-    sess.submit(EncodeFrame {
-        dims,
-        pts_90k: Some(Timestamp90k(0)),
-        buffer: RawFrameBuffer::Argb8888(argb),
-        force_keyframe: true,
-    })?;
-
-    let mut packets = 0usize;
-    while sess.try_reap()?.is_some() {
-        packets += 1;
-    }
-    packets += sess.flush()?.len();
-    Ok(packets)
-}
-```
-
-## 8. CLI ですぐ試す
+## 7. 最小検証コマンド
 
 ```bash
-# decode（Auto）
-cargo run --example decode_annexb -- --backend auto --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --require-hardware
-
-# encode（Auto）
-cargo run --example encode_synthetic -- --backend auto --codec h264 --fps 30 --frame-count 120 --require-hardware --output ./encoded-output.bin
+cargo test -- --nocapture
+cargo test --features backend-nvidia -- --nocapture
+cargo check --all-targets --features backend-nvidia
 ```
 
-## 9. 失敗時の見方
+## 8. 関連
 
-- `UnsupportedConfig`
-  - backend 実装が環境で利用不可（例: CUDA context 初期化失敗、driver/SDK 不足）
-- `InvalidInput`
-  - 入力形式不正（例: ARGB サイズ不一致）
-- `InvalidBitstream`
-  - bitstream 破損または length-prefixed 形式不正
-- `TemporaryBackpressure`
-  - 一時的な処理飽和
-- `DeviceLost`
-  - デバイスロスト
-
-## 10. 互換性チェック観点
-
-実装や移植時は次を維持してください。
-
-1. `submit`/`reap`/`flush` の責務分離が崩れないこと。
-2. decode frame 数と `summary().decoded_frames` が一致すること。
-3. encode 出力の `layout` が backend/codec 契約と一致すること。
-4. 入力妥当性エラーが `InvalidInput` として表面化すること。
-
-## 11. Display 実装の利用例（ログ用途）
-
-主要な公開型は `Display` で読みやすく出力できます。
-
-```rust
-use video_hw::{
-  Backend, CapabilityReport, Codec, DecodeSummary, DecoderConfig, EncodedLayout, EncoderConfig,
-  SessionSwitchMode, SessionSwitchRequest, VtSessionConfig,
-};
-
-fn log_examples(report: CapabilityReport, summary: DecodeSummary) {
-  let backend = Backend::Auto;
-  let dec_cfg = DecoderConfig::new(Codec::H264, 30, true);
-  let enc_cfg = EncoderConfig::new(Codec::Hevc, 60, true);
-  let switch = SessionSwitchRequest::VideoToolbox {
-    config: VtSessionConfig {
-      force_keyframe_on_activate: true,
-    },
-    mode: SessionSwitchMode::OnNextKeyframe,
-  };
-
-  println!("backend={}", backend);
-  println!("decoder_config={}", dec_cfg);
-  println!("encoder_config={}", enc_cfg);
-  println!("layout={}", EncodedLayout::Avcc);
-  println!("capability={}", report);
-  println!("summary={}", summary);
-  println!("session_switch={}", switch);
-}
-```
+- `docs/spec/IO_FORMAT_CONTRACT.md`
+- `docs/spec/TEST_SPEC_INVENTORY.md`
+- `docs/status/STATUS.md`

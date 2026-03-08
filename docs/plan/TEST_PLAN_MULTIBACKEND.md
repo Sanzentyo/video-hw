@@ -1,8 +1,9 @@
 # Test Plan (VT + NVIDIA)
 
-更新日: 2026-02-18
+更新日: 2026-02-23
 
-注記: 現在の mainline は root 単一 crate 構成です。本書は NVIDIA 実装フェーズを含む拡張計画として維持します。
+注記: 現在の mainline は workspace 構成（`crates/video-hw-core` + `crates/video-hw`）です。
+本書は multibackend 拡張計画として維持します。
 
 ## 1. 目的
 
@@ -23,10 +24,10 @@
   - 必要に応じて CI で upstream test 実行結果を参照
   - 互換性破壊が疑われるときのみ patch として提案
 
-### B. 本プロジェクト新規テスト（今回作る）
+### B. 本プロジェクト新規テスト（継続運用）
 
 - 目的: 共通契約・adapter境界・サンプル入力再現性を担保
-- 管理場所: 移設先 workspace の `tests/` または各crate内
+- 管理場所: `crates/video-hw/tests/` および各 crate の unit tests
 - 主眼: backend 差替え時に上位 API の意味が変わらないこと
 
 ## 3. 新規テストスイート構成
@@ -57,18 +58,20 @@
 - 追加予定:
   - encode 例（VT/NVIDIA）で作った出力を再度 decode して整合性確認
 
-## 4. encode examples 追加計画
+## 4. encode/decode examples
 
-移設後の `examples` は decode/encode を backend ごとに明示する。
+`examples` は decode/encode を backend ごとに明示する。
 
-- `decode_vt`
-- `decode_nvidia`
-- `encode_vt`
-- `encode_nvidia`
+- `decode_annexb`
+- `encode_synthetic`
+- `encode_raw_argb`
+- `encode_streaming_probe`
 
-それぞれで同一CLI引数体系（`--codec`, `--input/--output`, `--chunk-bytes`, `--require-hardware` など）を採用し、比較しやすくする。
+必要に応じて backend 別サンプルは追加するが、現状は共通 API の再現性を優先する。
 
 ## 5. CI 分離
+
+注記: CI 本体の導入は後段。ここでは設計方針のみ保持する。
 
 - Job A (macOS): VT の unit/contract/integration
 - Job B (Linux + NVIDIA GPU): NVIDIA adapter + sample integration

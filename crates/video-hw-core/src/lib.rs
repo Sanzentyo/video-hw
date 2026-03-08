@@ -60,7 +60,9 @@ pub enum BitstreamInput {
 pub enum RawFrameBuffer {
     Argb8888(Vec<u8>),
     Argb8888Shared(Arc<[u8]>),
+    #[cfg(feature = "unstable-raw-inputs")]
     Nv12 { pitch: usize, data: Vec<u8> },
+    #[cfg(feature = "unstable-raw-inputs")]
     Rgb24(Vec<u8>),
 }
 
@@ -122,6 +124,24 @@ pub enum DecodedFrame {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeOutputMode {
+    #[default]
+    Metadata,
+    Nv12,
+    Rgb24,
+}
+
+impl Display for DecodeOutputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Metadata => f.write_str("metadata"),
+            Self::Nv12 => f.write_str("nv12"),
+            Self::Rgb24 => f.write_str("rgb24"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorMetadata {
     pub color_primaries: Option<i32>,
@@ -130,7 +150,7 @@ pub struct ColorMetadata {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Frame {
+pub struct Frame {
     pub width: usize,
     pub height: usize,
     pub pixel_format: Option<u32>,
@@ -162,6 +182,7 @@ pub struct DecoderConfig {
     pub codec: Codec,
     pub fps: i32,
     pub require_hardware: bool,
+    pub output_mode: DecodeOutputMode,
     pub backend_options: BackendDecoderOptions,
 }
 
@@ -172,6 +193,7 @@ impl DecoderConfig {
             codec,
             fps,
             require_hardware,
+            output_mode: DecodeOutputMode::default(),
             backend_options: BackendDecoderOptions::default(),
         }
     }
@@ -181,8 +203,8 @@ impl Display for DecoderConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "DecoderConfig(codec={}, fps={}, require_hardware={})",
-            self.codec, self.fps, self.require_hardware
+            "DecoderConfig(codec={}, fps={}, require_hardware={}, output_mode={})",
+            self.codec, self.fps, self.require_hardware, self.output_mode
         )
     }
 }
@@ -365,7 +387,7 @@ impl Display for DecodeSummary {
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-pub(crate) struct EncodedPacket {
+pub struct EncodedPacket {
     pub codec: Codec,
     pub data: Vec<u8>,
     pub pts_90k: Option<i64>,
@@ -380,7 +402,7 @@ pub(crate) struct EncodedPacket {
         any(target_os = "linux", target_os = "windows")
     )
 )))]
-pub(crate) struct EncodedPacket;
+pub struct EncodedPacket;
 
 #[derive(Debug, Clone)]
 pub struct CapabilityReport {
@@ -418,7 +440,41 @@ pub enum BackendError {
     Backend(String),
 }
 
-pub(crate) trait VideoDecoder {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendErrorKind {
+    UnsupportedCodec,
+    UnsupportedConfig,
+    InvalidBitstream,
+    InvalidInput,
+    TemporaryBackpressure,
+    DeviceLost,
+    Backend,
+}
+
+impl BackendError {
+    #[must_use]
+    pub fn kind(&self) -> BackendErrorKind {
+        match self {
+            Self::UnsupportedCodec(_) => BackendErrorKind::UnsupportedCodec,
+            Self::UnsupportedConfig(_) => BackendErrorKind::UnsupportedConfig,
+            Self::InvalidBitstream(_) => BackendErrorKind::InvalidBitstream,
+            Self::InvalidInput(_) => BackendErrorKind::InvalidInput,
+            Self::TemporaryBackpressure(_) => BackendErrorKind::TemporaryBackpressure,
+            Self::DeviceLost(_) => BackendErrorKind::DeviceLost,
+            Self::Backend(_) => BackendErrorKind::Backend,
+        }
+    }
+
+    #[must_use]
+    pub fn is_runtime_unavailable(&self) -> bool {
+        matches!(
+            self.kind(),
+            BackendErrorKind::UnsupportedConfig | BackendErrorKind::DeviceLost
+        )
+    }
+}
+
+pub trait VideoDecoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_bitstream_chunk(
@@ -429,15 +485,23 @@ pub(crate) trait VideoDecoder {
 
     fn flush(&mut self) -> Result<Vec<Frame>, BackendError>;
 
+    fn try_reap(&mut self) -> Result<Vec<Frame>, BackendError> {
+        Ok(Vec::new())
+    }
+
     fn decode_summary(&self) -> DecodeSummary;
 }
 
-pub(crate) trait VideoEncoder {
+pub trait VideoEncoder {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError>;
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError>;
+
+    fn try_reap(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        Ok(Vec::new())
+    }
 
     fn request_session_switch(
         &mut self,

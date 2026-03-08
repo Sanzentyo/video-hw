@@ -87,6 +87,7 @@ struct DecodeOutputState {
     width: Option<usize>,
     height: Option<usize>,
     pixel_format: Option<u32>,
+    capture_argb: bool,
     pending_frames: VecDeque<Frame>,
 }
 
@@ -123,6 +124,9 @@ impl VtDecoderSession {
         };
 
         let mut decode_state = Box::new(Mutex::new(DecodeOutputState::default()));
+        if let Ok(mut state) = decode_state.lock() {
+            state.capture_argb = !matches!(config.output_mode, crate::DecodeOutputMode::Metadata);
+        }
         let decode_state_ptr =
             (&mut *decode_state as *mut Mutex<DecodeOutputState>).cast::<c_void>();
         let callback = VTDecompressionOutputCallbackRecord {
@@ -450,6 +454,10 @@ impl VideoDecoder for VtDecoderAdapter {
         }
 
         self.take_delta(true)
+    }
+
+    fn try_reap(&mut self) -> Result<Vec<Frame>, BackendError> {
+        self.take_delta(false)
     }
 
     fn decode_summary(&self) -> DecodeSummary {
@@ -1282,6 +1290,11 @@ extern "C" fn vt_decode_output_callback(
         let height = pixel_buffer.get_height();
         let pixel_format = pixel_buffer.get_pixel_format();
         let color = extract_color_metadata(&pixel_buffer);
+        let argb = if s.capture_argb {
+            copy_argb_payload_from_pixel_buffer(&pixel_buffer, pixel_format, width, height)
+        } else {
+            None
+        };
         let frame = Frame {
             width,
             height,
@@ -1291,7 +1304,7 @@ extern "C" fn vt_decode_output_callback(
             color_primaries: color.color_primaries,
             transfer_function: color.transfer_function,
             ycbcr_matrix: color.ycbcr_matrix,
-            argb: None,
+            argb,
             force_keyframe: false,
         };
         s.decoded_frames = s.decoded_frames.saturating_add(1);
@@ -1306,6 +1319,50 @@ extern "C" fn vt_decode_output_callback(
         }
         s.pending_frames.push_back(frame);
     }
+}
+
+fn copy_argb_payload_from_pixel_buffer(
+    pixel_buffer: &CVPixelBuffer,
+    pixel_format: u32,
+    width: usize,
+    height: usize,
+) -> Option<Vec<u8>> {
+    if pixel_format != kCVPixelFormatType_32BGRA {
+        return None;
+    }
+
+    let lock_status = pixel_buffer.lock_base_address(0);
+    if lock_status != 0 {
+        return None;
+    }
+
+    let bytes_per_row = pixel_buffer.get_bytes_per_row();
+    let total = bytes_per_row.saturating_mul(height);
+    let base_ptr = unsafe { pixel_buffer.get_base_address() } as *const u8;
+    let out = if !base_ptr.is_null() && total > 0 {
+        let buffer = unsafe { std::slice::from_raw_parts(base_ptr, total) };
+        let mut argb = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+        for y in 0..height {
+            for x in 0..width {
+                let src = y * bytes_per_row + x * 4;
+                let dst = (y * width + x) * 4;
+                if src + 3 >= buffer.len() || dst + 3 >= argb.len() {
+                    continue;
+                }
+                // BGRA -> ARGB
+                argb[dst] = buffer[src + 3];
+                argb[dst + 1] = buffer[src + 2];
+                argb[dst + 2] = buffer[src + 1];
+                argb[dst + 3] = buffer[src];
+            }
+        }
+        Some(argb)
+    } else {
+        None
+    };
+
+    let _ = pixel_buffer.unlock_base_address(0);
+    out
 }
 
 fn cm_time_to_90k(time: CMTime) -> Option<i64> {

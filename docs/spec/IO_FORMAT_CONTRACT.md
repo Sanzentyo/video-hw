@@ -1,75 +1,61 @@
-# I/O Format Contract（Binary + Type Level）
+# I/O Format Contract（Current Runtime Contract）
 
-更新日: 2026-02-21
+更新日: 2026-02-23
 
-## 1. この文書の目的
+## 1. 目的
 
-`video-hw` の入出力契約を、以下の 2 層で明確化する。
+この文書は `video-hw` の現行公開APIにおける I/O 契約を、実装準拠で定義する。
 
-- バイナリ形式（wire/byte layout）
-- 型レベル形式（Rust API での表現）
+- バイナリ形式（bitstream / packet）
+- 型レベル形式（`BitstreamInput` / `EncodeFrame` / `DecodedFrame` / `EncodedChunk`）
+- 実行時制約（現在サポートされる入力と出力）
 
-本書は、`README.md` / `docs/USAGE_STRICT.md` / `docs/status/STATUS.md` の現行仕様を前提に、公開I/O契約を定義する。
+## 2. 現行 API の前提
 
-## 2. プロジェクト概要（ドキュメント要約）
+- decode/encode は `submit` / `try_reap` / `reap_timeout` / `flush` で統一
+- `reap_timeout` は timeout 上限まで待機する実装（内部キュー + backend poll、空なら `None`）
+- decode 出力は `DecoderConfig.output_mode` でモード指定（現行は `Metadata` のみ実装）
+- backend は feature + target で有効化
+  - macOS: `backend-vt`
+  - Linux/Windows: `backend-nvidia`
 
-- 単一 crate で VideoToolbox / NVIDIA を実行時 `BackendKind` で切替。
-- decode は Annex-B chunk 入力を受け、内部で AU 組み立てを行う。
-- encode は `Frame` 入力を受け、backend raw payload を返す。
-- 現行 decode 出力はメタデータ中心（`Frame.argb = None`）。
-- transform 系では `Nv12Frame` / `RgbFrame` が別型で実装済み。
+### 2.1 NVIDIA 依存の境界条件
 
-## 3. 想定ユースケースと必要I/O
+- `backend-nvidia` は `nvidia-video-codec-sdk`（Rust bindings）を利用するラッパー構成
+- NVIDIA Video Codec SDK 本体は利用者が別途取得・配置する前提
+- ビルド時は SDK ライブラリ探索のため `NVIDIA_VIDEO_CODEC_SDK_PATH` 等の環境設定が必要になる
+- 本プロジェクトの配布方針として、SDK 本体の同梱は前提にしない
 
-| ユースケース | 入力形式 | 出力形式 |
-| --- | --- | --- |
-| U1: オフライン transcode（ES->ES） | Annex-B / ARGB | Annex-B / AVCC/HVCC |
-| U2: 低遅延配信（1AU単位） | Access Unit（raw NAL） | layout 明示済み packet |
-| U3: 解析用途（metadata only） | Annex-B | metadata frame |
-| U4: 画素変換パイプライン | NV12 | RGB24 / RGBA |
-| U5: muxer 連携（MP4/MKV 等） | ARGB/NV12 + codec | AVCC/HVCC or Annex-B 明示 |
-| U6: 将来 zero-copy 拡張 | 共有バッファ/外部ハンドル | 共有/所有を選べる packet |
+## 3. Binary Contract
 
-この 6 用途を満たすため、本書では 13 種の I/O フォーマットを規定する。
+### 3.1 Decode 入力
 
-## 4. バイナリ形式（Binary Contract）
+- `BIN-BS-01`: Annex-B chunk
+  - start code: `00 00 01` または `00 00 00 01`
+- `BIN-BS-02`: raw NAL Access Unit
+  - API入力時は prefix なし NAL 配列
+  - 内部で Annex-B にパック
+- `BIN-BS-03`: length-prefixed sample
+  - 各 NAL が `u32be length + payload`
+  - 内部で Annex-B に展開
 
-### 4.1 Bitstream 入力
+### 3.2 Encode 入力
 
-| ID | 形式 | 定義 | 用途 | 現行実装 |
-| --- | --- | --- | --- | --- |
-| `BIN-BS-01` | Annex-B byte stream | `00 00 01` または `00 00 00 01` 区切り | U1/U3 | 対応済み（decode入口） |
-| `BIN-BS-02` | Access Unit / raw NAL list | NAL は生 bytes（prefix 無し） | U2 | 内部表現で対応済み |
-| `BIN-BS-03` | length-prefixed sample | 各 NAL が `u32be length + payload` | U2/U5 | VT 側 pack/unpack で対応 |
+- `BIN-RF-01`: ARGB8888 packed
+  - `len == width * height * 4`
+  - 現行 encode で受理される唯一の実入力系列
+- `BIN-RF-02`: NV12
+  - 型としては存在するが、現行 encode では `InvalidInput`
+- `BIN-RF-03`: RGB24
+  - 型としては存在するが、現行 encode では `InvalidInput`
 
-### 4.2 Raw frame 入力
+### 3.3 Encode 出力
 
-| ID | 形式 | 定義 | 用途 | 現行実装 |
-| --- | --- | --- | --- | --- |
-| `BIN-RF-01` | ARGB8888 packed | 1 pixel = 4 bytes (A,R,G,B), `len = w*h*4` | U1/U5 | 対応済み（encode入力） |
-| `BIN-RF-02` | NV12 pitch-linear | Y plane + interleaved UV, `len >= pitch*h*3/2` | U4/U6 | transform層で対応済み |
-| `BIN-RF-03` | RGB24 packed | 1 pixel = 3 bytes (R,G,B) | U4 | transform出力で対応済み |
+- `BIN-EP-01`: Annex-B（NV）
+- `BIN-EP-02`: AVCC（VT + H264）
+- `BIN-EP-03`: HVCC（VT + HEVC）
 
-### 4.3 Encode 出力
-
-| ID | 形式 | 定義 | 用途 | 現行実装 |
-| --- | --- | --- | --- | --- |
-| `BIN-EP-01` | Annex-B互換 packet | start code 付き NAL 連結（NVENC raw想定） | U1/U2 | NV encode 出力（SDK raw payload） |
-| `BIN-EP-02` | AVCC packet | 4-byte BE length-prefix NAL 列 | U5 | VT H.264 encode 出力 |
-| `BIN-EP-03` | HVCC packet | 4-byte BE length-prefix NAL 列 | U5 | VT HEVC encode 出力 |
-| `BIN-EP-04` | Opaque packet | backend raw（layout不明時の退避） | U6 | 将来/互換用 |
-
-### 4.4 Decode 出力
-
-| ID | 形式 | 定義 | 用途 | 現行実装 |
-| --- | --- | --- | --- | --- |
-| `BIN-DF-01` | metadata frame | width/height/pts 等のみ | U3 | 対応済み（標準） |
-| `BIN-DF-02` | NV12 frame | pitch 付き生 NV12 | U4/U6 | transform経路で対応 |
-| `BIN-DF-03` | RGB frame | RGB24 または RGBA | U4 | transform経路で対応 |
-
-## 5. 型レベル形式（Type Contract）
-
-以下は現行 API の型レベル契約である。
+## 4. Type Contract（実装準拠）
 
 ```rust
 pub struct Dimensions {
@@ -79,101 +65,111 @@ pub struct Dimensions {
 
 pub struct Timestamp90k(pub i64);
 
-pub enum BitstreamInput<'a> {
-    AnnexBChunk(&'a [u8]),                    // BIN-BS-01
-    AccessUnitRawNal {                        // BIN-BS-02
-        codec: Codec,
-        nalus: Vec<&'a [u8]>,
-        pts: Option<Timestamp90k>,
+pub enum BitstreamInput {
+    AnnexBChunk {
+        chunk: Vec<u8>,
+        pts_90k: Option<Timestamp90k>,
     },
-    LengthPrefixedSample {                    // BIN-BS-03
+    AccessUnitRawNal {
         codec: Codec,
-        sample: &'a [u8],
-        pts: Option<Timestamp90k>,
+        nalus: Vec<Vec<u8>>,
+        pts_90k: Option<Timestamp90k>,
+    },
+    LengthPrefixedSample {
+        codec: Codec,
+        sample: Vec<u8>,
+        pts_90k: Option<Timestamp90k>,
     },
 }
 
 pub enum RawFrameBuffer {
-    Argb8888(Vec<u8>),                        // BIN-RF-01
-    Argb8888Shared(std::sync::Arc<[u8]>),     // U6 (copy削減)
-    Nv12 { pitch: usize, data: Vec<u8> },     // BIN-RF-02
-    Rgb24(Vec<u8>),                           // BIN-RF-03
+    Argb8888(Vec<u8>),
+    Argb8888Shared(std::sync::Arc<[u8]>),
+    #[cfg(feature = "unstable-raw-inputs")]
+    Nv12 { pitch: usize, data: Vec<u8> },
+    #[cfg(feature = "unstable-raw-inputs")]
+    Rgb24(Vec<u8>),
 }
 
 pub struct EncodeFrame {
     pub dims: Dimensions,
-    pub pts: Option<Timestamp90k>,
+    pub pts_90k: Option<Timestamp90k>,
     pub buffer: RawFrameBuffer,
     pub force_keyframe: bool,
 }
 
 pub enum EncodedLayout {
-    AnnexB,                                   // BIN-EP-01
-    Avcc,                                     // BIN-EP-02
-    Hvcc,                                     // BIN-EP-03
-    Opaque,                                   // BIN-EP-04
+    AnnexB,
+    Avcc,
+    Hvcc,
+    Opaque,
 }
 
 pub struct EncodedChunk {
     pub codec: Codec,
     pub layout: EncodedLayout,
-    pub pts: Option<Timestamp90k>,
-    pub is_keyframe: bool,
     pub data: Vec<u8>,
+    pub pts_90k: Option<Timestamp90k>,
+    pub is_keyframe: bool,
 }
 
 pub enum DecodedFrame {
     Metadata {
-        dims: Dimensions,
-        pts: Option<Timestamp90k>,
+        dims: Option<Dimensions>,
+        pts_90k: Option<Timestamp90k>,
         pixel_format: Option<u32>,
         decode_info_flags: Option<u32>,
         color: Option<ColorMetadata>,
-    },                                        // BIN-DF-01
+    },
     Nv12 {
         dims: Dimensions,
         pitch: usize,
-        pts: Option<Timestamp90k>,
+        pts_90k: Option<Timestamp90k>,
         data: Vec<u8>,
-    },                                        // BIN-DF-02
+    },
     Rgb24 {
         dims: Dimensions,
-        pts: Option<Timestamp90k>,
+        pts_90k: Option<Timestamp90k>,
         data: Vec<u8>,
-    },                                        // BIN-DF-03
-}
-
-pub struct ColorMetadata {
-    pub color_primaries: Option<i32>,
-    pub transfer_function: Option<i32>,
-    pub ycbcr_matrix: Option<i32>,
+    },
 }
 ```
 
-## 6. 現行 API との対応
+## 5. 現行の厳密制約
 
-| 現行型 | 問題点 | 対応方針 |
-| --- | --- | --- |
-| `Frame { pixel_format: Option<u32>, argb: Option<Vec<u8>> }` | 意味が多重（decode metadata と encode raw を同居） | `DecodedFrame` / `EncodeFrame` に分離 |
-| `EncodedPacket { data: Vec<u8> }` | layout が型上で不明 | `EncodedChunk.layout` を必須化 |
-| `push_bitstream_chunk(&[u8], pts)` | Annex-B 専用で拡張しにくい | `BitstreamInput` を受ける追加 API を導入 |
+1. decode 出力
+- 公開 decode 経路の標準出力は `DecodedFrame::Metadata` 中心
+- `DecoderConfig.output_mode=Metadata` は常用サポート
+- `output_mode=Nv12` / `Rgb24` は backend ARGB payload がある場合のみ変換出力する
+- backend が ARGB payload を提供しない場合は `BackendError::UnsupportedConfig`
 
-## 7. 方向性（決定事項）
+2. encode 入力
+- `RawFrameBuffer::Argb8888` / `Argb8888Shared` のみ受理
+- `RawFrameBuffer::Nv12` / `Rgb24` は `unstable-raw-inputs` 有効時のみ型として公開される
+- 上記 variant は現行 encode 経路では `BackendError::InvalidInput`
 
-1. I/O は常に「layout 明示」を原則とする（特に encode 出力）。
-2. `Frame` の単一型運用は互換維持しつつ、用途別型へ段階移行する。
-3. decode は metadata fast-path を維持し、必要時のみ画素 payload を返す。
-4. 共有バッファ (`Arc<[u8]>`) を first-class にし、copy 削減経路を確保する。
+3. timeout 契約
+- `reap_timeout` は内部キューと backend poll を用いて timeout 上限まで待機し、回収できない場合は `None` を返す
 
-## 8. 実装方針
+## 6. エラー契約
 
-1. `layout` 明示を必須とし、曖昧 payload を公開型から排除する。
-2. decode/encode で型を分離し、`Frame` 多義性を持ち込まない。
-3. submit/reap/flush 契約で I/O のタイミングを明示する。
+- `UnsupportedConfig`: backend/環境で利用不可
+- `InvalidBitstream`: bitstream 形式不正
+- `InvalidInput`: frame 入力不正（ARGBサイズ不一致、未対応 buffer など）
+- `TemporaryBackpressure`: 一時的飽和
+- `DeviceLost`: デバイスロスト
+- `Backend`: backend 内部エラー
 
-## 9. 参照
+## 7. 今後の拡張対象
 
-- `README.md`
+- decode 出力モードの正式契約化（Metadata/NV12/RGB）
+- encode での NV12 直接入力契約
+- `reap_timeout` の backend 直接 poll 連携（将来最適化）
+
+## 8. 参照
+
 - `docs/USAGE_STRICT.md`
+- `docs/spec/TEST_SPEC_INVENTORY.md`
 - `docs/status/STATUS.md`
-- `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
+- `crates/video-hw-core/src/lib.rs`
+- `crates/video-hw/src/lib.rs`
