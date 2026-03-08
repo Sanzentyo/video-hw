@@ -46,8 +46,8 @@ use video_hw::VtSessionConfig;
     )
 ))]
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeSession,
-    DecodeOutputMode, DecoderConfig,
+    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
+    DecodeSession, DecoderConfig,
 };
 #[cfg(all(
     feature = "backend-nvidia",

@@ -61,7 +61,10 @@ pub enum RawFrameBuffer {
     Argb8888(Vec<u8>),
     Argb8888Shared(Arc<[u8]>),
     #[cfg(feature = "unstable-raw-inputs")]
-    Nv12 { pitch: usize, data: Vec<u8> },
+    Nv12 {
+        pitch: usize,
+        data: Vec<u8>,
+    },
     #[cfg(feature = "unstable-raw-inputs")]
     Rgb24(Vec<u8>),
 }

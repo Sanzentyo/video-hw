@@ -46,10 +46,10 @@ mod vt_backend;
 
 pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
-    CapabilityReport, Codec, ColorMetadata, DecodeOutputMode, DecodeSummary, DecodedFrame, DecoderConfig,
-    Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig, NvidiaDecoderOptions,
-    NvidiaEncoderOptions, NvidiaSessionConfig, RawFrameBuffer, SessionSwitchMode,
-    SessionSwitchRequest, Timestamp90k, VtSessionConfig,
+    CapabilityReport, Codec, ColorMetadata, DecodeOutputMode, DecodeSummary, DecodedFrame,
+    DecoderConfig, Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig,
+    NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig, RawFrameBuffer,
+    SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtSessionConfig,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -1071,11 +1071,13 @@ fn backend_frame_to_decoded_frame(
     match mode {
         DecodeOutputMode::Metadata => {}
         DecodeOutputMode::Nv12 => {
-            let dims = dimensions_from_backend_frame(frame.width, frame.height).ok_or_else(|| {
-                BackendError::InvalidInput(
-                    "decoded frame dimensions are invalid for DecodeOutputMode::Nv12".to_string(),
-                )
-            })?;
+            let dims =
+                dimensions_from_backend_frame(frame.width, frame.height).ok_or_else(|| {
+                    BackendError::InvalidInput(
+                        "decoded frame dimensions are invalid for DecodeOutputMode::Nv12"
+                            .to_string(),
+                    )
+                })?;
             let argb = frame_argb_payload(&frame).ok_or_else(|| {
                 BackendError::UnsupportedConfig(
                     "DecodeOutputMode::Nv12 requires backend ARGB payload".to_string(),
@@ -1090,12 +1092,13 @@ fn backend_frame_to_decoded_frame(
             });
         }
         DecodeOutputMode::Rgb24 => {
-            let dims = dimensions_from_backend_frame(frame.width, frame.height).ok_or_else(|| {
-                BackendError::InvalidInput(
-                    "decoded frame dimensions are invalid for DecodeOutputMode::Rgb24"
-                        .to_string(),
-                )
-            })?;
+            let dims =
+                dimensions_from_backend_frame(frame.width, frame.height).ok_or_else(|| {
+                    BackendError::InvalidInput(
+                        "decoded frame dimensions are invalid for DecodeOutputMode::Rgb24"
+                            .to_string(),
+                    )
+                })?;
             let argb = frame_argb_payload(&frame).ok_or_else(|| {
                 BackendError::UnsupportedConfig(
                     "DecodeOutputMode::Rgb24 requires backend ARGB payload".to_string(),
@@ -1172,7 +1175,11 @@ fn argb_to_rgb24(argb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Ba
     Ok(out)
 }
 
-fn argb_to_nv12(argb: &[u8], width: usize, height: usize) -> Result<(usize, Vec<u8>), BackendError> {
+fn argb_to_nv12(
+    argb: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(usize, Vec<u8>), BackendError> {
     let expected = width
         .checked_mul(height)
         .and_then(|px| px.checked_mul(4))
@@ -1607,7 +1614,8 @@ mod tests {
     ))]
     #[test]
     fn decode_reap_timeout_waits_until_deadline_when_empty() {
-        let mut session = DecodeSession::new(Backend::Auto, DecoderConfig::new(Codec::H264, 30, false));
+        let mut session =
+            DecodeSession::new(Backend::Auto, DecoderConfig::new(Codec::H264, 30, false));
         let timeout = Duration::from_millis(8);
         let start = std::time::Instant::now();
         let out = session.reap_timeout(timeout).unwrap();
@@ -1626,7 +1634,8 @@ mod tests {
     ))]
     #[test]
     fn encode_reap_timeout_waits_until_deadline_when_empty() {
-        let mut session = EncodeSession::new(Backend::Auto, EncoderConfig::new(Codec::H264, 30, false));
+        let mut session =
+            EncodeSession::new(Backend::Auto, EncoderConfig::new(Codec::H264, 30, false));
         let timeout = Duration::from_millis(8);
         let start = std::time::Instant::now();
         let out = session.reap_timeout(timeout).unwrap();

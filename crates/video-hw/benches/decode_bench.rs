@@ -31,7 +31,7 @@ use std::time::Duration;
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(

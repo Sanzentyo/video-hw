@@ -1,6 +1,6 @@
 # video-hw Status
 
-更新日: 2026-02-23
+更新日: 2026-03-08
 
 ## 1. 現在の構成（実装実態）
 
@@ -46,15 +46,17 @@
 
 ## 4. 本日実測した検証結果（この環境）
 
-- `cargo test -- --nocapture`: pass
-  - unit: 10 passed
+- `cargo fmt --all -- --check`: pass
+- `cargo test --workspace -- --nocapture`: pass
+  - unit: 11 passed
   - integration: 1 passed（`e2e_build_without_enabled_backends_compiles`）
 - `cargo check --all-targets --features backend-nvidia`: pass
-- `cargo test --features backend-nvidia -- --nocapture`: pass
-  - unit: 21 passed
+- `cargo clippy --workspace --all-targets --features backend-nvidia`: pass
+- `cargo test --workspace --features backend-nvidia -- --nocapture`: pass
+  - unit: 26 passed
   - integration: 13 passed
-- `cargo test --all-features -- --nocapture`: pass
-  - unit: 21 passed
+- `cargo test --workspace --all-features -- --nocapture`: pass
+  - unit: 27 passed
   - integration: 13 passed
 - `cargo bench -p video-hw --features backend-nvidia --bench decode_bench`: pass
   - H264 hw_optional chunk_4096: 223.60-231.97 ms

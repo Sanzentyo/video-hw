@@ -4,8 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     Backend, BackendDecoderOptions, BitstreamInput, Codec, DecodeOutputMode, DecodeSession,
-    DecoderConfig,
-    NvidiaDecoderOptions,
+    DecoderConfig, NvidiaDecoderOptions,
 };
 
 #[derive(Parser, Debug)]

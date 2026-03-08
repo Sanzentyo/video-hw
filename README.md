@@ -68,11 +68,14 @@ $env:NVIDIA_VIDEO_CODEC_SDK_PATH = "C:\Path\To\Video_Codec_SDK\Lib\x64"
 ## 検証コマンド
 
 ```bash
-cargo fmt --all
-cargo check
-cargo test -- --nocapture
-cargo check --all-targets --features backend-nvidia
-cargo test --features backend-nvidia -- --nocapture
+cargo fmt --all -- --check
+cargo test --workspace -- --nocapture
+cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets --features backend-nvidia
+cargo test --workspace --features backend-nvidia -- --nocapture
+cargo test --workspace --all-features -- --nocapture
+cargo bench --package video-hw --features backend-nvidia --bench decode_bench -- --noplot
+cargo deny check licenses advisories bans sources
 ```
 
 ## 実行例
