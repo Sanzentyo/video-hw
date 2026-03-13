@@ -5,7 +5,7 @@
 ## 1. 導入
 
 - macOS: `backend-vt`
-- Linux/Windows: `backend-nvidia`
+- Linux/Windows: `backend-nvidia` or `backend-intel`
 - `default = []`
 
 ```toml
@@ -13,7 +13,7 @@
 video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-vt"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] }
+video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] } # or ["backend-intel"]
 ```
 
 ## 2. Backend 選択
@@ -21,6 +21,7 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 - `Backend::Auto`
 - `Backend::VideoToolbox`（macOS + `backend-vt`）
 - `Backend::Nvidia`（Linux/Windows + `backend-nvidia`）
+- `Backend::Intel`（Linux/Windows + `backend-intel`）
 
 `Backend::Auto` は OS 既定 backend を選択します。
 
@@ -29,6 +30,34 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 - `backend-nvidia` は `nvidia-video-codec-sdk`（Rust bindings / ラッパー）を通じて NVIDIA SDK を利用する
 - SDK 本体（lib/headers）は同梱しない前提で、利用者が NVIDIA から別途取得して配置する
 - ビルド時は環境に応じて `NVIDIA_VIDEO_CODEC_SDK_PATH` などの設定が必要になる
+
+### 2.2 Intel backend の前提（重要）
+
+- `backend-intel` は `onevpl-rs`（`intel-onevpl-sys` 経由）で Intel oneVPL を利用する
+- 現行 Intel backend は H.264 / HEVC の encode/decode 実装を持つ（実際に使える codec は oneVPL runtime / ドライバの公開機能に依存。`require_hardware=false` 時は software 実装フォールバックを試行）
+- oneVPL 本体（runtime/headers）は同梱しない前提で、利用者が Intel oneAPI から別途取得して配置する
+- Base Toolkit 単体インストールでは oneVPL が未導入な場合があるため、必要なら `oneapi-standalone-components` の oneVPL を追加導入する
+- CLI 導入時は管理者 PowerShell で `w_oneVPL_p_<version>_offline.exe -a --list-products` → `--list-components` で `product-id` / `product-ver` を確認し、`-a --silent --eula accept --action install` を実行する
+- もしくは `installer.exe --package-path <...\\packages> --list-products` / `--list-components` で `product-id` と `product-ver` を確認し、`--action install` で導入する
+- ビルド時は環境に応じて `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH`（必要なら `LIBCLANG_PATH`）の設定が必要になる   
+- `vpl\latest` が作られない場合は `intel/libvpl` を clone し、`cmake --build ... --target install` で `mfx.h` / `vpl.lib` / DLL を生成して補完できる
+- 同等手順は `cargo +nightly -Zscript scripts/setup_onevpl.rs --apply` でも実行できる（`--apply` なしは dry-run）
+- Intel/ffmpeg 比較ベンチは `cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware true`（HEVC は `--codec hevc`）
+- runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録してレポート生成を継続できる
+- `build.rs` で oneVPL を自動取得/自動ビルドする方式は採用しない（依存 `onevpl-sys` の `build.rs` が先に実行されるため）
+- oneVPL導入後は再起動が必要な場合がある（インストーラログに reboot 要求が出た場合）
+
+#### Intel backend トラブルシュート（Windows）
+
+- `Unable to generate bindings: NotExist(...\\mfx.h)`  
+  `LIBVPL_INCLUDE_PATH` の不整合、または oneVPL ヘッダ未導入
+- `LINK : fatal error LNK1181: cannot open input file 'vpl.lib'`  
+  `vpl.lib` 未導入、または `LIBVPL_LIBRARY_PATH` 不整合
+- `Loader::new_session: NotFound`  
+  oneVPL runtime/ドライバ未導入、または再起動未実施
+- `unsupported config: Intel hardware encoder rejected ... (Session::encoder: InvalidVideoParam)`  
+  oneVPL runtime 側が要求 encode パラメータを受理できていない（環境により HEVC のみ有効で H.264 hardware encode が未提供な場合あり）。  
+  Intel GPU runtime / ドライバ更新後に再試行し、ベンチでは `--codec hevc` / `--require-hardware false` / `--allow-case-failures` を併用する
 
 ## 3. Decode API
 
@@ -93,6 +122,7 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 - VT + H264: `EncodedLayout::Avcc`
 - VT + HEVC: `EncodedLayout::Hvcc`
 - NV: `EncodedLayout::AnnexB`
+- Intel: `EncodedLayout::AnnexB`
 
 ## 5. submit / reap / flush の意味
 

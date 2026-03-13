@@ -72,8 +72,42 @@ cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
 - 既定は `warmup=1`, `repeat=3`, `verify=true`, `equal-raw-input=true`, `include-internal-metrics=true`
 - H264 と HEVC を同時ではなく順番に実行する
 
+### 6) Intel 精密ベンチ（反復 + 統計）
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --release --warmup 2 --repeat 9
+```
+
+- 生成レポート: `output/benchmark-intel-precise-<codec>-<epoch>.md`
+- `video-hw` は `backend=intel` で実行し、`--require-hardware <true|false>` で HW 固定 / fallback 許可を切り替え可能
+- `ffmpeg` は `h264_qsv` / `hevc_qsv` を使用
+- レポートに encode/decode の平均スループット差分（ffmpeg 比、±10% 判定）を出力
+- encode の厳密比較は `--equal-raw-input` を推奨（`video-hw` / `ffmpeg` に同一 raw ARGB 入力を供給）
+- 既定で `--grouped-cases=true`（caseごとに warmup/measure をまとめて実行）になっており、round-robin より計測ばらつきを抑えやすい
+- `--settle-ms <N>` で各計測の間に待機を入れて、熱/スケジューリング揺れを緩和できる
+- runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録したままレポート生成を継続
+- `--allow-case-failures --verify` 併用時、失敗ケースで出力が欠けた検証対象は `skipped` としてレポートに記録する
+
+### 7) Intel oneVPL fallback セットアップ（Windows CLI）
+
+```bash
+# dry-run（実行内容確認）
+cargo +nightly -Zscript scripts/setup_onevpl.rs
+
+# 実行
+cargo +nightly -Zscript scripts/setup_onevpl.rs --apply
+
+# 既存ディレクトリを消してやり直し
+cargo +nightly -Zscript scripts/setup_onevpl.rs --apply --force
+```
+
+- 生成した `mfx.h` / `vpl.lib` に合わせた `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` / `PATH` の設定例を出力する
+- setup 後の検証コマンド（`clippy` / `test`）も出力する
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること
 - `cargo -Zscript` が有効な Cargo であること
-- ベンチ用途では `ffmpeg` / NVIDIA ドライバ / CUDA 実行環境が必要
+- ベンチ用途では `ffmpeg` が必要（Intel 精密ベンチは QSV 有効環境が必要）
+- NVIDIA ベンチ用途では NVIDIA ドライバ / CUDA 実行環境が必要

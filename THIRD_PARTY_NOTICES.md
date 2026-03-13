@@ -13,12 +13,23 @@
   - Rust から NVIDIA Video Codec SDK を扱うためのラッパー層
   - SDK 本体は各利用者が NVIDIA から取得し、環境に配置する前提
   - 利用時は upstream のライセンス/利用条件を確認すること
+- `onevpl-rs`（optional, `backend-intel`）
+  - Repository: `https://github.com/FallingSnow/onevpl-rs`
+  - License: MIT（repository同梱の `LICENSE` を参照）
+  - Intel oneVPL の Rust ラッパー（`intel-onevpl-sys` による公式ヘッダ binding）
+  - oneVPL 本体（runtime/headers）の配布条件は Intel 側ライセンスを確認すること
 
 ## NVIDIA SDK に関する注意
 
 `backend-nvidia` は NVIDIA 関連コンポーネントに依存する。配布・再配布時は、
 NVIDIA 側のライセンス条件と利用規約を確認し、同梱可否や再配布条件を必ず検証すること。
 また、ビルド時には `NVIDIA_VIDEO_CODEC_SDK_PATH` 等の環境設定が必要になる。
+
+## Intel oneVPL に関する注意
+
+`backend-intel` は Intel oneVPL ランタイム/ヘッダに依存する。配布・再配布時は、
+Intel 側のライセンス条件と利用規約を確認し、同梱可否や再配布条件を必ず検証すること。
+また、ビルド時には `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` 等の環境設定が必要になる。
 
 ## Maintenance Policy
 

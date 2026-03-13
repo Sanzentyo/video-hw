@@ -17,7 +17,7 @@
 - decode 出力は `DecoderConfig.output_mode` でモード指定（現行は `Metadata` のみ実装）
 - backend は feature + target で有効化
   - macOS: `backend-vt`
-  - Linux/Windows: `backend-nvidia`
+  - Linux/Windows: `backend-nvidia` または `backend-intel`
 
 ### 2.1 NVIDIA 依存の境界条件
 
@@ -25,6 +25,13 @@
 - NVIDIA Video Codec SDK 本体は利用者が別途取得・配置する前提
 - ビルド時は SDK ライブラリ探索のため `NVIDIA_VIDEO_CODEC_SDK_PATH` 等の環境設定が必要になる
 - 本プロジェクトの配布方針として、SDK 本体の同梱は前提にしない
+
+### 2.2 Intel oneVPL 依存の境界条件
+
+- `backend-intel` は `onevpl-rs`（`intel-onevpl-sys` 経由）を利用するラッパー構成
+- oneVPL 本体は利用者が別途取得・配置する前提
+- ビルド時は oneVPL 探索のため `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` 等の環境設定が必要になる
+- 本プロジェクトの配布方針として、oneVPL 本体の同梱は前提にしない
 
 ## 3. Binary Contract
 
@@ -52,6 +59,7 @@
 ### 3.3 Encode 出力
 
 - `BIN-EP-01`: Annex-B（NV）
+- `BIN-EP-01A`: Annex-B（Intel）
 - `BIN-EP-02`: AVCC（VT + H264）
 - `BIN-EP-03`: HVCC（VT + HEVC）
 

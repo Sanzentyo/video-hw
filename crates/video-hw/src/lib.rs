@@ -21,6 +21,11 @@ mod backend_transform_adapter;
 mod bitstream;
 mod contract;
 #[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+mod intel_backend;
+#[cfg(all(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
@@ -48,8 +53,8 @@ pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
     CapabilityReport, Codec, ColorMetadata, DecodeOutputMode, DecodeSummary, DecodedFrame,
     DecoderConfig, Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig,
-    NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig, RawFrameBuffer,
-    SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtSessionConfig,
+    IntelEncoderOptions, NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig,
+    RawFrameBuffer, SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtSessionConfig,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -66,7 +71,7 @@ pub use transform::{
     any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ),
@@ -76,7 +81,7 @@ pub enum BackendKind {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -84,7 +89,7 @@ pub enum BackendKind {
         any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ),
@@ -98,12 +103,17 @@ pub enum BackendKind {
         any(target_os = "linux", target_os = "windows")
     ))]
     Nvidia,
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Intel,
 }
 
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -113,7 +123,7 @@ impl fmt::Display for BackendKind {
             #[cfg(any(
                 all(target_os = "macos", feature = "backend-vt"),
                 all(
-                    feature = "backend-nvidia",
+                    any(feature = "backend-nvidia", feature = "backend-intel"),
                     any(target_os = "linux", target_os = "windows")
                 )
             ))]
@@ -125,6 +135,11 @@ impl fmt::Display for BackendKind {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia => f.write_str("nvidia"),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel => f.write_str("intel"),
         }
     }
 }
@@ -132,7 +147,7 @@ impl fmt::Display for BackendKind {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -147,7 +162,7 @@ pub type Backend = BackendKind;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -159,13 +174,18 @@ enum DecoderInner {
         any(target_os = "linux", target_os = "windows")
     ))]
     Nvidia(Box<nv_backend::NvDecoderAdapter>),
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Intel(Box<intel_backend::IntelDecoderAdapter>),
     Unsupported(UnsupportedDecoderAdapter),
 }
 
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -176,7 +196,7 @@ enum DecoderInner {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -190,6 +210,11 @@ impl VideoDecoder for DecoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.query_capability(codec),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.query_capability(codec),
             Self::Unsupported(inner) => inner.query_capability(codec),
         }
     }
@@ -207,6 +232,11 @@ impl VideoDecoder for DecoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
             Self::Unsupported(inner) => inner.push_bitstream_chunk(chunk, pts_90k),
         }
     }
@@ -220,6 +250,11 @@ impl VideoDecoder for DecoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.flush(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.flush(),
             Self::Unsupported(inner) => inner.flush(),
         }
     }
@@ -233,6 +268,11 @@ impl VideoDecoder for DecoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.try_reap(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.try_reap(),
             Self::Unsupported(inner) => inner.try_reap(),
         }
     }
@@ -246,6 +286,11 @@ impl VideoDecoder for DecoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.decode_summary(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.decode_summary(),
             Self::Unsupported(inner) => inner.decode_summary(),
         }
     }
@@ -254,7 +299,7 @@ impl VideoDecoder for DecoderInner {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -301,7 +346,7 @@ impl VideoDecoder for DecoderInner {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -313,13 +358,18 @@ enum EncoderInner {
         any(target_os = "linux", target_os = "windows")
     ))]
     Nvidia(Box<nv_backend::NvEncoderAdapter>),
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Intel(Box<intel_backend::IntelEncoderAdapter>),
     Unsupported(UnsupportedEncoderAdapter),
 }
 
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -330,7 +380,7 @@ enum EncoderInner {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -344,6 +394,11 @@ impl VideoEncoder for EncoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.query_capability(codec),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.query_capability(codec),
             Self::Unsupported(inner) => inner.query_capability(codec),
         }
     }
@@ -357,6 +412,11 @@ impl VideoEncoder for EncoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.push_frame(frame),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.push_frame(frame),
             Self::Unsupported(inner) => inner.push_frame(frame),
         }
     }
@@ -370,6 +430,11 @@ impl VideoEncoder for EncoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.flush(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.flush(),
             Self::Unsupported(inner) => inner.flush(),
         }
     }
@@ -383,6 +448,11 @@ impl VideoEncoder for EncoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.try_reap(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.try_reap(),
             Self::Unsupported(inner) => inner.try_reap(),
         }
     }
@@ -399,6 +469,11 @@ impl VideoEncoder for EncoderInner {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Self::Nvidia(inner) => inner.request_session_switch(request),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(inner) => inner.request_session_switch(request),
             Self::Unsupported(inner) => inner.request_session_switch(request),
         }
     }
@@ -407,7 +482,7 @@ impl VideoEncoder for EncoderInner {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -450,7 +525,7 @@ impl VideoEncoder for EncoderInner {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -468,6 +543,14 @@ impl BackendKind {
         {
             BackendKind::Nvidia
         }
+        #[cfg(all(
+            not(feature = "backend-nvidia"),
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        {
+            BackendKind::Intel
+        }
     }
 }
 
@@ -483,7 +566,7 @@ impl DecodeSession {
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -494,7 +577,7 @@ impl DecodeSession {
         #[cfg(not(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         )))]
@@ -611,7 +694,7 @@ impl EncodeSession {
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -626,7 +709,7 @@ impl EncodeSession {
         #[cfg(not(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         )))]
@@ -720,7 +803,7 @@ impl EncodeSession {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -731,7 +814,7 @@ struct UnsupportedDecoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -744,7 +827,7 @@ impl UnsupportedDecoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -783,7 +866,7 @@ impl VideoDecoder for UnsupportedDecoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -794,7 +877,7 @@ struct UnsupportedEncoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -807,7 +890,7 @@ impl UnsupportedEncoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -833,7 +916,7 @@ impl VideoEncoder for UnsupportedEncoderAdapter {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -847,7 +930,7 @@ fn fallback_backend_kind(requested: BackendKind) -> BackendKind {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -858,17 +941,34 @@ fn preferred_backend_order() -> Vec<BackendKind> {
     }
     #[cfg(all(
         feature = "backend-nvidia",
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    {
+        vec![BackendKind::Nvidia, BackendKind::Intel]
+    }
+    #[cfg(all(
+        feature = "backend-nvidia",
+        not(feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     ))]
     {
         vec![BackendKind::Nvidia]
+    }
+    #[cfg(all(
+        not(feature = "backend-nvidia"),
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    {
+        vec![BackendKind::Intel]
     }
 }
 
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -911,7 +1011,7 @@ fn resolve_decoder_backend(
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -954,7 +1054,7 @@ fn resolve_encoder_backend(
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -972,13 +1072,20 @@ fn build_decoder_inner(kind: BackendKind, config: DecoderConfig) -> DecoderInner
         BackendKind::Nvidia => {
             DecoderInner::Nvidia(Box::new(nv_backend::NvDecoderAdapter::new(config)))
         }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel => {
+            DecoderInner::Intel(Box::new(intel_backend::IntelDecoderAdapter::new(config)))
+        }
     }
 }
 
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -990,7 +1097,7 @@ fn build_decoder_inner(kind: BackendKind, _config: DecoderConfig) -> DecoderInne
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -1017,13 +1124,25 @@ fn build_encoder_inner(kind: BackendKind, config: EncoderConfig) -> EncoderInner
                 config.backend_options,
             )))
         }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel => {
+            EncoderInner::Intel(Box::new(intel_backend::IntelEncoderAdapter::with_config(
+                config.codec,
+                config.fps,
+                config.require_hardware,
+                config.backend_options,
+            )))
+        }
     }
 }
 
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -1137,7 +1256,7 @@ fn backend_frame_to_decoded_frame(
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -1148,7 +1267,7 @@ fn frame_argb_payload(frame: &Frame) -> Option<&[u8]> {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -1270,7 +1389,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -1295,7 +1414,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     #[cfg(not(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     )))]
@@ -1319,7 +1438,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     #[cfg(not(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     )))]
@@ -1336,7 +1455,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -1344,7 +1463,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -1355,7 +1474,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -1375,7 +1494,12 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
         ))]
         (BackendKind::Nvidia, _) => EncodedLayout::AnnexB,
         #[cfg(all(
-            feature = "backend-nvidia",
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        (BackendKind::Intel, _) => EncodedLayout::AnnexB,
+        #[cfg(all(
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         ))]
         (BackendKind::Auto, _) => EncodedLayout::AnnexB,
@@ -1392,7 +1516,7 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -1417,7 +1541,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -1462,7 +1586,7 @@ mod tests {
             #[cfg(any(
                 all(target_os = "macos", feature = "backend-vt"),
                 all(
-                    feature = "backend-nvidia",
+                    any(feature = "backend-nvidia", feature = "backend-intel"),
                     any(target_os = "linux", target_os = "windows")
                 )
             ))]
@@ -1470,7 +1594,7 @@ mod tests {
             #[cfg(any(
                 all(target_os = "macos", feature = "backend-vt"),
                 all(
-                    feature = "backend-nvidia",
+                    any(feature = "backend-nvidia", feature = "backend-intel"),
                     any(target_os = "linux", target_os = "windows")
                 )
             ))]
@@ -1484,7 +1608,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -1513,7 +1637,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -1587,6 +1711,22 @@ mod tests {
             );
             assert_eq!(nv.layout, EncodedLayout::AnnexB);
         }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        {
+            let intel = backend_packet_to_encoded_chunk(
+                BackendKind::Intel,
+                EncodedPacket {
+                    codec: Codec::H264,
+                    data: vec![1],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(intel.layout, EncodedLayout::AnnexB);
+        }
     }
 
     #[cfg(feature = "unstable-raw-inputs")]
@@ -1608,7 +1748,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -1628,7 +1768,7 @@ mod tests {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]

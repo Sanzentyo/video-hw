@@ -165,7 +165,7 @@ pub struct Frame {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -173,7 +173,7 @@ pub struct Frame {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -254,6 +254,7 @@ pub enum BackendEncoderOptions {
     #[default]
     Default,
     Nvidia(NvidiaEncoderOptions),
+    Intel(IntelEncoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -270,6 +271,12 @@ pub struct NvidiaEncoderOptions {
     pub safe_lifetime_mode: Option<bool>,
     pub enable_pipeline_scheduler: Option<bool>,
     pub pipeline_queue_capacity: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IntelEncoderOptions {
+    pub target_kbps: Option<u16>,
+    pub gop_length: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,7 +393,7 @@ impl Display for DecodeSummary {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -401,7 +408,7 @@ pub struct EncodedPacket {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -517,7 +524,7 @@ pub trait VideoEncoder {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            feature = "backend-nvidia",
+            any(feature = "backend-nvidia", feature = "backend-intel"),
             any(target_os = "linux", target_os = "windows")
         )
     ))]

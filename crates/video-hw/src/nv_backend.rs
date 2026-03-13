@@ -384,7 +384,9 @@ impl NvEncoderAdapter {
     ) -> Self {
         let options = match backend_options {
             BackendEncoderOptions::Nvidia(options) => options,
-            BackendEncoderOptions::Default => crate::NvidiaEncoderOptions::default(),
+            BackendEncoderOptions::Default | BackendEncoderOptions::Intel(_) => {
+                crate::NvidiaEncoderOptions::default()
+            }
         };
         let max_in_flight_outputs = options.max_in_flight_outputs.clamp(1, 64);
         let gop_length = options.gop_length;

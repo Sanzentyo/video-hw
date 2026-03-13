@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 default = []
 backend-vt = []
 backend-nvidia = []
+backend-intel = []
 unstable-raw-inputs = []
 
 [dependencies]

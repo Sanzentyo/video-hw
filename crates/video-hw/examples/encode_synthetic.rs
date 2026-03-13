@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -59,9 +63,12 @@ fn main() -> Result<()> {
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
     let mut encoder = EncodeSession::new(backend, config);
+    let output_file = File::create(&args.output)
+        .with_context(|| format!("failed to create output: {}", args.output.display()))?;
+    let mut output_writer = BufWriter::new(output_file);
 
     let mut total_packets = 0usize;
-    let mut out = Vec::new();
+    let mut output_bytes = 0usize;
     let dims = dims(640, 360)?;
 
     for i in 0..args.frame_count {
@@ -74,21 +81,28 @@ fn main() -> Result<()> {
         })?;
         while let Some(packet) = encoder.try_reap()? {
             total_packets += 1;
-            out.extend_from_slice(&packet.data);
+            output_writer
+                .write_all(&packet.data)
+                .with_context(|| format!("failed to write output: {}", args.output.display()))?;
+            output_bytes = output_bytes.saturating_add(packet.data.len());
         }
     }
 
     for packet in encoder.flush()? {
         total_packets += 1;
-        out.extend_from_slice(&packet.data);
+        output_writer
+            .write_all(&packet.data)
+            .with_context(|| format!("failed to write output: {}", args.output.display()))?;
+        output_bytes = output_bytes.saturating_add(packet.data.len());
     }
-
-    fs::write(&args.output, &out)?;
+    output_writer
+        .flush()
+        .with_context(|| format!("failed to flush output: {}", args.output.display()))?;
 
     println!(
         "packets={}, output_bytes={}, output={}, backend={}, codec={}",
         total_packets,
-        out.len(),
+        output_bytes,
         args.output.display(),
         args.backend,
         args.codec
@@ -110,7 +124,7 @@ fn parse_backend(raw: &str) -> Result<Backend> {
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                feature = "backend-nvidia",
+                any(feature = "backend-nvidia", feature = "backend-intel"),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -122,6 +136,11 @@ fn parse_backend(raw: &str) -> Result<Backend> {
             any(target_os = "linux", target_os = "windows")
         ))]
         "nvidia" | "nv" => Ok(Backend::Nvidia),
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        "intel" | "qsv" => Ok(Backend::Intel),
         other => anyhow::bail!("unsupported backend: {other}"),
     }
 }
