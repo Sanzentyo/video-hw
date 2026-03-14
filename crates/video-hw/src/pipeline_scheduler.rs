@@ -232,6 +232,8 @@ mod tests {
                     transfer_function: None,
                     ycbcr_matrix: None,
                     argb: None,
+                    #[cfg(feature = "unstable-raw-inputs")]
+                    nv12: None,
                     force_keyframe: false,
                 }),
                 ColorRequest::KeepNative,
@@ -286,6 +288,8 @@ mod tests {
                     transfer_function: None,
                     ycbcr_matrix: None,
                     argb: None,
+                    #[cfg(feature = "unstable-raw-inputs")]
+                    nv12: None,
                     force_keyframe: false,
                 }),
                 ColorRequest::KeepNative,

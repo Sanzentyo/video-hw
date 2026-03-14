@@ -1305,6 +1305,8 @@ extern "C" fn vt_decode_output_callback(
             transfer_function: color.transfer_function,
             ycbcr_matrix: color.ycbcr_matrix,
             argb,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         };
         s.decoded_frames = s.decoded_frames.saturating_add(1);
@@ -1478,6 +1480,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         });
         adapter
@@ -1507,6 +1511,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         });
         adapter

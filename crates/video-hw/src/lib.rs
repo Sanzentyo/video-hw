@@ -49,12 +49,15 @@ mod transform;
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;
 
+#[cfg(feature = "unstable-raw-inputs")]
+pub use contract::Nv12FramePayload;
 pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
     CapabilityReport, Codec, ColorMetadata, DecodeOutputMode, DecodeSummary, DecodedFrame,
     DecoderConfig, Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig,
-    IntelEncoderOptions, NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig,
-    RawFrameBuffer, SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtSessionConfig,
+    IntelDecoderOptions, IntelEncoderOptions, NvidiaDecoderOptions, NvidiaEncoderOptions,
+    NvidiaSessionConfig, RawFrameBuffer, SessionSwitchMode, SessionSwitchRequest, Timestamp90k,
+    VtSessionConfig,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -1393,6 +1396,26 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             any(target_os = "linux", target_os = "windows")
         )
     ))]
+    #[cfg(feature = "unstable-raw-inputs")]
+    let (argb, nv12) = match buffer {
+        RawFrameBuffer::Argb8888(data) => (Some(data), None),
+        RawFrameBuffer::Argb8888Shared(data) => (Some(data.to_vec()), None),
+        RawFrameBuffer::Nv12 { pitch, data } => (None, Some(Nv12FramePayload { pitch, data })),
+        RawFrameBuffer::Rgb24(_) => {
+            return Err(BackendError::InvalidInput(
+                "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
+                    .to_string(),
+            ));
+        }
+    };
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(feature = "backend-nvidia", feature = "backend-intel"),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[cfg(not(feature = "unstable-raw-inputs"))]
     let argb = match buffer {
         RawFrameBuffer::Argb8888(data) => Some(data),
         RawFrameBuffer::Argb8888Shared(data) => Some(data.to_vec()),
@@ -1418,21 +1441,31 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             any(target_os = "linux", target_os = "windows")
         )
     )))]
+    #[cfg(feature = "unstable-raw-inputs")]
     match buffer {
-        #[cfg(feature = "unstable-raw-inputs")]
         RawFrameBuffer::Nv12 { .. } => {
             return Err(BackendError::InvalidInput(
                 "RawFrameBuffer::Nv12 is not supported by Encoder::push_encode_frame yet"
                     .to_string(),
             ));
         }
-        #[cfg(feature = "unstable-raw-inputs")]
         RawFrameBuffer::Rgb24(_) => {
             return Err(BackendError::InvalidInput(
                 "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
                     .to_string(),
             ));
         }
+        RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(feature = "backend-nvidia", feature = "backend-intel"),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )))]
+    #[cfg(not(feature = "unstable-raw-inputs"))]
+    match buffer {
         RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
     }
     #[cfg(not(any(
@@ -1460,6 +1493,17 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             )
         ))]
         argb,
+        #[cfg(all(
+            feature = "unstable-raw-inputs",
+            any(
+                all(target_os = "macos", feature = "backend-vt"),
+                all(
+                    any(feature = "backend-nvidia", feature = "backend-intel"),
+                    any(target_os = "linux", target_os = "windows")
+                )
+            )
+        ))]
+        nv12,
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
@@ -1591,6 +1635,17 @@ mod tests {
                 )
             ))]
             argb: None,
+            #[cfg(all(
+                feature = "unstable-raw-inputs",
+                any(
+                    all(target_os = "macos", feature = "backend-vt"),
+                    all(
+                        any(feature = "backend-nvidia", feature = "backend-intel"),
+                        any(target_os = "linux", target_os = "windows")
+                    )
+                )
+            ))]
+            nv12: None,
             #[cfg(any(
                 all(target_os = "macos", feature = "backend-vt"),
                 all(
@@ -1624,6 +1679,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: Some(vec![255, 10, 20, 30, 255, 40, 50, 60]),
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         };
 
@@ -1655,6 +1712,8 @@ mod tests {
             argb: Some(vec![
                 255, 10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120,
             ]),
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         };
 

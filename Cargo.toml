@@ -3,6 +3,7 @@ members = [
   "crates/video-hw-core",
   "crates/video-hw",
 ]
+exclude = ["third_party/onevpl-rs", "third_party/onevpl-rs/intel-onevpl-sys"]
 default-members = ["crates/video-hw"]
 resolver = "2"
 

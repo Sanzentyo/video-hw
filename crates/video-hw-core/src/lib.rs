@@ -152,6 +152,13 @@ pub struct ColorMetadata {
     pub ycbcr_matrix: Option<i32>,
 }
 
+#[cfg(feature = "unstable-raw-inputs")]
+#[derive(Debug, Clone)]
+pub struct Nv12FramePayload {
+    pub pitch: usize,
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub width: usize,
@@ -170,6 +177,17 @@ pub struct Frame {
         )
     ))]
     pub argb: Option<Vec<u8>>,
+    #[cfg(all(
+        feature = "unstable-raw-inputs",
+        any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                any(feature = "backend-nvidia", feature = "backend-intel"),
+                any(target_os = "linux", target_os = "windows")
+            )
+        )
+    ))]
+    pub nv12: Option<Nv12FramePayload>,
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
@@ -247,6 +265,7 @@ pub enum BackendDecoderOptions {
     #[default]
     Default,
     Nvidia(NvidiaDecoderOptions),
+    Intel(IntelDecoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -260,6 +279,11 @@ pub enum BackendEncoderOptions {
 #[derive(Debug, Clone, Default)]
 pub struct NvidiaDecoderOptions {
     pub report_metrics: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IntelDecoderOptions {
+    pub force_software: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +301,7 @@ pub struct NvidiaEncoderOptions {
 pub struct IntelEncoderOptions {
     pub target_kbps: Option<u16>,
     pub gop_length: Option<u16>,
+    pub force_software: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

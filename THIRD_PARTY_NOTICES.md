@@ -14,7 +14,7 @@
   - SDK 本体は各利用者が NVIDIA から取得し、環境に配置する前提
   - 利用時は upstream のライセンス/利用条件を確認すること
 - `onevpl-rs`（optional, `backend-intel`）
-  - Repository: `https://github.com/FallingSnow/onevpl-rs`
+  - Repository: `https://github.com/Sanzentyo/onevpl-rs`
   - License: MIT（repository同梱の `LICENSE` を参照）
   - Intel oneVPL の Rust ラッパー（`intel-onevpl-sys` による公式ヘッダ binding）
   - oneVPL 本体（runtime/headers）の配布条件は Intel 側ライセンスを確認すること
@@ -29,7 +29,8 @@ NVIDIA 側のライセンス条件と利用規約を確認し、同梱可否や�
 
 `backend-intel` は Intel oneVPL ランタイム/ヘッダに依存する。配布・再配布時は、
 Intel 側のライセンス条件と利用規約を確認し、同梱可否や再配布条件を必ず検証すること。
-また、ビルド時には `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` 等の環境設定が必要になる。
+`intel-onevpl-sys` は `mfx.h` 未検出時に pregenerated bindings へフォールバックするため、通常ビルドで `LIBVPL_INCLUDE_PATH` は必須ではない（bindgen 再生成時のみ必要）。
+実行時は oneVPL runtime（`libvpl.dll` など）が探索可能な環境（PATH 等）が必要になる。
 
 ## Maintenance Policy
 

@@ -1,7 +1,7 @@
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -10,19 +10,39 @@ use std::{fs, path::PathBuf};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
 use rstest::rstest;
+#[cfg(all(
+    any(feature = "backend-nvidia", feature = "backend-intel"),
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::BackendEncoderOptions;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
 use video_hw::EncoderConfig;
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::IntelDecoderOptions;
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::IntelEncoderOptions;
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::NvidiaEncoderOptions;
 #[cfg(all(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
@@ -41,7 +61,7 @@ use video_hw::VtSessionConfig;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -49,15 +69,10 @@ use video_hw::{
     Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
     DecodeSession, DecoderConfig,
 };
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::{BackendEncoderOptions, NvidiaEncoderOptions};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -73,7 +88,7 @@ use video_hw::{SessionSwitchMode, SessionSwitchRequest};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -87,7 +102,7 @@ fn dims_640_360() -> Dimensions {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -112,7 +127,7 @@ fn make_argb_frame(index: i64) -> EncodeFrame {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -134,7 +149,7 @@ fn sample_path(name: &str) -> PathBuf {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -177,7 +192,7 @@ fn decode_count(
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        feature = "backend-nvidia",
+        any(feature = "backend-nvidia", feature = "backend-intel"),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -224,6 +239,26 @@ fn decode_total_and_summary(
 ))]
 fn nv_runtime_unsupported(err: &BackendError) -> bool {
     err.is_runtime_unavailable()
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn intel_runtime_unsupported(err: &BackendError) -> bool {
+    err.is_runtime_unavailable()
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn intel_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("intel test mutex should not be poisoned")
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -294,6 +329,51 @@ fn e2e_nv_decode_summary_matches_observed_frames(#[case] codec: Codec, #[case] f
             eprintln!("skip: NV decode unavailable: {err}");
         }
         Err(err) => panic!("unexpected NV decode error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[rstest]
+#[case(Codec::H264, "sample-10s.h264", 4096)]
+#[case(Codec::H264, "sample-10s.h264", 1024 * 1024)]
+#[case(Codec::Hevc, "sample-10s.h265", 4096)]
+#[case(Codec::Hevc, "sample-10s.h265", 1024 * 1024)]
+fn e2e_intel_decode_expected_frames_matrix(
+    #[case] codec: Codec,
+    #[case] file_name: &str,
+    #[case] chunk_bytes: usize,
+) {
+    let _guard = intel_test_guard();
+    match decode_count(Backend::Intel, codec, file_name, chunk_bytes, true) {
+        Ok(decoded) => assert_eq!(decoded, 303),
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel decode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Intel decode error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[rstest]
+#[case(Codec::H264, "sample-10s.h264")]
+#[case(Codec::Hevc, "sample-10s.h265")]
+fn e2e_intel_decode_summary_matches_observed_frames(#[case] codec: Codec, #[case] file_name: &str) {
+    let _guard = intel_test_guard();
+    match decode_total_and_summary(Backend::Intel, codec, file_name, 4096, true) {
+        Ok((observed, summary_total)) => {
+            assert_eq!(observed, 303);
+            assert_eq!(summary_total, observed);
+        }
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel decode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Intel decode error: {err:?}"),
     }
 }
 
@@ -540,6 +620,140 @@ fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
     }
 }
 
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_intel_decode_force_software_h264() {
+    let _guard = intel_test_guard();
+    let mut decoder = DecodeSession::new(
+        Backend::Intel,
+        DecoderConfig {
+            codec: Codec::H264,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
+                force_software: true,
+            }),
+        },
+    );
+
+    let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
+    let mut decoded_frames = 0usize;
+    for chunk in data.chunks(4096) {
+        match decoder.submit(BitstreamInput::AnnexBChunk {
+            chunk: chunk.to_vec(),
+            pts_90k: None,
+        }) {
+            Ok(()) => {
+                while decoder
+                    .try_reap()
+                    .expect("try_reap should succeed")
+                    .is_some()
+                {
+                    decoded_frames += 1;
+                }
+            }
+            Err(err) if intel_runtime_unsupported(&err) => {
+                eprintln!("skip: Intel software decode unavailable: {err}");
+                return;
+            }
+            Err(err) => panic!("unexpected Intel software decode error: {err:?}"),
+        }
+    }
+
+    match decoder.flush() {
+        Ok(frames) => decoded_frames += frames.len(),
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel software decode unavailable: {err}");
+            return;
+        }
+        Err(err) => panic!("unexpected Intel software decode flush error: {err:?}"),
+    }
+    assert_eq!(decoded_frames, 303);
+    assert_eq!(decoder.summary().decoded_frames, decoded_frames);
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_intel_encode_force_software_h264() {
+    let _guard = intel_test_guard();
+    let mut config = EncoderConfig::new(Codec::H264, 30, false);
+    config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
+        force_software: true,
+        ..Default::default()
+    });
+    let mut encoder = EncodeSession::new(Backend::Intel, config);
+
+    for i in 0..30 {
+        if let Err(err) = encoder.submit(make_argb_frame(i as i64)) {
+            if intel_runtime_unsupported(&err) {
+                eprintln!("skip: Intel software encode unavailable: {err}");
+                return;
+            }
+            panic!("unexpected Intel software encode submit error: {err:?}");
+        }
+    }
+
+    match encoder.flush() {
+        Ok(packets) => assert!(!packets.is_empty()),
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel software encode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Intel software encode flush error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_intel_force_software_conflicts_with_require_hardware() {
+    let _guard = intel_test_guard();
+    let mut decoder = DecodeSession::new(
+        Backend::Intel,
+        DecoderConfig {
+            codec: Codec::H264,
+            fps: 30,
+            require_hardware: true,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
+                force_software: true,
+            }),
+        },
+    );
+    decoder
+        .submit(BitstreamInput::AnnexBChunk {
+            chunk: vec![0, 0, 0, 1, 0x09, 0x10],
+            pts_90k: None,
+        })
+        .expect("submit should buffer input before decode");
+    let err = decoder
+        .flush()
+        .expect_err("decoder should reject conflicting hardware/software settings");
+    assert!(matches!(err, BackendError::UnsupportedConfig(_)));
+
+    let mut config = EncoderConfig::new(Codec::H264, 30, true);
+    config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
+        force_software: true,
+        ..Default::default()
+    });
+    let mut encoder = EncodeSession::new(Backend::Intel, config);
+    encoder
+        .submit(make_argb_frame(0))
+        .expect("frame submit should succeed before backend init");
+    let err = encoder
+        .flush()
+        .expect_err("encoder should reject conflicting hardware/software settings");
+    assert!(matches!(err, BackendError::UnsupportedConfig(_)));
+}
+
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_backend_accepts_explicit_session_switch_request() {
@@ -739,6 +953,4 @@ fn e2e_nv_backend_accepts_explicit_session_switch_request() {
     )
 )))]
 #[test]
-fn e2e_build_without_enabled_backends_compiles() {
-    assert!(true);
-}
+fn e2e_build_without_enabled_backends_compiles() {}

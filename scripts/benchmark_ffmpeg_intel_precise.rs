@@ -39,17 +39,29 @@ impl Codec {
         }
     }
 
-    fn ffmpeg_decode_codec(self) -> &'static str {
+    fn ffmpeg_decode_codec(self, hardware: bool) -> &'static str {
+        if hardware {
+            return match self {
+                Self::H264 => "h264_qsv",
+                Self::Hevc => "hevc_qsv",
+            };
+        }
         match self {
-            Self::H264 => "h264_qsv",
-            Self::Hevc => "hevc_qsv",
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
         }
     }
 
-    fn ffmpeg_encode_codec(self) -> &'static str {
+    fn ffmpeg_encode_codec(self, hardware: bool) -> &'static str {
+        if hardware {
+            return match self {
+                Self::H264 => "h264_qsv",
+                Self::Hevc => "hevc_qsv",
+            };
+        }
         match self {
-            Self::H264 => "h264_qsv",
-            Self::Hevc => "hevc_qsv",
+            Self::H264 => "libx264",
+            Self::Hevc => "libx265",
         }
     }
 
@@ -57,6 +69,22 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum RawInputPixFmt {
+    #[default]
+    Argb,
+    Nv12,
+}
+
+impl RawInputPixFmt {
+    fn as_cli(self) -> &'static str {
+        match self {
+            Self::Argb => "argb",
+            Self::Nv12 => "nv12",
         }
     }
 }
@@ -89,7 +117,7 @@ struct Args {
     #[arg(long, default_value_t = true)]
     release: bool,
 
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 2)]
     warmup: usize,
 
     #[arg(long, default_value_t = 7)]
@@ -97,6 +125,9 @@ struct Args {
 
     #[arg(long, default_value_t = 65_536)]
     chunk_bytes: usize,
+
+    #[arg(long, default_value_t = 10)]
+    decode_loops: usize,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     require_hardware: bool,
@@ -116,6 +147,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     equal_raw_input: bool,
 
+    #[arg(long, value_enum, default_value_t = RawInputPixFmt::Argb)]
+    raw_input_pix_fmt: RawInputPixFmt,
+
     #[arg(long, default_value_t = false)]
     allow_case_failures: bool,
 
@@ -124,6 +158,12 @@ struct Args {
 
     #[arg(long, default_value_t = 0)]
     settle_ms: u64,
+
+    #[arg(long)]
+    intel_decode_async_depth: Option<u16>,
+
+    #[arg(long, default_value_t = false)]
+    intel_force_software: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -220,29 +260,50 @@ fn main() -> Result<()> {
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
     }
+    if args.decode_loops == 0 {
+        bail!("--decode-loops must be >= 1");
+    }
+    if let Some(depth) = args.intel_decode_async_depth
+        && !(1..=16).contains(&depth)
+    {
+        bail!("--intel-decode-async-depth must be in 1..=16");
+    }
+    if args.intel_force_software && args.require_hardware {
+        bail!("--intel-force-software requires --require-hardware false");
+    }
 
     let profile = if args.release { "release" } else { "debug" };
     let output_dir = PathBuf::from("output");
     fs::create_dir_all(&output_dir).context("create output directory")?;
 
-    build_examples(profile)?;
+    build_examples(profile, args.raw_input_pix_fmt)?;
 
     let decode_bin = example_bin_path(profile, "decode_annexb");
     let encode_bin = example_bin_path(profile, "encode_synthetic");
     let encode_raw_bin = example_bin_path(profile, "encode_raw_argb");
+    let decode_input = prepare_decode_input(args.codec, args.decode_loops, &output_dir)?;
     let video_hw_output = output_dir.join(format!("video-hw-intel-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-qsv-{}-precise.bin", args.codec.as_cli()));
     let raw_input = output_dir.join(format!(
-        "benchmark-input-argb-{}x{}-{}f.raw",
-        args.width, args.height, args.frame_count
+        "benchmark-input-{}-{}x{}-{}f.raw",
+        args.raw_input_pix_fmt.as_cli(),
+        args.width,
+        args.height,
+        args.frame_count
     ));
     let null_sink = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
     if args.equal_raw_input {
-        write_raw_argb_input(&raw_input, args.width, args.height, args.frame_count)?;
+        write_raw_input(
+            &raw_input,
+            args.raw_input_pix_fmt,
+            args.width,
+            args.height,
+            args.frame_count,
+        )?;
     }
 
-    let decode_frames = probe_stream_frame_count(args.codec.sample_input()).unwrap_or(args.frame_count);
+    let decode_frames = probe_stream_frame_count(&decode_input.to_string_lossy()).unwrap_or(args.frame_count);
 
     let cases = [
         Case::VideoHwDecode,
@@ -271,6 +332,7 @@ fn main() -> Result<()> {
                     *case,
                     &args,
                     &decode_bin,
+                    &decode_input,
                     &encode_bin,
                     &encode_raw_bin,
                     &video_hw_output,
@@ -315,6 +377,7 @@ fn main() -> Result<()> {
                     *case,
                     &args,
                     &decode_bin,
+                    &decode_input,
                     &encode_bin,
                     &encode_raw_bin,
                     &video_hw_output,
@@ -390,9 +453,27 @@ fn main() -> Result<()> {
     writeln!(&mut report, "width: {}", args.width)?;
     writeln!(&mut report, "height: {}", args.height)?;
     writeln!(&mut report, "decode_frames: {decode_frames}")?;
+    writeln!(&mut report, "decode_loops: {}", args.decode_loops)?;
     writeln!(&mut report, "encode_frames: {}", args.frame_count)?;
     writeln!(&mut report, "require_hardware: {}", args.require_hardware)?;
+    writeln!(
+        &mut report,
+        "intel_force_software: {}",
+        args.intel_force_software
+    )?;
+    writeln!(
+        &mut report,
+        "intel_decode_async_depth: {}",
+        args.intel_decode_async_depth
+            .map(|depth| depth.to_string())
+            .unwrap_or_else(|| "default".to_string())
+    )?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
+    writeln!(
+        &mut report,
+        "raw_input_pix_fmt: {}",
+        args.raw_input_pix_fmt.as_cli()
+    )?;
     writeln!(&mut report, "verify: {}", args.verify)?;
     writeln!(&mut report)?;
     writeln!(
@@ -582,17 +663,54 @@ fn percent_delta(video_hw: f64, ffmpeg: f64) -> f64 {
     ((video_hw / ffmpeg) - 1.0) * 100.0
 }
 
-fn build_examples(profile: &str) -> Result<()> {
+fn prepare_decode_input(codec: Codec, loops: usize, output_dir: &Path) -> Result<PathBuf> {
+    let source = PathBuf::from(codec.sample_input());
+    if loops <= 1 {
+        return Ok(source);
+    }
+
+    let data = fs::read(&source).with_context(|| {
+        format!(
+            "read source decode input for loop expansion: {}",
+            source.display()
+        )
+    })?;
+    let total_size = data
+        .len()
+        .checked_mul(loops)
+        .context("decode loop input size overflow")?;
+    let mut repeated = Vec::with_capacity(total_size);
+    for _ in 0..loops {
+        repeated.extend_from_slice(&data);
+    }
+
+    let extension = source.extension().and_then(|ext| ext.to_str()).unwrap_or("bin");
+    let expanded = output_dir.join(format!(
+        "benchmark-decode-input-{}-{}x.{}",
+        codec.as_cli(),
+        loops,
+        extension
+    ));
+    fs::write(&expanded, repeated)
+        .with_context(|| format!("write expanded decode input: {}", expanded.display()))?;
+    Ok(expanded)
+}
+
+fn build_examples(profile: &str, raw_input_pix_fmt: RawInputPixFmt) -> Result<()> {
+    let features = match raw_input_pix_fmt {
+        RawInputPixFmt::Argb => "backend-intel",
+        RawInputPixFmt::Nv12 => "backend-intel,unstable-raw-inputs",
+    };
     let mut args = vec![
         "build",
         "--features",
-        "backend-intel",
+        features,
         "--examples",
         "--profile",
         profile,
     ];
     if profile == "release" {
-        args = vec!["build", "--features", "backend-intel", "--examples", "--release"];
+        args = vec!["build", "--features", features, "--examples", "--release"];
     }
     run_command("cargo", &args)?;
     Ok(())
@@ -621,6 +739,7 @@ fn run_case(
     case: Case,
     args: &Args,
     decode_bin: &Path,
+    decode_input: &Path,
     encode_bin: &Path,
     encode_raw_bin: &Path,
     video_hw_output: &Path,
@@ -631,18 +750,25 @@ fn run_case(
     match case {
         Case::VideoHwDecode => {
             let mut cmd = Command::new(decode_bin);
+            let decode_input_arg = decode_input.to_string_lossy().to_string();
             cmd.args([
                 "--backend",
                 "intel",
                 "--codec",
                 args.codec.as_cli(),
                 "--input",
-                args.codec.sample_input(),
+                &decode_input_arg,
                 "--chunk-bytes",
                 &args.chunk_bytes.to_string(),
             ]);
             if args.require_hardware {
                 cmd.arg("--require-hardware");
+            }
+            if args.intel_force_software {
+                cmd.arg("--intel-force-software");
+            }
+            if let Some(depth) = args.intel_decode_async_depth {
+                cmd.env("VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH", depth.to_string());
             }
             run_timed_command(cmd, true)
         }
@@ -665,8 +791,11 @@ fn run_case(
                     &args.height.to_string(),
                     "--input-raw",
                     &raw_input.to_string_lossy(),
+                    "--input-pix-fmt",
+                    args.raw_input_pix_fmt.as_cli(),
                     "--output",
                     &video_hw_output.to_string_lossy(),
+                    "--discard-output",
                 ]);
                 c
             } else {
@@ -682,26 +811,31 @@ fn run_case(
                     &args.frame_count.to_string(),
                     "--output",
                     &video_hw_output.to_string_lossy(),
+                    "--discard-output",
                 ]);
                 c
             };
             if args.require_hardware {
                 cmd.arg("--require-hardware");
             }
+            if args.intel_force_software {
+                cmd.arg("--intel-force-software");
+            }
             run_timed_command(cmd, true)
         }
         Case::FfmpegDecode => {
+            let ffmpeg_hw = !args.intel_force_software;
             let mut cmd = Command::new("ffmpeg");
+            let decode_input_arg = decode_input.to_string_lossy().to_string();
+            cmd.args(["-y", "-hide_banner", "-benchmark"]);
+            if ffmpeg_hw {
+                cmd.args(["-hwaccel", "qsv"]);
+            }
             cmd.args([
-                "-y",
-                "-hide_banner",
-                "-benchmark",
-                "-hwaccel",
-                "qsv",
                 "-c:v",
-                args.codec.ffmpeg_decode_codec(),
+                args.codec.ffmpeg_decode_codec(ffmpeg_hw),
                 "-i",
-                args.codec.sample_input(),
+                &decode_input_arg,
                 "-f",
                 "null",
                 null_sink,
@@ -709,7 +843,10 @@ fn run_case(
             run_timed_command(cmd, true)
         }
         Case::FfmpegEncode => {
-            let _ = fs::remove_file(ffmpeg_output);
+            let ffmpeg_hw = !args.intel_force_software;
+            if args.verify {
+                let _ = fs::remove_file(ffmpeg_output);
+            }
             let mut cmd = Command::new("ffmpeg");
             if args.equal_raw_input {
                 cmd.args([
@@ -719,7 +856,7 @@ fn run_case(
                     "-f",
                     "rawvideo",
                     "-pix_fmt",
-                    "argb",
+                    args.raw_input_pix_fmt.as_cli(),
                     "-s:v",
                     &format!("{}x{}", args.width, args.height),
                     "-r",
@@ -729,11 +866,13 @@ fn run_case(
                     "-frames:v",
                     &args.frame_count.to_string(),
                     "-c:v",
-                    args.codec.ffmpeg_encode_codec(),
-                    "-f",
-                    args.codec.muxer(),
-                    &ffmpeg_output.to_string_lossy(),
+                    args.codec.ffmpeg_encode_codec(ffmpeg_hw),
                 ]);
+                if args.verify {
+                    cmd.args(["-f", args.codec.muxer(), &ffmpeg_output.to_string_lossy()]);
+                } else {
+                    cmd.args(["-f", "null", null_sink]);
+                }
             } else {
                 cmd.args([
                     "-y",
@@ -746,11 +885,13 @@ fn run_case(
                     "-frames:v",
                     &args.frame_count.to_string(),
                     "-c:v",
-                    args.codec.ffmpeg_encode_codec(),
-                    "-f",
-                    args.codec.muxer(),
-                    &ffmpeg_output.to_string_lossy(),
+                    args.codec.ffmpeg_encode_codec(ffmpeg_hw),
                 ]);
+                if args.verify {
+                    cmd.args(["-f", args.codec.muxer(), &ffmpeg_output.to_string_lossy()]);
+                } else {
+                    cmd.args(["-f", "null", null_sink]);
+                }
             }
             run_timed_command(cmd, true)
         }
@@ -789,6 +930,19 @@ fn tail_text(input: &str, limit: usize) -> String {
         .collect::<String>()
 }
 
+fn write_raw_input(
+    path: &Path,
+    input_pix_fmt: RawInputPixFmt,
+    width: usize,
+    height: usize,
+    frame_count: usize,
+) -> Result<()> {
+    match input_pix_fmt {
+        RawInputPixFmt::Argb => write_raw_argb_input(path, width, height, frame_count),
+        RawInputPixFmt::Nv12 => write_raw_nv12_input(path, width, height, frame_count),
+    }
+}
+
 fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
     let frame_size = width
         .checked_mul(height)
@@ -811,6 +965,44 @@ fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: u
             }
         }
     }
+    fs::write(path, out).with_context(|| format!("write raw input: {}", path.display()))?;
+    Ok(())
+}
+
+fn write_raw_nv12_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        bail!("nv12 raw input requires even width/height");
+    }
+    let y_size = width.checked_mul(height).context("NV12 Y size overflow")?;
+    let uv_size = y_size.checked_div(2).context("NV12 UV size overflow")?;
+    let frame_size = y_size.checked_add(uv_size).context("NV12 frame size overflow")?;
+    let total_size = frame_size
+        .checked_mul(frame_count)
+        .context("raw input total size overflow")?;
+    let mut out = vec![0_u8; total_size];
+
+    for frame_index in 0..frame_count {
+        let frame_base = frame_index * frame_size;
+        let y_base = frame_base;
+        let uv_base = frame_base + y_size;
+
+        for y in 0..height {
+            for x in 0..width {
+                let y_offset = y_base + (y * width + x);
+                out[y_offset] = ((x * 3 + y * 5 + frame_index * 7) % 256) as u8;
+            }
+        }
+
+        for y in 0..(height / 2) {
+            for x in (0..width).step_by(2) {
+                let uv_offset = uv_base + (y * width + x);
+                out[uv_offset] = (128 + ((x + frame_index * 3) % 32) as u8).saturating_sub(16);
+                out[uv_offset + 1] =
+                    (128 + ((y * 2 + frame_index * 5) % 32) as u8).saturating_sub(16);
+            }
+        }
+    }
+
     fs::write(path, out).with_context(|| format!("write raw input: {}", path.display()))?;
     Ok(())
 }

@@ -3,8 +3,8 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
-    Backend, BackendDecoderOptions, BitstreamInput, Codec, DecodeOutputMode, DecodeSession,
-    DecoderConfig, NvidiaDecoderOptions,
+    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
+    DecodeSession, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -24,6 +24,8 @@ struct Args {
     require_hardware: bool,
     #[arg(long)]
     nv_report_metrics: Option<bool>,
+    #[arg(long, default_value_t = false)]
+    intel_force_software: bool,
 }
 
 fn main() -> Result<()> {
@@ -34,6 +36,10 @@ fn main() -> Result<()> {
     let backend_options = if backend_is_nvidia(backend) {
         BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
             report_metrics: args.nv_report_metrics,
+        })
+    } else if backend_is_intel(backend) {
+        BackendDecoderOptions::Intel(IntelDecoderOptions {
+            force_software: args.intel_force_software,
         })
     } else {
         BackendDecoderOptions::Default
@@ -56,15 +62,23 @@ fn main() -> Result<()> {
 
     let mut total_decoded = 0usize;
     for chunk in data.chunks(step) {
-        decoder
-            .submit(BitstreamInput::AnnexBChunk {
+        loop {
+            match decoder.submit(BitstreamInput::AnnexBChunk {
                 chunk: chunk.to_vec(),
                 pts_90k: None,
-            })
-            .context("decode submit failed")?;
-        while decoder.try_reap().context("try_reap failed")?.is_some() {
-            total_decoded += 1;
+            }) {
+                Ok(()) => break,
+                Err(BackendError::TemporaryBackpressure(_)) => {
+                    while decoder.try_reap().context("try_reap failed")?.is_some() {
+                        total_decoded += 1;
+                    }
+                }
+                Err(err) => return Err(err).context("decode submit failed"),
+            }
         }
+    }
+    while decoder.try_reap().context("try_reap failed")?.is_some() {
+        total_decoded += 1;
     }
 
     total_decoded += decoder.flush().context("flush failed")?.len();
@@ -131,6 +145,22 @@ fn backend_is_nvidia(backend: Backend) -> bool {
     any(target_os = "linux", target_os = "windows")
 )))]
 fn backend_is_nvidia(_backend: Backend) -> bool {
+    false
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn backend_is_intel(backend: Backend) -> bool {
+    matches!(backend, Backend::Intel)
+}
+
+#[cfg(not(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn backend_is_intel(_backend: Backend) -> bool {
     false
 }
 

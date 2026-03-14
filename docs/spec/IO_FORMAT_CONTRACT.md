@@ -30,7 +30,8 @@
 
 - `backend-intel` は `onevpl-rs`（`intel-onevpl-sys` 経由）を利用するラッパー構成
 - oneVPL 本体は利用者が別途取得・配置する前提
-- ビルド時は oneVPL 探索のため `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` 等の環境設定が必要になる
+- `intel-onevpl-sys` は `mfx.h` 未検出時に pregenerated bindings を利用するため、通常ビルドで `LIBVPL_INCLUDE_PATH` は必須ではない（bindgen 再生成時のみ必要）
+- 実行時は oneVPL runtime（`libvpl.dll` 等）が探索可能であること
 - 本プロジェクトの配布方針として、oneVPL 本体の同梱は前提にしない
 
 ## 3. Binary Contract

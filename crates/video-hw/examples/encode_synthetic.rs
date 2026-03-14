@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncoderConfig,
-    NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
+    IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Parser, Debug)]
@@ -26,6 +26,8 @@ struct Args {
     frame_count: usize,
     #[arg(long, default_value = "./encoded-output.bin")]
     output: PathBuf,
+    #[arg(long, default_value_t = false)]
+    discard_output: bool,
 
     #[arg(long)]
     nv_max_in_flight: Option<usize>,
@@ -41,6 +43,8 @@ struct Args {
     nv_enable_pipeline_scheduler: Option<bool>,
     #[arg(long)]
     nv_pipeline_queue_capacity: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    intel_force_software: bool,
 }
 
 fn main() -> Result<()> {
@@ -61,11 +65,20 @@ fn main() -> Result<()> {
         options.enable_pipeline_scheduler = args.nv_enable_pipeline_scheduler;
         options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
+    } else if backend_is_intel(backend) {
+        config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
+            force_software: args.intel_force_software,
+            ..Default::default()
+        });
     }
     let mut encoder = EncodeSession::new(backend, config);
-    let output_file = File::create(&args.output)
-        .with_context(|| format!("failed to create output: {}", args.output.display()))?;
-    let mut output_writer = BufWriter::new(output_file);
+    let mut output_writer = if args.discard_output {
+        None
+    } else {
+        let output_file = File::create(&args.output)
+            .with_context(|| format!("failed to create output: {}", args.output.display()))?;
+        Some(BufWriter::new(output_file))
+    };
 
     let mut total_packets = 0usize;
     let mut output_bytes = 0usize;
@@ -81,29 +94,36 @@ fn main() -> Result<()> {
         })?;
         while let Some(packet) = encoder.try_reap()? {
             total_packets += 1;
-            output_writer
-                .write_all(&packet.data)
-                .with_context(|| format!("failed to write output: {}", args.output.display()))?;
+            if let Some(writer) = output_writer.as_mut() {
+                writer.write_all(&packet.data).with_context(|| {
+                    format!("failed to write output: {}", args.output.display())
+                })?;
+            }
             output_bytes = output_bytes.saturating_add(packet.data.len());
         }
     }
 
     for packet in encoder.flush()? {
         total_packets += 1;
-        output_writer
-            .write_all(&packet.data)
-            .with_context(|| format!("failed to write output: {}", args.output.display()))?;
+        if let Some(writer) = output_writer.as_mut() {
+            writer
+                .write_all(&packet.data)
+                .with_context(|| format!("failed to write output: {}", args.output.display()))?;
+        }
         output_bytes = output_bytes.saturating_add(packet.data.len());
     }
-    output_writer
-        .flush()
-        .with_context(|| format!("failed to flush output: {}", args.output.display()))?;
+    if let Some(writer) = output_writer.as_mut() {
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush output: {}", args.output.display()))?;
+    }
 
     println!(
-        "packets={}, output_bytes={}, output={}, backend={}, codec={}",
+        "packets={}, output_bytes={}, output={}, discard_output={}, backend={}, codec={}",
         total_packets,
         output_bytes,
         args.output.display(),
+        args.discard_output,
         args.backend,
         args.codec
     );
@@ -158,6 +178,22 @@ fn backend_is_nvidia(backend: Backend) -> bool {
     any(target_os = "linux", target_os = "windows")
 )))]
 fn backend_is_nvidia(_backend: Backend) -> bool {
+    false
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn backend_is_intel(backend: Backend) -> bool {
+    matches!(backend, Backend::Intel)
+}
+
+#[cfg(not(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn backend_is_intel(_backend: Backend) -> bool {
     false
 }
 

@@ -85,7 +85,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc -
 - レポートに encode/decode の平均スループット差分（ffmpeg 比、±10% 判定）を出力
 - encode の厳密比較は `--equal-raw-input` を推奨（`video-hw` / `ffmpeg` に同一 raw ARGB 入力を供給）
 - 既定で `--grouped-cases=true`（caseごとに warmup/measure をまとめて実行）になっており、round-robin より計測ばらつきを抑えやすい
+- 既定値は `--warmup 2` / `--repeat 7` / `--decode-loops 10`（短窓ノイズを抑えて parity 判定を安定化）
 - `--settle-ms <N>` で各計測の間に待機を入れて、熱/スケジューリング揺れを緩和できる
+- decode 側チューニングは `--intel-decode-async-depth <N>`（1..=16）で `VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH` を video-hw decode ケースへ注入できる（backend 側 default は 10）
+- encode 側チューニングは環境変数 `VIDEO_HW_INTEL_RATE_CONTROL` / `VIDEO_HW_INTEL_CQP` / `VIDEO_HW_INTEL_ASYNC_DEPTH` で調整できる（未指定時は H.264=CBR、HEVC=CQP、CQP=24）
 - runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録したままレポート生成を継続
 - `--allow-case-failures --verify` 併用時、失敗ケースで出力が欠けた検証対象は `skipped` としてレポートに記録する
 
@@ -102,7 +105,7 @@ cargo +nightly -Zscript scripts/setup_onevpl.rs --apply
 cargo +nightly -Zscript scripts/setup_onevpl.rs --apply --force
 ```
 
-- 生成した `mfx.h` / `vpl.lib` に合わせた `LIBVPL_INCLUDE_PATH` / `LIBVPL_LIBRARY_PATH` / `PATH` の設定例を出力する
+- 生成した `mfx.h` / `libvpl.dll` に合わせた `LIBVPL_INCLUDE_PATH` / `PATH` の設定例を出力する（`LIBVPL_LIBRARY_PATH` は通常不要）
 - setup 後の検証コマンド（`clippy` / `test`）も出力する
 
 ## 前提

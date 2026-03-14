@@ -1,25 +1,29 @@
+#[cfg(feature = "unstable-raw-inputs")]
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Cursor, Read, Write};
 
 use onevpl::MfxStatus;
 use onevpl::bitstream::Bitstream;
 use onevpl::constants::{
-    ChromaFormat, Codec as OneVplCodec, FourCC, FrameType, IoPattern, PicStruct, RateControlMethod,
-    TargetUsage,
+    ChromaFormat, Codec as OneVplCodec, CodingOptionValue, FourCC, FrameType, IoPattern,
+    MemoryFlag, PicStruct, RateControlMethod, TargetUsage,
 };
 use onevpl::encode::EncodeCtrl;
 use onevpl::vpp::VppVideoParams;
-use rayon::prelude::*;
 use tokio::runtime::Builder as RuntimeBuilder;
 
+#[cfg(feature = "unstable-raw-inputs")]
+use crate::Nv12FramePayload;
 use crate::{
-    BackendEncoderOptions, BackendError, CapabilityReport, Codec, DecodeOutputMode, DecodeSummary,
-    DecoderConfig, EncodedPacket, Frame, IntelEncoderOptions, SessionSwitchRequest, VideoDecoder,
-    VideoEncoder,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
+    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, IntelDecoderOptions,
+    IntelEncoderOptions, SessionSwitchRequest, VideoDecoder, VideoEncoder,
 };
 
 pub struct IntelDecoderAdapter {
     config: DecoderConfig,
+    options: IntelDecoderOptions,
     pending_bitstream: Vec<u8>,
     next_pts_90k: i64,
     last_summary: DecodeSummary,
@@ -27,8 +31,15 @@ pub struct IntelDecoderAdapter {
 
 impl IntelDecoderAdapter {
     pub fn new(config: DecoderConfig) -> Self {
+        let options = match &config.backend_options {
+            BackendDecoderOptions::Intel(options) => options.clone(),
+            BackendDecoderOptions::Default | BackendDecoderOptions::Nvidia(_) => {
+                IntelDecoderOptions::default()
+            }
+        };
         Self {
             config,
+            options,
             pending_bitstream: Vec::new(),
             next_pts_90k: 0,
             last_summary: DecodeSummary {
@@ -64,6 +75,21 @@ impl IntelDecoderAdapter {
         let output_mode = self.config.output_mode;
         let fps = self.config.fps;
 
+        if self.config.require_hardware && self.options.force_software {
+            return Err(BackendError::UnsupportedConfig(
+                "Intel decode cannot use require_hardware=true together with IntelDecoderOptions.force_software=true".to_string(),
+            ));
+        }
+        if self.options.force_software {
+            return runtime.block_on(decode_with_onevpl(
+                bitstream,
+                codec,
+                output_mode,
+                fps,
+                self.next_pts_90k,
+                false,
+            ));
+        }
         let hardware_attempt = runtime.block_on(decode_with_onevpl(
             bitstream,
             codec,
@@ -194,6 +220,23 @@ impl IntelEncoderAdapter {
         let require_hardware = self.require_hardware;
 
         runtime.block_on(async move {
+            if require_hardware && options.force_software {
+                return Err(BackendError::UnsupportedConfig(
+                    "Intel encode cannot use require_hardware=true together with IntelEncoderOptions.force_software=true".to_string(),
+                ));
+            }
+            if options.force_software {
+                return encode_with_onevpl(
+                    pending_frames,
+                    width,
+                    height,
+                    codec,
+                    fps,
+                    &options,
+                    false,
+                )
+                .await;
+            }
             let hardware_attempt =
                 encode_with_onevpl(pending_frames, width, height, codec, fps, &options, true).await;
             if require_hardware {
@@ -226,9 +269,13 @@ impl VideoEncoder for IntelEncoderAdapter {
                 "frame dimensions must be positive".to_string(),
             ));
         }
-        if frame.argb.is_none() {
+        #[cfg(feature = "unstable-raw-inputs")]
+        let has_supported_payload = frame.argb.is_some() || frame.nv12.is_some();
+        #[cfg(not(feature = "unstable-raw-inputs"))]
+        let has_supported_payload = frame.argb.is_some();
+        if !has_supported_payload {
             return Err(BackendError::InvalidInput(
-                "Intel backend requires ARGB frame payload".to_string(),
+                "Intel backend requires ARGB or NV12 frame payload".to_string(),
             ));
         }
         if let Some(width) = self.width {
@@ -319,45 +366,178 @@ async fn decode_with_onevpl(
     } else {
         IoPattern::OUT_SYSTEM_MEMORY
     };
-    let decode_params = session
+    let mut decode_params = session
         .decode_header(&mut bitstream, io_pattern)
         .map_err(|status| map_onevpl_status(status, "Session::decode_header"))?;
+    let decode_async_depth = std::env::var("VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH")
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .filter(|depth| (1..=16).contains(depth))
+        .unwrap_or(10);
+    decode_params.set_async_depth(decode_async_depth);
     let decoder = session
         .decoder(decode_params)
         .map_err(|status| map_onevpl_status(status, "Session::decoder"))?;
 
     let mut frames = Vec::new();
     let mut next_pts_90k = initial_pts_90k;
+    let mut metadata_cache = None;
 
-    loop {
-        match decoder.decode(Some(&mut bitstream), None, None).await {
-            Ok(mut surface) => frames.push(surface_to_backend_frame(
+    let queue_limit = usize::from(decode_async_depth.max(1));
+    let mut queued_surfaces = VecDeque::new();
+    let mut emit_surface = |mut surface: onevpl::FrameSurface<'_>| -> Result<(), BackendError> {
+        if matches!(output_mode, DecodeOutputMode::Metadata) {
+            frames.push(metadata_frame_from_surface(
+                &mut surface,
+                fps,
+                &mut next_pts_90k,
+                &mut metadata_cache,
+            ));
+        } else {
+            frames.push(surface_to_backend_frame(
                 &mut surface,
                 output_mode,
                 fps,
                 &mut next_pts_90k,
-            )?),
+            )?);
+        }
+        Ok(())
+    };
+    loop {
+        match decoder.decode_async(Some(&mut bitstream), None) {
+            Ok(surface) => {
+                queued_surfaces.push_back(surface);
+                if queued_surfaces.len() >= queue_limit
+                    && let Some(surface) = queued_surfaces.pop_front()
+                {
+                    let mut surface = surface;
+                    match surface.synchronize(Some(0)) {
+                        Ok(()) => emit_surface(surface)?,
+                        Err(MfxStatus::InExecution | MfxStatus::DeviceBusy) => {
+                            queued_surfaces.push_back(surface);
+                        }
+                        Err(status) => {
+                            return Err(map_onevpl_status(status, "FrameSurface::synchronize"));
+                        }
+                    }
+                }
+            }
+            Err(MfxStatus::DeviceBusy) => {
+                if let Some(surface) = queued_surfaces.pop_front() {
+                    let mut surface = surface;
+                    match surface.synchronize(Some(0)) {
+                        Ok(()) => emit_surface(surface)?,
+                        Err(MfxStatus::InExecution | MfxStatus::DeviceBusy) => {
+                            queued_surfaces.push_back(surface);
+                        }
+                        Err(status) => {
+                            return Err(map_onevpl_status(status, "FrameSurface::synchronize"));
+                        }
+                    }
+                    std::thread::yield_now();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
             Err(MfxStatus::MoreData) => break,
             Err(MfxStatus::VideoParamChanged) => {}
-            Err(status) => return Err(map_onevpl_status(status, "Decoder::decode")),
+            Err(status) => return Err(map_onevpl_status(status, "Decoder::decode_async")),
         }
     }
 
     loop {
-        match decoder.decode(None, None, None).await {
-            Ok(mut surface) => frames.push(surface_to_backend_frame(
-                &mut surface,
-                output_mode,
-                fps,
-                &mut next_pts_90k,
-            )?),
+        match decoder.decode_async(None, None) {
+            Ok(surface) => {
+                queued_surfaces.push_back(surface);
+                if queued_surfaces.len() >= queue_limit
+                    && let Some(surface) = queued_surfaces.pop_front()
+                {
+                    let mut surface = surface;
+                    match surface.synchronize(Some(0)) {
+                        Ok(()) => emit_surface(surface)?,
+                        Err(MfxStatus::InExecution | MfxStatus::DeviceBusy) => {
+                            queued_surfaces.push_back(surface);
+                        }
+                        Err(status) => {
+                            return Err(map_onevpl_status(status, "FrameSurface::synchronize"));
+                        }
+                    }
+                }
+            }
+            Err(MfxStatus::DeviceBusy) => {
+                if let Some(surface) = queued_surfaces.pop_front() {
+                    let mut surface = surface;
+                    match surface.synchronize(Some(0)) {
+                        Ok(()) => emit_surface(surface)?,
+                        Err(MfxStatus::InExecution | MfxStatus::DeviceBusy) => {
+                            queued_surfaces.push_back(surface);
+                        }
+                        Err(status) => {
+                            return Err(map_onevpl_status(status, "FrameSurface::synchronize"));
+                        }
+                    }
+                    std::thread::yield_now();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
             Err(MfxStatus::MoreData) => break,
             Err(MfxStatus::VideoParamChanged) => {}
-            Err(status) => return Err(map_onevpl_status(status, "Decoder::decode drain")),
+            Err(status) => return Err(map_onevpl_status(status, "Decoder::decode_async drain")),
         }
+    }
+
+    while let Some(surface) = queued_surfaces.pop_front() {
+        let mut surface = surface;
+        surface
+            .synchronize(None)
+            .map_err(|status| map_onevpl_status(status, "FrameSurface::synchronize"))?;
+        emit_surface(surface)?;
     }
 
     Ok(frames)
+}
+
+fn metadata_frame_from_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    fps: i32,
+    next_pts_90k: &mut i64,
+    cache: &mut Option<(usize, usize, Option<u32>)>,
+) -> Frame {
+    let (width, height, pixel_format) = if let Some(cached) = *cache {
+        cached
+    } else {
+        let bounds = surface.bounds();
+        let width = usize::from(if bounds.crop_width > 0 {
+            bounds.crop_width
+        } else {
+            bounds.width
+        });
+        let height = usize::from(if bounds.crop_height > 0 {
+            bounds.crop_height
+        } else {
+            bounds.height
+        });
+        let fourcc = surface.fourcc();
+        let pixel_format = Some(fourcc.repr() as u32);
+        *cache = Some((width, height, pixel_format));
+        (width, height, pixel_format)
+    };
+    let pts_90k = Some(bump_decode_pts(next_pts_90k, fps));
+    Frame {
+        width,
+        height,
+        pixel_format,
+        pts_90k,
+        decode_info_flags: None,
+        color_primaries: None,
+        transfer_function: None,
+        ycbcr_matrix: None,
+        argb: None,
+        #[cfg(feature = "unstable-raw-inputs")]
+        nv12: None,
+        force_keyframe: false,
+    }
 }
 
 fn surface_to_backend_frame(
@@ -401,6 +581,8 @@ fn surface_to_backend_frame(
         transfer_function: None,
         ycbcr_matrix: None,
         argb,
+        #[cfg(feature = "unstable-raw-inputs")]
+        nv12: None,
         force_keyframe: false,
     })
 }
@@ -587,6 +769,25 @@ async fn encode_with_onevpl(
             "Intel backend currently requires even frame dimensions".to_string(),
         ));
     }
+    #[cfg(feature = "unstable-raw-inputs")]
+    let use_nv12_input = {
+        let has_argb = pending_frames.iter().any(|frame| frame.argb.is_some());
+        let has_nv12 = pending_frames.iter().any(|frame| frame.nv12.is_some());
+        if has_argb && has_nv12 {
+            return Err(BackendError::InvalidInput(
+                "Intel backend does not support mixing ARGB and NV12 frames in one flush cycle"
+                    .to_string(),
+            ));
+        }
+        if !has_argb && !has_nv12 {
+            return Err(BackendError::InvalidInput(
+                "Intel backend requires ARGB or NV12 frame payload".to_string(),
+            ));
+        }
+        has_nv12
+    };
+    #[cfg(not(feature = "unstable-raw-inputs"))]
+    let use_nv12_input = false;
 
     let mut loader =
         onevpl::Loader::new().map_err(|status| map_onevpl_status(status, "Loader::new"))?;
@@ -603,89 +804,139 @@ async fn encode_with_onevpl(
         .target_kbps
         .unwrap_or_else(|| default_target_kbps(width, height, fps_numerator));
     let input_pic_struct = PicStruct::Progressive;
+    let default_rate_control_method = default_rate_control_method(codec);
+    let rate_control_method = std::env::var("VIDEO_HW_INTEL_RATE_CONTROL")
+        .ok()
+        .and_then(|raw| parse_rate_control_method(&raw))
+        .unwrap_or(default_rate_control_method);
+    let async_depth = std::env::var("VIDEO_HW_INTEL_ASYNC_DEPTH")
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .filter(|depth| (1..=16).contains(depth))
+        .unwrap_or(4);
     let hw_width = onevpl::utils::hw_align_width(width_u16);
     let hw_height = onevpl::utils::hw_align_height(height_u16, input_pic_struct);
     let mut encode_params = onevpl::MfxVideoParams::default();
     encode_params.set_codec(to_onevpl_codec(codec));
     encode_params.set_target_usage(TargetUsage::Level7);
-    encode_params.set_rate_control_method(RateControlMethod::CBR);
+    encode_params.set_rate_control_method(rate_control_method);
     encode_params.set_target_kbps(target_kbps);
     encode_params.set_framerate(fps_numerator, 1);
-    encode_params.set_async_depth(4);
+    encode_params.set_async_depth(async_depth);
     encode_params.set_gop_ref_dist(1);
     encode_params.set_num_ref_frame(1);
     encode_params.set_chroma_format(ChromaFormat::YUV420);
+    if matches!(rate_control_method, RateControlMethod::CQP) {
+        let qp = std::env::var("VIDEO_HW_INTEL_CQP")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .map(|value| value.clamp(1, 51))
+            .unwrap_or(24);
+        encode_params.set_qpi(qp);
+        encode_params.set_qpp(qp);
+    }
+    {
+        // Some runtimes reject AVC init unless FrameInfo.PicStruct is explicitly set.
+        let raw = &mut **encode_params;
+        raw.__bindgen_anon_1.mfx.FrameInfo.PicStruct = input_pic_struct.repr() as u16;
+        if codec == Codec::Hevc {
+            raw.__bindgen_anon_1.mfx.LowPower = CodingOptionValue::On.repr() as u16;
+        }
+    }
     if let Some(gop_length) = options.gop_length {
         encode_params.set_gop_pic_size(gop_length);
     }
 
     let mut vpp = None;
     let mut vpp_input_fourcc = None;
+    let mut hw_direct_rgb4 = false;
     if use_hardware {
-        encode_params.set_fourcc(FourCC::NV12);
-        encode_params.set_io_pattern(IoPattern::IN_VIDEO_MEMORY);
-        encode_params.set_height(hw_height);
-        encode_params.set_width(hw_width);
-        encode_params.set_crop(width_u16, height_u16);
+        let hevc_direct_rgb4 =
+            codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_DIRECT_RGB4").unwrap_or(false);
+        if use_nv12_input {
+            encode_params.set_fourcc(FourCC::NV12);
+            encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);
+            encode_params.set_height(hw_height);
+            encode_params.set_width(hw_width);
+            encode_params.set_crop(width_u16, height_u16);
+        } else if codec == Codec::H264 || hevc_direct_rgb4 {
+            encode_params.set_fourcc(FourCC::Rgb4OrBgra);
+            encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);
+            encode_params.set_height(hw_height);
+            encode_params.set_width(hw_width);
+            encode_params.set_crop(width_u16, height_u16);
+            hw_direct_rgb4 = true;
+        } else {
+            encode_params.set_fourcc(FourCC::NV12);
+            encode_params.set_io_pattern(IoPattern::IN_VIDEO_MEMORY);
+            encode_params.set_height(hw_height);
+            encode_params.set_width(hw_width);
+            encode_params.set_crop(width_u16, height_u16);
 
-        let build_vpp_params = |in_fourcc: FourCC| {
-            let mut vpp_params = VppVideoParams::default();
-            vpp_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY | IoPattern::OUT_VIDEO_MEMORY);
-            vpp_params.set_in_fourcc(in_fourcc);
-            vpp_params.set_in_picstruct(input_pic_struct);
-            vpp_params.set_in_height(hw_height);
-            vpp_params.set_in_width(hw_width);
-            vpp_params.set_in_crop(0, 0, width_u16, height_u16);
-            vpp_params.set_in_framerate(fps_numerator, 1);
-            vpp_params.set_out_fourcc(FourCC::NV12);
-            vpp_params.set_out_picstruct(PicStruct::Progressive);
-            vpp_params.set_out_height(hw_height);
-            vpp_params.set_out_width(hw_width);
-            vpp_params.set_out_crop(0, 0, width_u16, height_u16);
-            vpp_params.set_out_framerate(fps_numerator, 1);
-            vpp_params
-        };
+            let build_vpp_params = |in_fourcc: FourCC| {
+                let mut vpp_params = VppVideoParams::default();
+                vpp_params
+                    .set_io_pattern(IoPattern::IN_SYSTEM_MEMORY | IoPattern::OUT_VIDEO_MEMORY);
+                vpp_params.set_in_fourcc(in_fourcc);
+                vpp_params.set_in_picstruct(input_pic_struct);
+                vpp_params.set_in_height(hw_height);
+                vpp_params.set_in_width(hw_width);
+                vpp_params.set_in_crop(0, 0, width_u16, height_u16);
+                vpp_params.set_in_framerate(fps_numerator, 1);
+                vpp_params.set_out_fourcc(FourCC::NV12);
+                vpp_params.set_out_picstruct(PicStruct::Progressive);
+                vpp_params.set_out_height(hw_height);
+                vpp_params.set_out_width(hw_width);
+                vpp_params.set_out_crop(0, 0, width_u16, height_u16);
+                vpp_params.set_out_framerate(fps_numerator, 1);
+                vpp_params
+            };
 
-        let mut bgra_vpp_params = build_vpp_params(FourCC::Rgb4OrBgra);
-        match session.video_processor(&mut bgra_vpp_params) {
-            Ok(processor) => {
-                vpp = Some(processor);
-                vpp_input_fourcc = Some(FourCC::Rgb4OrBgra);
-            }
-            Err(
-                MfxStatus::Unsupported
-                | MfxStatus::NotImplemented
-                | MfxStatus::IncompatibleVideoParam,
-            ) => {
-                let mut yv12_vpp_params = build_vpp_params(FourCC::YV12);
-                match session.video_processor(&mut yv12_vpp_params) {
-                    Ok(processor) => {
-                        vpp = Some(processor);
-                        vpp_input_fourcc = Some(FourCC::YV12);
-                    }
-                    Err(
-                        MfxStatus::Unsupported
-                        | MfxStatus::NotImplemented
-                        | MfxStatus::IncompatibleVideoParam,
-                    ) => {
-                        return Err(BackendError::UnsupportedConfig(
-                            "Intel hardware encode requires oneVPL VPP (BGRA/YV12 -> NV12), but this runtime does not expose a compatible VPP path".to_string(),
-                        ));
-                    }
-                    Err(status) => {
-                        return Err(map_onevpl_status(
-                            status,
-                            "Session::video_processor (YV12 fallback)",
-                        ));
+            let mut bgra_vpp_params = build_vpp_params(FourCC::Rgb4OrBgra);
+            match session.video_processor(&mut bgra_vpp_params) {
+                Ok(processor) => {
+                    vpp = Some(processor);
+                    vpp_input_fourcc = Some(FourCC::Rgb4OrBgra);
+                }
+                Err(
+                    MfxStatus::Unsupported
+                    | MfxStatus::NotImplemented
+                    | MfxStatus::IncompatibleVideoParam,
+                ) => {
+                    let mut yv12_vpp_params = build_vpp_params(FourCC::YV12);
+                    match session.video_processor(&mut yv12_vpp_params) {
+                        Ok(processor) => {
+                            vpp = Some(processor);
+                            vpp_input_fourcc = Some(FourCC::YV12);
+                        }
+                        Err(
+                            MfxStatus::Unsupported
+                            | MfxStatus::NotImplemented
+                            | MfxStatus::IncompatibleVideoParam,
+                        ) => {
+                            return Err(BackendError::UnsupportedConfig(
+                                "Intel hardware encode requires oneVPL VPP (BGRA/YV12 -> NV12), but this runtime does not expose a compatible VPP path".to_string(),
+                            ));
+                        }
+                        Err(status) => {
+                            return Err(map_onevpl_status(
+                                status,
+                                "Session::video_processor (YV12 fallback)",
+                            ));
+                        }
                     }
                 }
-            }
-            Err(status) => {
-                return Err(map_onevpl_status(status, "Session::video_processor"));
+                Err(status) => {
+                    return Err(map_onevpl_status(status, "Session::video_processor"));
+                }
             }
         }
     } else {
-        encode_params.set_fourcc(FourCC::IyuvOrI420);
+        if use_nv12_input {
+            encode_params.set_fourcc(FourCC::NV12);
+        } else {
+            encode_params.set_fourcc(FourCC::IyuvOrI420);
+        }
         encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);
         encode_params.set_height(height_u16);
         encode_params.set_width(width_u16);
@@ -713,55 +964,83 @@ async fn encode_with_onevpl(
     let mut pending_pts = VecDeque::new();
     let aligned_width = usize::from(hw_width);
     let aligned_height = usize::from(hw_height);
-    let preconverted_bgra = if matches!(vpp_input_fourcc, Some(FourCC::Rgb4OrBgra)) {
-        Some(
-            pending_frames
-                .par_iter()
-                .map(|frame| {
-                    let argb = frame.argb.as_deref().ok_or_else(|| {
-                        BackendError::InvalidInput(
-                            "Intel backend requires ARGB frame payload".to_string(),
-                        )
-                    })?;
-                    argb_to_bgra(argb, width, height, aligned_width, aligned_height)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-    } else {
-        None
-    };
 
-    for (frame_idx, frame) in pending_frames.iter().enumerate() {
-        let argb = frame.argb.as_deref().ok_or_else(|| {
-            BackendError::InvalidInput("Intel backend requires ARGB frame payload".to_string())
-        })?;
-
+    for frame in pending_frames {
         let mut ctrl = EncodeCtrl::new();
         if frame.force_keyframe {
             ctrl.set_frame_type(FrameType::I | FrameType::IDR | FrameType::REF);
         }
 
         pending_pts.push_back(frame.pts_90k);
+        if use_nv12_input {
+            #[cfg(feature = "unstable-raw-inputs")]
+            {
+                let nv12 = frame.nv12.as_ref().ok_or_else(|| {
+                    BackendError::InvalidInput(
+                        "Intel backend requires NV12 frame payload".to_string(),
+                    )
+                })?;
+                let mut input_surface = encoder
+                    .get_surface()
+                    .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
+                let packed_nv12 = pack_nv12_payload(nv12, width, height)?;
+                let mut input_reader = Cursor::new(packed_nv12.as_ref());
+                input_surface
+                    .read_raw_frame(&mut input_reader, FourCC::NV12)
+                    .await
+                    .map_err(|status| map_onevpl_status(status, "FrameSurface::read_raw_frame"))?;
+                match encoder
+                    .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
+                    .await
+                {
+                    Ok(_) => {
+                        collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?
+                    }
+                    Err(MfxStatus::MoreData) => {}
+                    Err(status) => {
+                        return Err(map_onevpl_status(status, "Encoder::encode (nv12-input)"));
+                    }
+                }
+                continue;
+            }
+            #[cfg(not(feature = "unstable-raw-inputs"))]
+            {
+                return Err(BackendError::UnsupportedConfig(
+                    "NV12 input payloads require unstable-raw-inputs feature".to_string(),
+                ));
+            }
+        }
+        let argb = frame.argb.as_deref().ok_or_else(|| {
+            BackendError::InvalidInput("Intel backend requires ARGB frame payload".to_string())
+        })?;
+        if hw_direct_rgb4 {
+            let mut input_surface = encoder
+                .get_surface()
+                .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
+            write_argb_to_bgra_surface(&mut input_surface, argb, width, height)?;
+            match encoder
+                .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
+                .await
+            {
+                Ok(_) => collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?,
+                Err(MfxStatus::MoreData) => {}
+                Err(status) => {
+                    return Err(map_onevpl_status(
+                        status,
+                        "Encoder::encode (hardware direct-rgb4)",
+                    ));
+                }
+            }
+            continue;
+        }
         match vpp_input_fourcc {
             Some(FourCC::Rgb4OrBgra) => {
-                let converted = preconverted_bgra
-                    .as_ref()
-                    .and_then(|frames| frames.get(frame_idx))
-                    .ok_or_else(|| {
-                        BackendError::Backend(
-                            "missing pre-converted BGRA frame for Intel VPP input".to_string(),
-                        )
-                    })?;
                 let mut input_surface = vpp
                     .as_mut()
                     .ok_or_else(|| BackendError::Backend("VPP should be initialized".to_string()))?
                     .get_surface_input()
                     .map_err(|status| map_onevpl_status(status, "VPP::get_surface_input"))?;
-                let mut input_cursor = Cursor::new(converted.as_slice());
-                input_surface
-                    .read_raw_frame(&mut input_cursor, FourCC::Rgb4OrBgra)
-                    .await
-                    .map_err(|status| map_onevpl_status(status, "FrameSurface::read_raw_frame"))?;
+                write_argb_to_bgra_surface(&mut input_surface, argb, width, height)?;
                 let vpp_frame = vpp
                     .as_ref()
                     .ok_or_else(|| BackendError::Backend("VPP should be initialized".to_string()))?
@@ -883,6 +1162,76 @@ fn collect_packets(
     Ok(())
 }
 
+#[cfg(feature = "unstable-raw-inputs")]
+fn pack_nv12_payload<'a>(
+    nv12: &'a Nv12FramePayload,
+    width: usize,
+    height: usize,
+) -> Result<Cow<'a, [u8]>, BackendError> {
+    if nv12.pitch < width {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 pitch is smaller than width: pitch={}, width={}",
+            nv12.pitch, width
+        )));
+    }
+    if !nv12.pitch.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 pitch must be even, got {}",
+            nv12.pitch
+        )));
+    }
+    let expected_y = nv12
+        .pitch
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 Y size overflow".to_string()))?;
+    let expected_uv = nv12
+        .pitch
+        .checked_mul(height / 2)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 UV size overflow".to_string()))?;
+    let expected_total = expected_y
+        .checked_add(expected_uv)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 total size overflow".to_string()))?;
+    if nv12.data.len() != expected_total {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 payload size mismatch: expected {}, got {}",
+            expected_total,
+            nv12.data.len()
+        )));
+    }
+
+    if nv12.pitch == width {
+        return Ok(Cow::Borrowed(nv12.data.as_slice()));
+    }
+
+    let output_y = width
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 Y size overflow".to_string()))?;
+    let output_uv = output_y
+        .checked_div(2)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 UV size overflow".to_string()))?;
+    let output_total = output_y
+        .checked_add(output_uv)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 packed size overflow".to_string()))?;
+    let mut packed = vec![0_u8; output_total];
+
+    for row in 0..height {
+        let src_start = row * nv12.pitch;
+        let src_end = src_start + width;
+        let dst_start = row * width;
+        packed[dst_start..(dst_start + width)].copy_from_slice(&nv12.data[src_start..src_end]);
+    }
+
+    let src_uv_base = expected_y;
+    let dst_uv_base = output_y;
+    for row in 0..(height / 2) {
+        let src_start = src_uv_base + row * nv12.pitch;
+        let src_end = src_start + width;
+        let dst_start = dst_uv_base + row * width;
+        packed[dst_start..(dst_start + width)].copy_from_slice(&nv12.data[src_start..src_end]);
+    }
+    Ok(Cow::Owned(packed))
+}
+
 fn argb_to_i420(
     argb: &[u8],
     width: usize,
@@ -961,20 +1310,38 @@ fn argb_to_i420(
     Ok(out)
 }
 
-fn argb_to_bgra(
+fn write_argb_to_bgra_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
     argb: &[u8],
     width: usize,
     height: usize,
-    aligned_width: usize,
-    aligned_height: usize,
-) -> Result<Vec<u8>, BackendError> {
-    let total_size = aligned_width
-        .checked_mul(aligned_height)
-        .and_then(|px| px.checked_mul(4))
-        .ok_or_else(|| BackendError::InvalidInput("BGRA buffer size overflow".to_string()))?;
-    let mut out = vec![0_u8; total_size];
-    argb_to_bgra_inplace(argb, width, height, aligned_width, aligned_height, &mut out)?;
-    Ok(out)
+) -> Result<(), BackendError> {
+    surface
+        .map(MemoryFlag::WRITE)
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::map"))?;
+
+    let conversion_result = (|| {
+        let bounds = surface.bounds();
+        let pitch_bytes = usize::from(bounds.pitch);
+        if !pitch_bytes.is_multiple_of(4) {
+            return Err(BackendError::Backend(format!(
+                "unexpected BGRA surface pitch (not 4-byte aligned): {}",
+                bounds.pitch
+            )));
+        }
+
+        let aligned_width = pitch_bytes / 4;
+        let aligned_height = usize::from(bounds.crop_height);
+        let out = surface.b();
+        argb_to_bgra_inplace(argb, width, height, aligned_width, aligned_height, out)
+    })();
+
+    let unmap_result = surface
+        .unmap()
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::unmap"));
+
+    conversion_result?;
+    unmap_result
 }
 
 fn argb_to_bgra_inplace(
@@ -1023,13 +1390,26 @@ fn argb_to_bgra_inplace(
             .checked_mul(aligned_width)
             .and_then(|offset| offset.checked_mul(4))
             .ok_or_else(|| BackendError::InvalidInput("BGRA row offset overflow".to_string()))?;
-        for x in 0..width {
-            let src = src_row_start + x * 4;
-            let dst = dst_row_start + x * 4;
-            out[dst] = argb[src + 3];
-            out[dst + 1] = argb[src + 2];
-            out[dst + 2] = argb[src + 1];
-            out[dst + 3] = argb[src];
+        let src_row_end = src_row_start
+            .checked_add(width.saturating_mul(4))
+            .ok_or_else(|| BackendError::InvalidInput("ARGB row end overflow".to_string()))?;
+        let dst_row_end = dst_row_start
+            .checked_add(width.saturating_mul(4))
+            .ok_or_else(|| BackendError::InvalidInput("BGRA row end overflow".to_string()))?;
+        let src_row = &argb[src_row_start..src_row_end];
+        let dst_row = &mut out[dst_row_start..dst_row_end];
+        for (src_px, dst_px) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+            let packed = u32::from_le_bytes([src_px[0], src_px[1], src_px[2], src_px[3]]);
+            dst_px.copy_from_slice(&packed.swap_bytes().to_le_bytes());
+        }
+
+        let padded_row_end = dst_row_start
+            .checked_add(aligned_width.saturating_mul(4))
+            .ok_or_else(|| {
+                BackendError::InvalidInput("BGRA padded row end overflow".to_string())
+            })?;
+        if dst_row_end < padded_row_end {
+            out[dst_row_end..padded_row_end].fill(0);
         }
     }
 
@@ -1097,6 +1477,34 @@ fn default_target_kbps(width: usize, height: usize, fps: u32) -> u16 {
     u16::try_from(target).unwrap_or(u16::MAX)
 }
 
+fn parse_rate_control_method(raw: &str) -> Option<RateControlMethod> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cbr" => Some(RateControlMethod::CBR),
+        "vbr" => Some(RateControlMethod::VBR),
+        "cqp" => Some(RateControlMethod::CQP),
+        "avbr" => Some(RateControlMethod::AVBR),
+        "icq" => Some(RateControlMethod::ICQ),
+        "qvbr" => Some(RateControlMethod::QVBR),
+        _ => None,
+    }
+}
+
+fn default_rate_control_method(codec: Codec) -> RateControlMethod {
+    match codec {
+        Codec::H264 => RateControlMethod::CBR,
+        Codec::Hevc => RateControlMethod::CQP,
+    }
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
 fn map_onevpl_status(status: MfxStatus, context: &str) -> BackendError {
     match status {
         MfxStatus::MoreData
@@ -1113,6 +1521,7 @@ fn map_onevpl_status(status: MfxStatus, context: &str) -> BackendError {
         }
         MfxStatus::Unsupported
         | MfxStatus::NotInitialized
+        | MfxStatus::NotFound
         | MfxStatus::NotImplemented
         | MfxStatus::IncompatibleVideoParam
         | MfxStatus::PartialAcceleration => {

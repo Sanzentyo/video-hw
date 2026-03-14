@@ -180,6 +180,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         });
         let output = adapter
@@ -228,6 +230,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         });
         let output = adapter

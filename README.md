@@ -61,7 +61,17 @@ $env:NVIDIA_VIDEO_CODEC_SDK_PATH = "C:\Path\To\Video_Codec_SDK\Lib\x64"
 ## Intel backend 依存
 
 `backend-intel` は Intel oneVPL を Rust から扱う `onevpl-rs` を利用します（`intel-onevpl-sys` 経由で oneVPL 公式ヘッダにバインド）。  
-現状は H.264 / HEVC の encode/decode をサポートします（`require_hardware=false` の場合は software 実装へフォールバック）。
+依存宣言は `https://github.com/Sanzentyo/onevpl-rs` を参照し、`rev` 固定で利用しています。  
+現状は H.264 / HEVC の encode/decode をサポートします。`require_hardware=false` は「HW優先で初期化し、失敗時にSWへフォールバック」です。  
+SW を明示的に使う場合は `IntelDecoderOptions::force_software=true` / `IntelEncoderOptions::force_software=true`（CLI では `--intel-force-software`）を利用してください。
+Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きできます。未指定時は H.264=CBR、HEVC=CQP を使います（CQP 値は `VIDEO_HW_INTEL_CQP`, default=24）。
+
+#### onevpl fork 更新時の手順
+
+1. `https://github.com/Sanzentyo/onevpl-rs` に `third_party/onevpl-rs` 相当の変更を反映する  
+2. 反映した commit SHA を `crates/video-hw/Cargo.toml` の `onevpl` 依存へ `rev = "<sha>"` として固定する  
+3. `cargo update -p onevpl && cargo update -p intel-onevpl-sys` で lockfile を更新する  
+4. `cargo fmt --check && cargo clippy --workspace --all-targets --all-features && cargo test --workspace --all-features && cargo bench --package video-hw --features backend-nvidia --bench decode_bench -- --noplot` を再実行する
 
 ### oneVPL 導入（CLI / Windows）
 
@@ -101,14 +111,14 @@ $pkg = "C:\path\to\w_oneVPL_p_<version>_offline\packages"
 
 ```powershell
 Get-Item "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\include\vpl\mfx.h"
-Get-Item "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\lib\vpl.lib"
+Get-Item "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\bin\libvpl.dll"
 ```
 
 存在確認後、環境変数を設定します。
 
 ```powershell
 $env:LIBVPL_INCLUDE_PATH = "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\include\vpl"
-$env:LIBVPL_LIBRARY_PATH = "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\lib"
+$env:Path = "C:\Program Files (x86)\Intel\oneAPI\vpl\latest\bin;$env:Path"
 ```
 
 必要に応じて `LIBCLANG_PATH` も設定してください（bindgen が `libclang.dll` を見つけられない場合）。
@@ -121,10 +131,9 @@ cmake -S $env:TEMP\libvpl -B $env:TEMP\libvpl\build -DCMAKE_INSTALL_PREFIX=$env:
 cmake --build $env:TEMP\libvpl\build --config Release --target install
 
 Get-Item "$env:TEMP\libvpl\install\include\vpl\mfx.h"
-Get-Item "$env:TEMP\libvpl\install\lib\vpl.lib"
+Get-Item "$env:TEMP\libvpl\install\bin\libvpl.dll"
 
 $env:LIBVPL_INCLUDE_PATH = "$env:TEMP\libvpl\install\include\vpl"
-$env:LIBVPL_LIBRARY_PATH = "$env:TEMP\libvpl\install\lib"
 $env:Path = "$env:TEMP\libvpl\install\bin;$env:Path"
 ```
 
@@ -135,7 +144,7 @@ cargo +nightly -Zscript scripts/setup_onevpl.rs
 cargo +nightly -Zscript scripts/setup_onevpl.rs --apply
 ```
 
-> `onevpl-sys` 側の `build.rs` が依存解決時に先行実行されるため、本リポジトリでは `build.rs` による oneVPL 自動取得/自動ビルドは行っていません。上記の事前 CLI セットアップを前提にしています。
+> `intel-onevpl-sys` の `build.rs` は `mfx.h` が見つからない場合、同梱の pregenerated bindings へ自動フォールバックします。`LIBVPL_INCLUDE_PATH` は「bindgen で再生成したい場合」に設定してください。
 
 この fallback 設定後は、次で Intel backend のビルド検証ができます。
 
@@ -147,14 +156,13 @@ cargo test --workspace --features backend-intel -- --nocapture
 ### Intel backend トラブルシューティング
 
 - `Unable to generate bindings: NotExist(...\\mfx.h)`  
-  `LIBVPL_INCLUDE_PATH` が誤っているか、oneVPL ヘッダ未導入です。`mfx.h` の実在パスを再確認してください。
-- `LINK : fatal error LNK1181: cannot open input file 'vpl.lib'`  
-  `vpl.lib` が未導入、または `LIBVPL_LIBRARY_PATH` が不正です。
+  通常は pregenerated bindings へフォールバックします。bindgen 再生成を使いたい場合のみ `LIBVPL_INCLUDE_PATH` と `mfx.h` 実体を確認してください。
 - `Loader::new_session: NotFound`  
   oneVPL runtime/ドライバが未導入、または再起動未実施の可能性があります。導入後に再起動して再試行してください。
 - `unsupported config: Intel hardware encoder rejected ... (Session::encoder: InvalidVideoParam)`  
-  oneVPL runtime 側で要求した encode パラメータ（実装種別/色形式/メモリ種別）が受理されていません。環境によっては HEVC のみ利用可能で、H.264 hardware encode が提供されない場合があります。  
-  Intel GPU runtime / ドライバ更新後に再試行し、ベンチでは必要に応じて `--codec hevc` / `--require-hardware false` / `--allow-case-failures` を利用してください。
+  oneVPL runtime 側で要求した encode パラメータ（実装種別/色形式/メモリ種別）が受理されていません。  
+  H.264 の場合は `FrameInfo.PicStruct` 未設定でも同エラーになり得るため、現行 backend は `PicStruct::Progressive` を明示して初期化します。  
+  それでも失敗する場合は Intel GPU runtime / ドライバ更新後に再試行し、ベンチでは必要に応じて `--codec hevc` / `--require-hardware false` / `--allow-case-failures` を利用してください。
 
 ## ライセンス
 
@@ -187,14 +195,31 @@ cargo run --example decode_annexb -- --backend auto --codec h264 --input sample-
 # decode (Intel)
 cargo run --features backend-intel --example decode_annexb -- --backend intel --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --require-hardware
 
+# decode (Intel software)
+cargo run --features backend-intel --example decode_annexb -- --backend intel --codec h264 --input sample-videos/sample-10s.h264 --chunk-bytes 4096 --intel-force-software
+
 # encode
 cargo run --features backend-nvidia --example encode_synthetic -- --backend nv --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-h264.bin
 
 # encode (Intel)
 cargo run --features backend-intel --example encode_synthetic -- --backend intel --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-intel-h264.bin
 
+# encode (Intel software)
+cargo run --features backend-intel --example encode_synthetic -- --backend intel --codec h264 --fps 30 --frame-count 300 --intel-force-software --output output/video-hw-intel-sw-h264.bin
+
+# encode raw (Intel NV12 input, unstable-raw-inputs)
+cargo run --features "backend-intel unstable-raw-inputs" --example encode_raw_argb -- --backend intel --codec hevc --fps 30 --frame-count 300 --width 640 --height 360 --input-raw output/benchmark-input-nv12-640x360-300f.raw --input-pix-fmt nv12 --require-hardware --output output/video-hw-intel-hevc-nv12.bin
+
 # precise benchmark (Intel vs ffmpeg QSV)
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware true
+# precise benchmark (Intel software vs ffmpeg software)
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware false --intel-force-software
+# precise benchmark (equal raw NV12 input)
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --release --warmup 2 --repeat 9 --require-hardware true --equal-raw-input --raw-input-pix-fmt nv12
+# precise benchmark (decode計測窓を拡張)
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --release --warmup 2 --repeat 9 --require-hardware true --equal-raw-input --raw-input-pix-fmt nv12 --decode-loops 3
+# precise benchmark (揺れを抑える推奨設定: settle + decode async depth)
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --release --warmup 1 --repeat 3 --require-hardware true --equal-raw-input --raw-input-pix-fmt nv12 --decode-loops 10 --settle-ms 300 --intel-decode-async-depth 8
 # 失敗ケースも記録して継続
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 1 --repeat 3 --require-hardware true --allow-case-failures
 ```

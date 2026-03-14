@@ -154,7 +154,9 @@ impl NvDecoderAdapter {
                 .report_metrics
                 .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
                 .unwrap_or(false),
-            BackendDecoderOptions::Default => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
+            BackendDecoderOptions::Default | BackendDecoderOptions::Intel(_) => {
+                env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false)
+            }
         };
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
@@ -1522,6 +1524,8 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
+            #[cfg(feature = "unstable-raw-inputs")]
+            nv12: None,
             force_keyframe: false,
         });
 
@@ -1598,6 +1602,8 @@ mod tests {
                 transfer_function: None,
                 ycbcr_matrix: None,
                 argb: None,
+                #[cfg(feature = "unstable-raw-inputs")]
+                nv12: None,
                 force_keyframe: false,
             })
             .unwrap();
