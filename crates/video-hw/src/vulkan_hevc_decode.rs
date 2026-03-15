@@ -192,6 +192,9 @@ struct ParsedHevcSliceHeader {
     pps_id: u8,
     is_first_slice_segment: bool,
     pic_order_cnt_lsb: Option<u16>,
+    slice_type: Option<u8>,
+    short_term_ref_pic_set_idx: Option<usize>,
+    inline_short_term_ref_pic_set_usage: Option<(usize, usize)>,
 }
 
 const MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS: usize = 16;
@@ -226,6 +229,9 @@ struct HevcExperimentalDpbConfiguration {
 struct HevcSubmitProbeAccessUnit {
     header: HevcAccessUnitHeader,
     slice_segment_offset: u32,
+    slice_type: Option<u8>,
+    short_term_ref_pic_set_idx: Option<usize>,
+    inline_short_term_ref_pic_set_usage: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1623,13 +1629,26 @@ fn probe_hevc_decode_submit_execution(
                 access_unit.header.nal_unit_type,
             )));
             std_picture_info_flags.set_IsReference(bool_to_u32(is_reference));
-            std_picture_info_flags.set_short_term_ref_pic_set_sps_flag(1);
             let current_pic_order_cnt_val = access_unit
                 .header
                 .pic_order_cnt_lsb
                 .map(i32::from)
                 .unwrap_or(0);
-            let selected_references = if experimental_dpb_enabled && !is_irap {
+            let ref_pic_set_usage_limits = resolve_hevc_ref_pic_set_usage_limits(
+                &parameter_sets.parsed_sps,
+                access_unit.short_term_ref_pic_set_idx,
+            )
+            .or(access_unit.inline_short_term_ref_pic_set_usage)
+            .or_else(|| {
+                resolve_hevc_slice_type_reference_usage_limits(
+                    &payload.parsed_pps,
+                    access_unit.slice_type,
+                )
+            });
+            std_picture_info_flags.set_short_term_ref_pic_set_sps_flag(bool_to_u32(
+                access_unit.short_term_ref_pic_set_idx.is_some(),
+            ));
+            let mut selected_references = if experimental_dpb_enabled && !is_irap {
                 active_reference_slots
                     .iter()
                     .rev()
@@ -1639,6 +1658,14 @@ fn probe_hevc_decode_submit_execution(
             } else {
                 Vec::new()
             };
+            if let Some((max_before, max_after)) = ref_pic_set_usage_limits {
+                selected_references = select_hevc_references_for_ref_pic_set(
+                    &selected_references,
+                    current_pic_order_cnt_val,
+                    max_before.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                    max_after.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                );
+            }
             let selected_reference_picture_order_cnt_values = selected_references
                 .iter()
                 .map(|reference| reference.pic_order_cnt_val)
@@ -1997,6 +2024,9 @@ fn build_hevc_submit_probe_bitstream_payload(
                 pic_order_cnt_lsb: slice_header.pic_order_cnt_lsb,
             },
             slice_segment_offset,
+            slice_type: slice_header.slice_type,
+            short_term_ref_pic_set_idx: slice_header.short_term_ref_pic_set_idx,
+            inline_short_term_ref_pic_set_usage: slice_header.inline_short_term_ref_pic_set_usage,
         });
         if access_units.len() >= access_unit_limit {
             break;
@@ -3037,13 +3067,16 @@ fn parse_hevc_slice_header(
             pps_id,
             is_first_slice_segment: false,
             pic_order_cnt_lsb: None,
+            slice_type: None,
+            short_term_ref_pic_set_idx: None,
+            inline_short_term_ref_pic_set_usage: None,
         });
     }
 
     for _ in 0..parsed_pps.num_extra_slice_header_bits {
         let _ = reader.read_flag()?;
     }
-    let _slice_type = reader.read_ue()?;
+    let slice_type = narrow_u32_to_u8(reader.read_ue()?, "slice_type")?;
     if parsed_pps.output_flag_present_flag {
         let _pic_output_flag = reader.read_flag()?;
     }
@@ -3060,13 +3093,160 @@ fn parse_hevc_slice_header(
             "slice_pic_order_cnt_lsb",
         )?)
     };
+    let (short_term_ref_pic_set_idx, inline_short_term_ref_pic_set_usage) = if is_hevc_idr_nal_type(
+        nal_unit_type,
+    ) {
+        (None, None)
+    } else {
+        let short_term_ref_pic_set_count = sps.short_term_ref_pic_sets.num_delta_pocs.len();
+        if short_term_ref_pic_set_count == 0 {
+            (
+                None,
+                parse_hevc_inline_short_term_ref_pic_set_usage(&mut reader, 0, sps)?,
+            )
+        } else {
+            let short_term_ref_pic_set_sps_flag = reader.read_flag()?;
+            if !short_term_ref_pic_set_sps_flag {
+                (
+                    None,
+                    parse_hevc_inline_short_term_ref_pic_set_usage(
+                        &mut reader,
+                        short_term_ref_pic_set_count,
+                        sps,
+                    )?,
+                )
+            } else if short_term_ref_pic_set_count == 1 {
+                (Some(0), None)
+            } else {
+                let index_bit_count =
+                    bit_width_for_index_range(short_term_ref_pic_set_count.saturating_sub(1));
+                let parsed_index =
+                    usize::try_from(reader.read_bits(index_bit_count)?).map_err(|_| {
+                        "short_term_ref_pic_set_idx conversion to usize failed".to_string()
+                    })?;
+                if parsed_index >= short_term_ref_pic_set_count {
+                    return Err(format!(
+                        "short_term_ref_pic_set_idx {parsed_index} exceeds SPS short-term set count {short_term_ref_pic_set_count}"
+                    ));
+                }
+                (Some(parsed_index), None)
+            }
+        }
+    };
 
     Ok(ParsedHevcSliceHeader {
         nal_unit_type,
         pps_id,
         is_first_slice_segment: true,
         pic_order_cnt_lsb,
+        slice_type: Some(slice_type),
+        short_term_ref_pic_set_idx,
+        inline_short_term_ref_pic_set_usage,
     })
+}
+
+fn bit_width_for_index_range(max_index: usize) -> usize {
+    if max_index == 0 {
+        return 0;
+    }
+    usize::BITS
+        .saturating_sub(max_index.leading_zeros())
+        .try_into()
+        .unwrap_or(usize::BITS as usize)
+}
+
+fn parse_hevc_inline_short_term_ref_pic_set_usage(
+    reader: &mut RbspBitReader<'_>,
+    st_rps_idx: usize,
+    sps: &SpsRbsp,
+) -> Result<Option<(usize, usize)>, String> {
+    let inter_ref_pic_set_prediction_flag = if st_rps_idx == 0 {
+        false
+    } else {
+        reader.read_flag()?
+    };
+    if inter_ref_pic_set_prediction_flag {
+        let short_term_ref_pic_sets = &sps.short_term_ref_pic_sets;
+        let short_term_ref_pic_set_count = short_term_ref_pic_sets.num_delta_pocs.len();
+        let delta_idx_minus1 = if st_rps_idx == short_term_ref_pic_set_count {
+            usize::try_from(reader.read_ue()?)
+                .map_err(|_| "delta_idx_minus1 conversion to usize failed".to_string())?
+        } else {
+            0
+        };
+        let ref_rps_idx = st_rps_idx
+            .checked_sub(delta_idx_minus1.saturating_add(1))
+            .ok_or_else(|| {
+                format!(
+                    "predicted inline short-term RPS index underflow: st_rps_idx={st_rps_idx}, delta_idx_minus1={delta_idx_minus1}"
+                )
+            })?;
+        let ref_delta_poc_s0 = short_term_ref_pic_sets
+            .delta_poc_s0
+            .get(ref_rps_idx)
+            .ok_or_else(|| format!("missing delta_poc_s0 for ref_rps_idx={ref_rps_idx}"))?;
+        let ref_delta_poc_s1 = short_term_ref_pic_sets
+            .delta_poc_s1
+            .get(ref_rps_idx)
+            .ok_or_else(|| format!("missing delta_poc_s1 for ref_rps_idx={ref_rps_idx}"))?;
+        let ref_num_delta_pocs = ref_delta_poc_s0
+            .len()
+            .saturating_add(ref_delta_poc_s1.len());
+        let delta_rps_sign = reader.read_flag()?;
+        let abs_delta_rps_minus1 = i64::from(reader.read_ue()?);
+        let delta_rps_magnitude = abs_delta_rps_minus1.saturating_add(1);
+        let delta_rps = if delta_rps_sign {
+            -delta_rps_magnitude
+        } else {
+            delta_rps_magnitude
+        };
+
+        let mut before_count = 0_usize;
+        let mut after_count = 0_usize;
+        for delta_index in 0..=ref_num_delta_pocs {
+            let used_by_curr_pic_flag = reader.read_flag()?;
+            if !used_by_curr_pic_flag {
+                let _use_delta_flag = reader.read_flag()?;
+                continue;
+            }
+            let base_delta = if delta_index < ref_delta_poc_s0.len() {
+                ref_delta_poc_s0[delta_index]
+            } else if delta_index < ref_num_delta_pocs {
+                ref_delta_poc_s1[delta_index - ref_delta_poc_s0.len()]
+            } else {
+                0
+            };
+            let candidate_delta = base_delta.saturating_add(delta_rps);
+            if candidate_delta < 0 {
+                before_count = before_count.saturating_add(1);
+            } else if candidate_delta > 0 {
+                after_count = after_count.saturating_add(1);
+            }
+        }
+        return Ok(Some((before_count, after_count)));
+    }
+
+    let num_negative_pics = usize::try_from(reader.read_ue()?)
+        .map_err(|_| "num_negative_pics conversion to usize failed".to_string())?;
+    let num_positive_pics = usize::try_from(reader.read_ue()?)
+        .map_err(|_| "num_positive_pics conversion to usize failed".to_string())?;
+    let mut before_count = 0_usize;
+    let mut after_count = 0_usize;
+    for _ in 0..num_negative_pics {
+        let _delta_poc_s0_minus1 = reader.read_ue()?;
+        let used_by_curr_pic_s0_flag = reader.read_flag()?;
+        if used_by_curr_pic_s0_flag {
+            before_count = before_count.saturating_add(1);
+        }
+    }
+    for _ in 0..num_positive_pics {
+        let _delta_poc_s1_minus1 = reader.read_ue()?;
+        let used_by_curr_pic_s1_flag = reader.read_flag()?;
+        if used_by_curr_pic_s1_flag {
+            after_count = after_count.saturating_add(1);
+        }
+    }
+    Ok(Some((before_count, after_count)))
 }
 
 fn is_hevc_idr_nal_type(nal_unit_type: u8) -> bool {
@@ -3114,6 +3294,59 @@ fn select_hevc_decode_dpb_slot(
                 .any(|entry| entry.slot == *candidate)
         })
         .unwrap_or(non_reference_slot)
+}
+
+fn resolve_hevc_ref_pic_set_usage_limits(
+    sps: &SpsRbsp,
+    short_term_ref_pic_set_idx: Option<usize>,
+) -> Option<(usize, usize)> {
+    let set_idx = short_term_ref_pic_set_idx?;
+    let short_term_ref_pic_sets = &sps.short_term_ref_pic_sets;
+    let used_s0 = short_term_ref_pic_sets.used_by_curr_pic_s0.get(set_idx)?;
+    let used_s1 = short_term_ref_pic_sets.used_by_curr_pic_s1.get(set_idx)?;
+    let before_count = used_s0.iter().filter(|&&used| used).count();
+    let after_count = used_s1.iter().filter(|&&used| used).count();
+    Some((before_count, after_count))
+}
+
+fn resolve_hevc_slice_type_reference_usage_limits(
+    parsed_pps: &ParsedHevcPps,
+    slice_type: Option<u8>,
+) -> Option<(usize, usize)> {
+    let slice_type = slice_type?;
+    let default_l0 = usize::from(parsed_pps.num_ref_idx_l0_default_active_minus1).saturating_add(1);
+    let default_l1 = usize::from(parsed_pps.num_ref_idx_l1_default_active_minus1).saturating_add(1);
+    match slice_type {
+        0 => Some((default_l0, default_l1)), // B slice
+        1 => Some((default_l0, 0)),          // P slice
+        2 => Some((0, 0)),                   // I slice
+        _ => None,
+    }
+}
+
+fn select_hevc_references_for_ref_pic_set(
+    candidates: &[HevcActiveReferenceSlot],
+    current_pic_order_cnt_val: i32,
+    max_before: usize,
+    max_after: usize,
+) -> Vec<HevcActiveReferenceSlot> {
+    let mut selected = Vec::new();
+    let mut selected_before = 0_usize;
+    let mut selected_after = 0_usize;
+    for candidate in candidates {
+        if candidate.pic_order_cnt_val < current_pic_order_cnt_val {
+            if selected_before < max_before {
+                selected.push(*candidate);
+                selected_before = selected_before.saturating_add(1);
+            }
+            continue;
+        }
+        if candidate.pic_order_cnt_val > current_pic_order_cnt_val && selected_after < max_after {
+            selected.push(*candidate);
+            selected_after = selected_after.saturating_add(1);
+        }
+    }
+    selected
 }
 
 fn build_hevc_ref_pic_set_lists(
@@ -3898,6 +4131,194 @@ mod tests {
         }];
         let slot = select_hevc_decode_dpb_slot(true, false, 4, &mut next_reference_slot, &active);
         assert_eq!(slot, 1);
+    }
+
+    #[test]
+    fn select_hevc_references_for_ref_pic_set_respects_before_after_limits() {
+        let candidates = vec![
+            HevcActiveReferenceSlot {
+                slot: 1,
+                pic_order_cnt_val: 8,
+            },
+            HevcActiveReferenceSlot {
+                slot: 2,
+                pic_order_cnt_val: 7,
+            },
+            HevcActiveReferenceSlot {
+                slot: 3,
+                pic_order_cnt_val: 12,
+            },
+            HevcActiveReferenceSlot {
+                slot: 4,
+                pic_order_cnt_val: 13,
+            },
+        ];
+        let selected = select_hevc_references_for_ref_pic_set(&candidates, 10, 1, 2);
+        let selected_pocs = selected
+            .iter()
+            .map(|reference| reference.pic_order_cnt_val)
+            .collect::<Vec<_>>();
+        assert_eq!(selected_pocs, vec![8, 12, 13]);
+    }
+
+    #[test]
+    fn bit_width_for_index_range_matches_expected_values() {
+        assert_eq!(bit_width_for_index_range(0), 0);
+        assert_eq!(bit_width_for_index_range(1), 1);
+        assert_eq!(bit_width_for_index_range(3), 2);
+        assert_eq!(bit_width_for_index_range(7), 3);
+    }
+
+    #[test]
+    fn parse_hevc_inline_short_term_ref_pic_set_usage_reads_used_counts() {
+        let rbsp = [0x4f_u8, 0x94_u8];
+        let mut reader = RbspBitReader::new(&rbsp);
+        let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.h265");
+        let bitstream = std::fs::read(sample_path).expect("sample-10s.h265 should be readable");
+        let parameter_sets = extract_hevc_parameter_sets_annexb(&bitstream)
+            .expect("repository HEVC sample should contain VPS/SPS/PPS");
+        let usage = parse_hevc_inline_short_term_ref_pic_set_usage(
+            &mut reader,
+            0,
+            &parameter_sets.parsed_sps,
+        )
+        .expect("inline short-term RPS usage should parse");
+        assert_eq!(usage, Some((1, 1)));
+    }
+
+    #[test]
+    fn parse_hevc_inline_short_term_ref_pic_set_usage_parses_predicted_sets() {
+        fn push_ue(bits: &mut Vec<bool>, value: u32) {
+            let code_num = value.saturating_add(1);
+            let bit_len = u32::BITS.saturating_sub(code_num.leading_zeros()) as usize;
+            for _ in 0..bit_len.saturating_sub(1) {
+                bits.push(false);
+            }
+            for bit_index in (0..bit_len).rev() {
+                bits.push(((code_num >> bit_index) & 1) != 0);
+            }
+        }
+        fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity((bits.len().saturating_add(7)) / 8);
+            let mut current = 0_u8;
+            for (index, bit) in bits.iter().enumerate() {
+                current = (current << 1) | u8::from(*bit);
+                if index % 8 == 7 {
+                    bytes.push(current);
+                    current = 0;
+                }
+            }
+            let remaining = bits.len() % 8;
+            if remaining != 0 {
+                current <<= 8 - remaining;
+                bytes.push(current);
+            }
+            bytes
+        }
+
+        let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.h265");
+        let bitstream = std::fs::read(sample_path).expect("sample-10s.h265 should be readable");
+        let parameter_sets = extract_hevc_parameter_sets_annexb(&bitstream)
+            .expect("repository HEVC sample should contain VPS/SPS/PPS");
+        let short_term = &parameter_sets.parsed_sps.short_term_ref_pic_sets;
+        let short_term_count = short_term.num_delta_pocs.len();
+        if short_term_count == 0 {
+            return;
+        }
+        let ref_index = short_term_count - 1;
+        let ref_num_delta_pocs = short_term
+            .delta_poc_s0
+            .get(ref_index)
+            .expect("delta_poc_s0 should exist for reference set")
+            .len()
+            .saturating_add(
+                short_term
+                    .delta_poc_s1
+                    .get(ref_index)
+                    .expect("delta_poc_s1 should exist for reference set")
+                    .len(),
+            );
+        let mut bits = Vec::new();
+        bits.push(true); // inter_ref_pic_set_prediction_flag
+        push_ue(&mut bits, 0); // delta_idx_minus1
+        bits.push(false); // delta_rps_sign
+        push_ue(&mut bits, 0); // abs_delta_rps_minus1
+        for _ in 0..=ref_num_delta_pocs {
+            bits.push(false); // used_by_curr_pic_flag
+            bits.push(false); // use_delta_flag
+        }
+        let rbsp = bits_to_bytes(&bits);
+        let mut reader = RbspBitReader::new(&rbsp);
+        let usage = parse_hevc_inline_short_term_ref_pic_set_usage(
+            &mut reader,
+            short_term_count,
+            &parameter_sets.parsed_sps,
+        )
+        .expect("predicted short-term RPS usage should parse");
+        assert_eq!(usage, Some((0, 0)));
+    }
+
+    #[test]
+    fn resolve_hevc_slice_type_reference_usage_limits_maps_slice_types() {
+        let parsed_pps = ParsedHevcPps {
+            pps_pic_parameter_set_id: 0,
+            pps_seq_parameter_set_id: 0,
+            num_extra_slice_header_bits: 0,
+            num_ref_idx_l0_default_active_minus1: 1,
+            num_ref_idx_l1_default_active_minus1: 2,
+            init_qp_minus26: 0,
+            diff_cu_qp_delta_depth: 0,
+            pps_cb_qp_offset: 0,
+            pps_cr_qp_offset: 0,
+            pps_beta_offset_div2: 0,
+            pps_tc_offset_div2: 0,
+            log2_parallel_merge_level_minus2: 0,
+            num_tile_columns_minus1: 0,
+            num_tile_rows_minus1: 0,
+            column_width_minus1: [0; 19],
+            row_height_minus1: [0; 21],
+            dependent_slice_segments_enabled_flag: false,
+            output_flag_present_flag: false,
+            sign_data_hiding_enabled_flag: false,
+            cabac_init_present_flag: false,
+            constrained_intra_pred_flag: false,
+            transform_skip_enabled_flag: false,
+            cu_qp_delta_enabled_flag: false,
+            pps_slice_chroma_qp_offsets_present_flag: false,
+            weighted_pred_flag: false,
+            weighted_bipred_flag: false,
+            transquant_bypass_enabled_flag: false,
+            tiles_enabled_flag: false,
+            entropy_coding_sync_enabled_flag: false,
+            uniform_spacing_flag: false,
+            loop_filter_across_tiles_enabled_flag: false,
+            pps_loop_filter_across_slices_enabled_flag: false,
+            deblocking_filter_control_present_flag: false,
+            deblocking_filter_override_enabled_flag: false,
+            pps_deblocking_filter_disabled_flag: false,
+            lists_modification_present_flag: false,
+            slice_segment_header_extension_present_flag: false,
+        };
+        assert_eq!(
+            resolve_hevc_slice_type_reference_usage_limits(&parsed_pps, Some(0)),
+            Some((2, 3))
+        );
+        assert_eq!(
+            resolve_hevc_slice_type_reference_usage_limits(&parsed_pps, Some(1)),
+            Some((2, 0))
+        );
+        assert_eq!(
+            resolve_hevc_slice_type_reference_usage_limits(&parsed_pps, Some(2)),
+            Some((0, 0))
+        );
     }
 
     #[test]
