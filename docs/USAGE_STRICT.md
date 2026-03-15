@@ -32,13 +32,11 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 `Backend::Auto` は OS 既定 backend を選択します。
 
-`DecodeSession` / `EncodeSession` は generic 化されており、次の2系統を使えます。
-
-- 動的選択: `DecodeSession::new(Backend, DecoderConfig)` / `EncodeSession::new(Backend, EncoderConfig)`
-- 静的選択: `DecodeSession::<IntelDecoderAdapter>::new_static(config)` のように型で backend 固定
+`DecodeSession` / `EncodeSession` は static generic 運用を前提にし、
+`DecodeSession::<IntelDecoderAdapter>::new(config)` のように型で backend を固定して利用します。
 
 `video-hw-backend-*` は backend 実装crateです。`video-hw` は feature 有効化時にこれら（nvidia/intel/vulkan/vt）を内部で読み込みます。
-直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new_static(...)` を利用できます。
+直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new(...)` を利用できます。
 
 ### 2.1 NVIDIA backend の前提（重要）
 
@@ -109,8 +107,7 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 ## 3. Decode API
 
-- `DecodeSession::new(Backend, DecoderConfig)`
-- `DecodeSession::<ConcreteDecoder>::new_static(DecoderConfig)`
+- `DecodeSession::<ConcreteDecoder>::new(DecoderConfig)`
 - `DecodeSession::from_decoder(DecodeOutputMode, concrete_decoder)`
 - `submit(BitstreamInput)`
 - `try_reap()`
@@ -145,8 +142,7 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 
 ## 4. Encode API
 
-- `EncodeSession::new(Backend, EncoderConfig)`
-- `EncodeSession::<ConcreteEncoder>::new_static(EncoderConfig)`
+- `EncodeSession::<ConcreteEncoder>::new(EncoderConfig)`
 - `EncodeSession::from_encoder(BackendKind, concrete_encoder)`
 - `submit(EncodeFrame)`
 - `try_reap()`
@@ -154,7 +150,7 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 - `flush()`
 - `query_capability(Codec)`
 - `request_session_switch(SessionSwitchRequest)`
-- `request_session_switch_strict(SessionSwitchRequest)`（`SessionSwitchingBackendEncoder` 実装backendのみ）
+- `request_session_switch_strict(SessionSwitchRequest)`（`SessionSwitchingEncoderBackend` 実装backendのみ）
 
 ### 4.1 Encode 入力（重要）
 

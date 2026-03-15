@@ -443,10 +443,10 @@ fn ensure_vk_codec_supported(codec: Codec, operation: &str) -> Result<(), Backen
 }
 
 fn hevc_decode_blocker_message() -> String {
-    let base = "Vulkan backend currently supports only H264 for decode; HEVC direct support is blocked because vk-video 0.2.1 has no HEVC decode API (ash-level implementation required)";
+    let base = "Vulkan HEVC decode initialization failed";
     match probe_hevc_decode_prerequisites() {
         HevcDecodePrerequisiteProbe::Ready => format!(
-            "{base}; this machine exposes HEVC decode prerequisites, so the remaining work is wiring an ash-level decode session/DPB pipeline"
+            "{base}; runtime prerequisites are present, but HEVC session bootstrap/decode submit failed"
         ),
         HevcDecodePrerequisiteProbe::MissingExtensions { missing } => {
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
@@ -967,12 +967,8 @@ mod tests {
         match err {
             BackendError::UnsupportedConfig(message) => {
                 assert!(
-                    message.contains("only H264"),
-                    "expected H264-only limitation in message: {message}"
-                );
-                assert!(
-                    message.contains("ash-level"),
-                    "expected ash-level implementation hint in message: {message}"
+                    message.contains("Vulkan HEVC decode initialization failed"),
+                    "expected HEVC decode initialization message: {message}"
                 );
             }
             other => panic!("unexpected HEVC check error: {other:?}"),
@@ -990,7 +986,7 @@ mod tests {
     #[test]
     fn hevc_decode_blocker_message_with_bitstream_appends_parameter_set_status() {
         let message = hevc_decode_blocker_message_with_bitstream(&[0_u8, 1, 2, 3]);
-        assert!(message.contains("supports only H264 for decode"));
+        assert!(message.contains("Vulkan HEVC decode initialization failed"));
         assert!(message.contains("parameter-set extraction failed"));
     }
 

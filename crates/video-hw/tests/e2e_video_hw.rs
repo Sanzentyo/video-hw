@@ -97,6 +97,16 @@ use video_hw::{
     )
 ))]
 use video_hw::{Dimensions, EncodeFrame, EncodeSession, RawFrameBuffer};
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::{IntelDecoderAdapter, IntelEncoderAdapter};
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::{NvDecoderAdapter, NvEncoderAdapter};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -105,6 +115,13 @@ use video_hw::{Dimensions, EncodeFrame, EncodeSession, RawFrameBuffer};
     )
 ))]
 use video_hw::{SessionSwitchMode, SessionSwitchRequest};
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::{VtDecoderAdapter, VtEncoderAdapter};
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::{VulkanDecoderAdapter, VulkanEncoderAdapter};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -196,33 +213,94 @@ fn decode_count(
     chunk_bytes: usize,
     require_hardware: bool,
 ) -> Result<usize, BackendError> {
-    let mut decoder = DecodeSession::new(
-        backend,
-        DecoderConfig {
-            codec,
-            fps: 30,
-            require_hardware,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
-
     let path = sample_path(file_name);
     let data = fs::read(&path).expect("sample bitstream should exist");
+    let config = DecoderConfig {
+        codec,
+        fps: 30,
+        require_hardware,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    };
 
-    let mut total = 0usize;
-    for chunk in data.chunks(chunk_bytes) {
-        decoder.submit(BitstreamInput::AnnexBChunk {
-            chunk: chunk.to_vec(),
-            pts_90k: None,
-        })?;
-        while decoder.try_reap()?.is_some() {
-            total += 1;
+    match backend {
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Nvidia => {
+            let mut decoder = DecodeSession::<NvDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            Ok(total)
         }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Intel => {
+            let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            Ok(total)
+        }
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Vulkan => {
+            let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            Ok(total)
+        }
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        Backend::VideoToolbox => {
+            let mut decoder = DecodeSession::<VtDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            Ok(total)
+        }
+        Backend::Auto => Err(BackendError::UnsupportedConfig(
+            "Backend::Auto is not available in static-only e2e path".to_string(),
+        )),
     }
-
-    total += decoder.flush()?.len();
-    Ok(total)
 }
 
 #[cfg(any(
@@ -243,34 +321,98 @@ fn decode_total_and_summary(
     chunk_bytes: usize,
     require_hardware: bool,
 ) -> Result<(usize, usize), BackendError> {
-    let mut decoder = DecodeSession::new(
-        backend,
-        DecoderConfig {
-            codec,
-            fps: 30,
-            require_hardware,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
-
     let path = sample_path(file_name);
     let data = fs::read(&path).expect("sample bitstream should exist");
+    let config = DecoderConfig {
+        codec,
+        fps: 30,
+        require_hardware,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    };
 
-    let mut total = 0usize;
-    for chunk in data.chunks(chunk_bytes.max(1)) {
-        decoder.submit(BitstreamInput::AnnexBChunk {
-            chunk: chunk.to_vec(),
-            pts_90k: None,
-        })?;
-        while decoder.try_reap()?.is_some() {
-            total += 1;
+    match backend {
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Nvidia => {
+            let mut decoder = DecodeSession::<NvDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            let summary = decoder.summary();
+            Ok((total, summary.decoded_frames))
         }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Intel => {
+            let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            let summary = decoder.summary();
+            Ok((total, summary.decoded_frames))
+        }
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Backend::Vulkan => {
+            let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            let summary = decoder.summary();
+            Ok((total, summary.decoded_frames))
+        }
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        Backend::VideoToolbox => {
+            let mut decoder = DecodeSession::<VtDecoderAdapter>::new(config);
+            let mut total = 0usize;
+            for chunk in data.chunks(chunk_bytes.max(1)) {
+                decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                })?;
+                while decoder.try_reap()?.is_some() {
+                    total += 1;
+                }
+            }
+            total += decoder.flush()?.len();
+            let summary = decoder.summary();
+            Ok((total, summary.decoded_frames))
+        }
+        Backend::Auto => Err(BackendError::UnsupportedConfig(
+            "Backend::Auto is not available in static-only e2e path".to_string(),
+        )),
     }
-
-    total += decoder.flush()?.len();
-    let summary = decoder.summary();
-    Ok((total, summary.decoded_frames))
 }
 
 #[cfg(all(
@@ -488,16 +630,13 @@ fn e2e_vulkan_decode_hevc_smoke() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_decode_metadata_includes_pts_and_decode_flags() {
-    let mut decoder = DecodeSession::new(
-        Backend::VideoToolbox,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: false,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: false,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
     let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
 
     let mut first = None;
@@ -542,16 +681,13 @@ fn e2e_vt_decode_metadata_includes_pts_and_decode_flags() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_decode_flush_without_input_is_empty() {
-    let mut decoder = DecodeSession::new(
-        Backend::VideoToolbox,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: false,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: false,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
 
     let flushed = decoder.flush().expect("flush should succeed");
     assert!(flushed.is_empty());
@@ -564,16 +700,13 @@ fn e2e_decode_flush_without_input_is_empty() {
 ))]
 #[test]
 fn e2e_nv_decode_flush_without_input_is_empty() {
-    let mut decoder = DecodeSession::new(
-        Backend::Nvidia,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: true,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<NvDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: true,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
 
     match decoder.flush() {
         Ok(flushed) => {
@@ -590,10 +723,8 @@ fn e2e_nv_decode_flush_without_input_is_empty() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_generates_packets() {
-    let mut encoder = EncodeSession::new(
-        Backend::VideoToolbox,
-        EncoderConfig::new(Codec::H264, 30, false),
-    );
+    let mut encoder =
+        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
 
     for i in 0..30 {
         encoder
@@ -614,10 +745,8 @@ fn e2e_encode_h264_generates_packets() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_rejects_invalid_argb_payload() {
-    let mut encoder = EncodeSession::new(
-        Backend::VideoToolbox,
-        EncoderConfig::new(Codec::H264, 30, false),
-    );
+    let mut encoder =
+        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
     let bad_frame = EncodeFrame {
         dims: dims_640_360(),
         pts_90k: Some(Timestamp90k(0)),
@@ -635,10 +764,8 @@ fn e2e_encode_h264_rejects_invalid_argb_payload() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_packets_are_pts_monotonic() {
-    let mut encoder = EncodeSession::new(
-        Backend::VideoToolbox,
-        EncoderConfig::new(Codec::H264, 30, false),
-    );
+    let mut encoder =
+        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
 
     for i in 0..30 {
         let mut frame = make_argb_frame(i as i64);
@@ -667,7 +794,7 @@ fn e2e_encode_h264_packets_are_pts_monotonic() {
 #[test]
 fn e2e_nv_encode_h264_packets_are_pts_monotonic() {
     let mut encoder =
-        EncodeSession::new(Backend::Nvidia, EncoderConfig::new(Codec::H264, 30, true));
+        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
 
     for i in 0..30 {
         let mut frame = make_argb_frame(i as i64);
@@ -708,7 +835,7 @@ fn e2e_nv_encode_h264_packets_are_pts_monotonic() {
 #[test]
 fn e2e_vulkan_encode_h264_smoke() {
     let mut encoder =
-        EncodeSession::new(Backend::Vulkan, EncoderConfig::new(Codec::H264, 30, true));
+        EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
 
     for i in 0..30 {
         if let Err(err) = encoder.submit(make_argb_frame(i as i64)) {
@@ -736,7 +863,7 @@ fn e2e_vulkan_encode_h264_smoke() {
 #[test]
 fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
     let mut encoder =
-        EncodeSession::new(Backend::Nvidia, EncoderConfig::new(Codec::H264, 30, true));
+        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
     let bad_frame = EncodeFrame {
         dims: dims_640_360(),
         pts_90k: Some(Timestamp90k(0)),
@@ -761,20 +888,92 @@ fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
     any(target_os = "linux", target_os = "windows")
 ))]
 #[test]
+fn e2e_intel_encode_h264_packets_are_pts_monotonic() {
+    let _guard = intel_test_guard();
+    let mut encoder =
+        EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+
+    for i in 0..30 {
+        let mut frame = make_argb_frame(i as i64);
+        frame.force_keyframe = i == 10;
+        if let Err(err) = encoder.submit(frame) {
+            if intel_runtime_unsupported(&err) {
+                eprintln!("skip: Intel hardware encode unavailable: {err}");
+                return;
+            }
+            panic!("unexpected Intel hardware encode submit error: {err:?}");
+        }
+    }
+
+    match encoder.flush() {
+        Ok(packets) => {
+            assert!(!packets.is_empty());
+            let pts_list: Vec<i64> = packets
+                .iter()
+                .filter_map(|p| p.pts_90k.map(|v| v.0))
+                .collect();
+            assert!(!pts_list.is_empty(), "encoded packets must include pts");
+            assert!(
+                pts_list.windows(2).all(|w| w[0] <= w[1]),
+                "packet pts must be monotonic non-decreasing: {pts_list:?}"
+            );
+        }
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel hardware encode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Intel hardware encode flush error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_intel_encode_h264_rejects_invalid_argb_payload() {
+    let _guard = intel_test_guard();
+    let mut encoder =
+        EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let bad_frame = EncodeFrame {
+        dims: dims_640_360(),
+        pts_90k: None,
+        buffer: RawFrameBuffer::Argb8888(vec![0_u8; 16]),
+        force_keyframe: false,
+    };
+
+    if let Err(err) = encoder.submit(bad_frame) {
+        if intel_runtime_unsupported(&err) {
+            eprintln!("skip: Intel hardware encode unavailable: {err}");
+            return;
+        }
+        panic!("unexpected Intel hardware encode submit error: {err:?}");
+    }
+
+    match encoder.flush() {
+        Err(BackendError::InvalidInput(_)) => {}
+        Err(err) if intel_runtime_unsupported(&err) => {
+            eprintln!("skip: Intel hardware encode unavailable: {err}");
+        }
+        other => panic!("unexpected Intel invalid-payload result: {other:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
 fn e2e_intel_decode_force_software_h264() {
     let _guard = intel_test_guard();
-    let mut decoder = DecodeSession::new(
-        Backend::Intel,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: false,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
-                force_software: true,
-            }),
-        },
-    );
+    let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: false,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
+            force_software: true,
+        }),
+    });
 
     let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
@@ -824,7 +1023,7 @@ fn e2e_intel_encode_force_software_h264() {
         force_software: true,
         ..Default::default()
     });
-    let mut encoder = EncodeSession::new(Backend::Intel, config);
+    let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(config);
 
     for i in 0..30 {
         if let Err(err) = encoder.submit(make_argb_frame(i as i64)) {
@@ -852,18 +1051,15 @@ fn e2e_intel_encode_force_software_h264() {
 #[test]
 fn e2e_intel_force_software_conflicts_with_require_hardware() {
     let _guard = intel_test_guard();
-    let mut decoder = DecodeSession::new(
-        Backend::Intel,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: true,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
-                force_software: true,
-            }),
-        },
-    );
+    let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: true,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Intel(IntelDecoderOptions {
+            force_software: true,
+        }),
+    });
     decoder
         .submit(BitstreamInput::AnnexBChunk {
             chunk: vec![0, 0, 0, 1, 0x09, 0x10],
@@ -880,7 +1076,7 @@ fn e2e_intel_force_software_conflicts_with_require_hardware() {
         force_software: true,
         ..Default::default()
     });
-    let mut encoder = EncodeSession::new(Backend::Intel, config);
+    let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(config);
     encoder
         .submit(make_argb_frame(0))
         .expect("frame submit should succeed before backend init");
@@ -893,10 +1089,8 @@ fn e2e_intel_force_software_conflicts_with_require_hardware() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_backend_accepts_explicit_session_switch_request() {
-    let mut encoder = EncodeSession::new(
-        Backend::VideoToolbox,
-        EncoderConfig::new(Codec::H264, 30, false),
-    );
+    let mut encoder =
+        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
     let result = encoder.request_session_switch(SessionSwitchRequest::VideoToolbox {
         config: VtSessionConfig {
             force_keyframe_on_activate: true,
@@ -912,16 +1106,13 @@ fn e2e_vt_backend_accepts_explicit_session_switch_request() {
 ))]
 #[test]
 fn e2e_nv_backend_decode_and_encode_work() {
-    let mut decoder = DecodeSession::new(
-        Backend::Nvidia,
-        DecoderConfig {
-            codec: Codec::H264,
-            fps: 30,
-            require_hardware: true,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<NvDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: true,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
 
     let capability = decoder
         .query_capability(Codec::H264)
@@ -958,7 +1149,7 @@ fn e2e_nv_backend_decode_and_encode_work() {
     assert_eq!(decoder.summary().decoded_frames, decoded_frames);
 
     let mut encoder =
-        EncodeSession::new(Backend::Nvidia, EncoderConfig::new(Codec::H264, 30, true));
+        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
     for i in 0..30 {
         encoder
             .submit(make_argb_frame(i as i64))
@@ -979,16 +1170,13 @@ fn e2e_nv_backend_decode_and_encode_work() {
 ))]
 #[test]
 fn e2e_nv_backend_hevc_decode_sample() {
-    let mut decoder = DecodeSession::new(
-        Backend::Nvidia,
-        DecoderConfig {
-            codec: Codec::Hevc,
-            fps: 30,
-            require_hardware: true,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<NvDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::Hevc,
+        fps: 30,
+        require_hardware: true,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
 
     let data = fs::read(sample_path("sample-10s.h265")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
@@ -1040,7 +1228,7 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
         frame_interval_p: None,
         ..Default::default()
     });
-    let mut encoder = EncodeSession::new(Backend::Nvidia, config);
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(config);
 
     for i in 0..30 {
         match encoder.submit(make_argb_frame(i as i64)) {
@@ -1069,7 +1257,7 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
 #[test]
 fn e2e_nv_backend_accepts_explicit_session_switch_request() {
     let mut encoder =
-        EncodeSession::new(Backend::Nvidia, EncoderConfig::new(Codec::H264, 30, true));
+        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
     let result = encoder.request_session_switch(SessionSwitchRequest::Nvidia {
         config: NvidiaSessionConfig {
             gop_length: Some(60),

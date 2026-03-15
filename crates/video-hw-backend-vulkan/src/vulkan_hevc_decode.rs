@@ -36,6 +36,7 @@ struct ExtensionFlags {
     has_video_queue: bool,
     has_video_decode_queue: bool,
     has_video_decode_h265: bool,
+    has_video_maintenance1: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -394,6 +395,7 @@ impl ExtensionFlags {
         self.has_video_queue |= other.has_video_queue;
         self.has_video_decode_queue |= other.has_video_decode_queue;
         self.has_video_decode_h265 |= other.has_video_decode_h265;
+        self.has_video_maintenance1 |= other.has_video_maintenance1;
     }
 }
 
@@ -574,6 +576,7 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
         }
 
         let mut probe_errors = Vec::new();
+        let mut selected_candidate: Option<(u32, CapabilityProbeComplete)> = None;
         for physical_device in physical_devices {
             let support = query_adapter_decode_support(instance, physical_device)
                 .map_err(|err| format!("failed to enumerate device extensions: {err}"))?;
@@ -655,15 +658,29 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
                 max_level_idc: decode_h265_capabilities.max_level_idc,
                 std_header_version,
             };
+            // Prefer discrete adapters and those exposing VK_KHR_video_maintenance1.
+            // On mixed Intel/NVIDIA systems this avoids picking an iGPU path that can
+            // satisfy capability probes but fails later in session execution.
+            let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+            let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+            let selection_score =
+                u32::from(is_discrete) * 2 + u32::from(support.extensions.has_video_maintenance1);
+            let candidate = CapabilityProbeComplete {
+                physical_device,
+                queue_family_index,
+                capability_snapshot,
+                decode_output_formats,
+            };
+            match &selected_candidate {
+                Some((best_score, _)) if *best_score >= selection_score => {}
+                _ => selected_candidate = Some((selection_score, candidate)),
+            }
+        }
 
+        if let Some((_, state)) = selected_candidate {
             return Ok(HevcSessionBootstrapMachine {
                 parsed: self.parsed,
-                state: CapabilityProbeComplete {
-                    physical_device,
-                    queue_family_index,
-                    capability_snapshot,
-                    decode_output_formats,
-                },
+                state,
                 _marker: PhantomData,
             });
         }
@@ -1175,13 +1192,6 @@ fn probe_hevc_decode_submit_execution(
             ));
         }
 
-        video_session_parameters = create_video_session_parameters(
-            device,
-            &video_queue_device,
-            video_session,
-            parameter_sets,
-        )?;
-
         // SAFETY: `physical_device` belongs to `instance`; we only read immutable memory properties.
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -1283,6 +1293,13 @@ fn probe_hevc_decode_submit_execution(
                 "vkBindVideoSessionMemoryKHR failed: {bind_session_memory_result:?}"
             ));
         }
+
+        video_session_parameters = create_video_session_parameters(
+            device,
+            &video_queue_device,
+            video_session,
+            parameter_sets,
+        )?;
 
         let payload = build_hevc_submit_probe_bitstream_payload(
             parameter_sets,
@@ -3738,6 +3755,7 @@ fn query_adapter_decode_support(
         flags.has_video_queue |= name == vk::KHR_VIDEO_QUEUE_NAME;
         flags.has_video_decode_queue |= name == vk::KHR_VIDEO_DECODE_QUEUE_NAME;
         flags.has_video_decode_h265 |= name == vk::KHR_VIDEO_DECODE_H265_NAME;
+        flags.has_video_maintenance1 |= name == vk::KHR_VIDEO_MAINTENANCE1_NAME;
     }
 
     // SAFETY: We only query immutable queue-family properties for a valid physical device.
@@ -3787,17 +3805,13 @@ fn create_hevc_decode_device(
         vk::KHR_VIDEO_QUEUE_NAME.as_ptr(),
         vk::KHR_VIDEO_DECODE_QUEUE_NAME.as_ptr(),
         vk::KHR_VIDEO_DECODE_H265_NAME.as_ptr(),
-        vk::KHR_VIDEO_MAINTENANCE1_NAME.as_ptr(),
     ];
     let mut synchronization2_features =
         vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
-    let mut video_maintenance1_features =
-        vk::PhysicalDeviceVideoMaintenance1FeaturesKHR::default().video_maintenance1(true);
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_create_info))
         .enabled_extension_names(&extension_names)
-        .push_next(&mut synchronization2_features)
-        .push_next(&mut video_maintenance1_features);
+        .push_next(&mut synchronization2_features);
 
     // SAFETY: All pointers referenced by `create_info` live until the call returns.
     unsafe { instance.create_device(physical_device, &create_info, None) }

@@ -2,9 +2,27 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use video_hw::BackendError;
+#[cfg(all(
+    feature = "backend-intel",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::IntelEncoderAdapter;
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::NvEncoderAdapter;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::VtEncoderAdapter;
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::VulkanEncoderAdapter;
 use video_hw::{
-    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncoderConfig,
-    NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
+    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncodedChunk,
+    EncoderConfig, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Parser, Debug)]
@@ -103,7 +121,7 @@ fn main() -> Result<()> {
 }
 
 fn run_batch_flush_probe(args: &Args, backend: Backend, codec: Codec) -> Result<ProbeSummary> {
-    let mut encoder = build_encoder(args, backend, codec);
+    let mut encoder = build_encoder(args, backend, codec)?;
     let mut summary = ProbeSummary::default();
 
     for i in 0..args.frame_count {
@@ -129,7 +147,7 @@ fn run_batch_flush_probe(args: &Args, backend: Backend, codec: Codec) -> Result<
 }
 
 fn run_per_frame_flush_probe(args: &Args, backend: Backend, codec: Codec) -> Result<ProbeSummary> {
-    let mut encoder = build_encoder(args, backend, codec);
+    let mut encoder = build_encoder(args, backend, codec)?;
     let mut summary = ProbeSummary::default();
 
     for i in 0..args.frame_count {
@@ -161,7 +179,7 @@ fn run_per_frame_flush_probe(args: &Args, backend: Backend, codec: Codec) -> Res
     Ok(summary)
 }
 
-fn reap_all(encoder: &mut EncodeSession) -> Result<Vec<video_hw::EncodedChunk>> {
+fn reap_all(encoder: &mut BackendEncoderSession) -> Result<Vec<EncodedChunk>> {
     let mut out = Vec::new();
     while let Some(packet) = encoder.try_reap()? {
         out.push(packet);
@@ -169,7 +187,7 @@ fn reap_all(encoder: &mut EncodeSession) -> Result<Vec<video_hw::EncodedChunk>> 
     Ok(out)
 }
 
-fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> EncodeSession {
+fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> Result<BackendEncoderSession> {
     let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
     if backend_is_nvidia(backend) {
         let mut options = NvidiaEncoderOptions::default();
@@ -181,7 +199,164 @@ fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> EncodeSession {
         options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
-    EncodeSession::new(backend, config)
+    BackendEncoderSession::new(backend, config)
+}
+
+enum BackendEncoderSession {
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Nvidia(Box<EncodeSession<NvEncoderAdapter>>),
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Intel(Box<EncodeSession<IntelEncoderAdapter>>),
+    #[cfg(all(
+        feature = "backend-vulkan",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Vulkan(Box<EncodeSession<VulkanEncoderAdapter>>),
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    VideoToolbox(Box<EncodeSession<VtEncoderAdapter>>),
+}
+
+impl BackendEncoderSession {
+    fn new(backend: Backend, config: EncoderConfig) -> Result<Self> {
+        let resolved = resolve_backend(backend)?;
+        let session = match resolved {
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Nvidia => {
+                Self::Nvidia(Box::new(EncodeSession::<NvEncoderAdapter>::new(config)))
+            }
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Intel => {
+                Self::Intel(Box::new(EncodeSession::<IntelEncoderAdapter>::new(config)))
+            }
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Vulkan => {
+                Self::Vulkan(Box::new(EncodeSession::<VulkanEncoderAdapter>::new(config)))
+            }
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Backend::VideoToolbox => {
+                Self::VideoToolbox(Box::new(EncodeSession::<VtEncoderAdapter>::new(config)))
+            }
+            Backend::Auto => unreachable!("auto is resolved in resolve_backend"),
+        };
+        Ok(session)
+    }
+
+    fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
+        match self {
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(session) => session.submit(frame),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(session) => session.submit(frame),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Vulkan(session) => session.submit(frame),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(session) => session.submit(frame),
+        }
+    }
+
+    fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
+        match self {
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(session) => session.try_reap(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(session) => session.try_reap(),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Vulkan(session) => session.try_reap(),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(session) => session.try_reap(),
+        }
+    }
+
+    fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
+        match self {
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Nvidia(session) => session.flush(),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Intel(session) => session.flush(),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Self::Vulkan(session) => session.flush(),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Self::VideoToolbox(session) => session.flush(),
+        }
+    }
+}
+
+fn resolve_backend(backend: Backend) -> Result<Backend> {
+    if !matches!(backend, Backend::Auto) {
+        return Ok(backend);
+    }
+    let mut selected = None;
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    if selected.is_none() {
+        selected = Some(Backend::Nvidia);
+    }
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    if selected.is_none() {
+        selected = Some(Backend::Intel);
+    }
+    #[cfg(all(
+        feature = "backend-vulkan",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    if selected.is_none() {
+        selected = Some(Backend::Vulkan);
+    }
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    if selected.is_none() {
+        selected = Some(Backend::VideoToolbox);
+    }
+
+    selected.ok_or_else(|| {
+        anyhow::anyhow!("Backend::Auto is not available for this build target/feature set")
+    })
 }
 
 fn make_frame(width: usize, height: usize, index: usize, fps: i32) -> Result<EncodeFrame> {

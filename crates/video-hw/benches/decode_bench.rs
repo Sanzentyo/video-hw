@@ -32,6 +32,13 @@ use std::time::Duration;
     )
 ))]
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+use video_hw::NvDecoderAdapter;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::VtDecoderAdapter;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -40,34 +47,53 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
     )
 ))]
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
-    DecodeSession, DecoderConfig,
+    BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode, DecodeSession,
+    DecoderConfig,
 };
 
-#[cfg(any(
-    all(target_os = "macos", feature = "backend-vt"),
-    all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
 ))]
-fn run_decode(
-    backend: Backend,
+fn run_decode_nv(
     codec: Codec,
     data: &[u8],
     chunk_bytes: usize,
     require_hardware: bool,
 ) -> Result<(), BackendError> {
-    let mut decoder = DecodeSession::new(
-        backend,
-        DecoderConfig {
-            codec,
-            fps: 30,
-            require_hardware,
-            output_mode: DecodeOutputMode::Metadata,
-            backend_options: BackendDecoderOptions::Default,
-        },
-    );
+    let mut decoder = DecodeSession::<NvDecoderAdapter>::new(DecoderConfig {
+        codec,
+        fps: 30,
+        require_hardware,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
+
+    for chunk in data.chunks(chunk_bytes.max(1)) {
+        decoder.submit(BitstreamInput::AnnexBChunk {
+            chunk: chunk.to_vec(),
+            pts_90k: None,
+        })?;
+        while decoder.try_reap()?.is_some() {}
+    }
+    let _ = decoder.flush()?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+fn run_decode_vt(
+    codec: Codec,
+    data: &[u8],
+    chunk_bytes: usize,
+    require_hardware: bool,
+) -> Result<(), BackendError> {
+    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+        codec,
+        fps: 30,
+        require_hardware,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
 
     for chunk in data.chunks(chunk_bytes.max(1)) {
         decoder.submit(BitstreamInput::AnnexBChunk {
@@ -112,15 +138,17 @@ fn decode_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(2));
 
+    type DecodeRunner = fn(Codec, &[u8], usize, bool) -> Result<(), BackendError>;
+
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    let backends = vec![("vt", Backend::VideoToolbox)];
+    let backends: Vec<(&str, DecodeRunner)> = vec![("vt", run_decode_vt)];
     #[cfg(all(
         feature = "backend-nvidia",
         any(target_os = "linux", target_os = "windows")
     ))]
-    let backends = vec![("nv", Backend::Nvidia)];
+    let backends: Vec<(&str, DecodeRunner)> = vec![("nv", run_decode_nv)];
 
-    for (backend_label, backend) in backends {
+    for (backend_label, run_decode) in backends {
         for (label, codec, data) in [("h264", Codec::H264, &h264), ("hevc", Codec::Hevc, &hevc)] {
             for require_hardware in [false, true] {
                 let mode = if require_hardware {
@@ -138,7 +166,7 @@ fn decode_benchmark(c: &mut Criterion) {
                         &chunk_bytes,
                         |b, &chunk| {
                             b.iter(|| {
-                                run_decode(backend, codec, data, chunk, require_hardware)
+                                run_decode(codec, data, chunk, require_hardware)
                                     .expect("decode should succeed in benchmark");
                             });
                         },

@@ -21,8 +21,8 @@ scripts/              # 補助スクリプト
 - デフォルト: なし（`default = []`）
 - macOS は `backend-vt` を有効化
 - Linux/Windows は `backend-nvidia` / `backend-intel` / `backend-vulkan` のいずれかを有効化
-- 実行時は `Backend` を選択（`Backend::Auto` で OS 既定を自動選択）
-- 静的ディスパッチを使う場合は `DecodeSession::<...>::new_static(...)` / `EncodeSession::<...>::new_static(...)` を利用
+- backend 実装は static generic 前提（`DecodeSession::<...>::new(...)` / `EncodeSession::<...>::new(...)`）
+- セッション API は static-only。`DecodeSession::<Adapter>::new(...)` / `EncodeSession::<Adapter>::new(...)` を利用する
 
 ### 利用側 Cargo.toml（推奨, git rev 固定）
 
@@ -47,8 +47,8 @@ video-hw-backend-vulkan = { git = "https://github.com/Sanzentyo/video-hw", rev =
 video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
 ```
 
-上記crateを直接使う場合は adapter 型を受け取り、`DecodeSession::<Adapter>::new_static(...)` /
-`EncodeSession::<Adapter>::new_static(...)` で静的ディスパッチできます。
+上記crateを直接使う場合は adapter 型を受け取り、`DecodeSession::<Adapter>::new(...)` /
+`EncodeSession::<Adapter>::new(...)` で静的ディスパッチできます。
 
 ## 現行APIの重要制約
 
@@ -226,7 +226,6 @@ cargo clippy --workspace --all-targets --features backend-vulkan
 cargo test --workspace --features backend-vulkan -- --nocapture
 cargo test --workspace --all-features -- --nocapture
 cargo bench --package video-hw --features backend-nvidia --bench decode_bench -- --noplot
-cargo run --release --package video-hw --example dispatch_compare --features "backend-nvidia backend-intel"
 cargo deny check licenses advisories bans sources
 ```
 
