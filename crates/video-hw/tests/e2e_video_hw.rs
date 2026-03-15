@@ -1,7 +1,11 @@
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -10,7 +14,11 @@ use std::{fs, path::PathBuf};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -23,7 +31,11 @@ use video_hw::BackendEncoderOptions;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -61,7 +73,11 @@ use video_hw::VtSessionConfig;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -72,7 +88,11 @@ use video_hw::{
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -88,7 +108,11 @@ use video_hw::{SessionSwitchMode, SessionSwitchRequest};
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -102,7 +126,11 @@ fn dims_640_360() -> Dimensions {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -127,7 +155,11 @@ fn make_argb_frame(index: i64) -> EncodeFrame {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -149,7 +181,11 @@ fn sample_path(name: &str) -> PathBuf {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -192,7 +228,11 @@ fn decode_count(
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -246,6 +286,14 @@ fn nv_runtime_unsupported(err: &BackendError) -> bool {
     any(target_os = "linux", target_os = "windows")
 ))]
 fn intel_runtime_unsupported(err: &BackendError) -> bool {
+    err.is_runtime_unavailable()
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn vulkan_runtime_unsupported(err: &BackendError) -> bool {
     err.is_runtime_unavailable()
 }
 
@@ -374,6 +422,66 @@ fn e2e_intel_decode_summary_matches_observed_frames(#[case] codec: Codec, #[case
             eprintln!("skip: Intel decode unavailable: {err}");
         }
         Err(err) => panic!("unexpected Intel decode error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[rstest]
+#[case(Codec::H264, "sample-10s.h264", 4096)]
+#[case(Codec::H264, "sample-10s.h264", 1024 * 1024)]
+fn e2e_vulkan_decode_expected_frames_matrix(
+    #[case] codec: Codec,
+    #[case] file_name: &str,
+    #[case] chunk_bytes: usize,
+) {
+    match decode_count(Backend::Vulkan, codec, file_name, chunk_bytes, true) {
+        Ok(decoded) => assert_eq!(decoded, 303),
+        Err(err) if vulkan_runtime_unsupported(&err) => {
+            eprintln!("skip: Vulkan decode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Vulkan decode error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[rstest]
+#[case(Codec::H264, "sample-10s.h264")]
+fn e2e_vulkan_decode_summary_matches_observed_frames(
+    #[case] codec: Codec,
+    #[case] file_name: &str,
+) {
+    match decode_total_and_summary(Backend::Vulkan, codec, file_name, 4096, true) {
+        Ok((observed, summary_total)) => {
+            assert_eq!(observed, 303);
+            assert_eq!(summary_total, observed);
+        }
+        Err(err) if vulkan_runtime_unsupported(&err) => {
+            eprintln!("skip: Vulkan decode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Vulkan decode error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_vulkan_decode_hevc_smoke() {
+    match decode_count(Backend::Vulkan, Codec::Hevc, "sample-10s.h265", 4096, true) {
+        Ok(decoded) => {
+            assert_eq!(decoded, 303);
+        }
+        Err(err) if vulkan_runtime_unsupported(&err) => {
+            eprintln!("skip: Vulkan HEVC decode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Vulkan HEVC decode error: {err:?}"),
     }
 }
 
@@ -590,6 +698,34 @@ fn e2e_nv_encode_h264_packets_are_pts_monotonic() {
             eprintln!("skip: CUDA/NVENC unavailable: {err}");
         }
         Err(err) => panic!("unexpected NV encode flush error: {err:?}"),
+    }
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_vulkan_encode_h264_smoke() {
+    let mut encoder =
+        EncodeSession::new(Backend::Vulkan, EncoderConfig::new(Codec::H264, 30, true));
+
+    for i in 0..30 {
+        if let Err(err) = encoder.submit(make_argb_frame(i as i64)) {
+            if vulkan_runtime_unsupported(&err) {
+                eprintln!("skip: Vulkan encode unavailable: {err}");
+                return;
+            }
+            panic!("unexpected Vulkan encode submit error: {err:?}");
+        }
+    }
+
+    match encoder.flush() {
+        Ok(packets) => assert!(!packets.is_empty()),
+        Err(err) if vulkan_runtime_unsupported(&err) => {
+            eprintln!("skip: Vulkan encode unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected Vulkan encode flush error: {err:?}"),
     }
 }
 

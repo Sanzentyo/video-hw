@@ -5,7 +5,7 @@
 ## 1. 導入
 
 - macOS: `backend-vt`
-- Linux/Windows: `backend-nvidia` or `backend-intel`
+- Linux/Windows: `backend-nvidia` / `backend-intel` / `backend-vulkan`
 - `default = []`
 
 ```toml
@@ -13,7 +13,7 @@
 video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-vt"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] } # or ["backend-intel"]
+video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] } # or ["backend-intel"] / ["backend-vulkan"]
 ```
 
 ## 2. Backend 選択
@@ -22,6 +22,7 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 - `Backend::VideoToolbox`（macOS + `backend-vt`）
 - `Backend::Nvidia`（Linux/Windows + `backend-nvidia`）
 - `Backend::Intel`（Linux/Windows + `backend-intel`）
+- `Backend::Vulkan`（Linux/Windows + `backend-vulkan`）
 
 `Backend::Auto` は OS 既定 backend を選択します。
 
@@ -59,6 +60,25 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 - 計測揺れが大きい環境では `--settle-ms 300` 前後を併用すると parity 判定が安定しやすい
 - `build.rs` で oneVPL を自動取得/自動ビルドする方式は採用しない（依存 `onevpl-sys` の `build.rs` が先に実行されるため）
 - oneVPL導入後は再起動が必要な場合がある（インストーラログに reboot 要求が出た場合）
+
+### 2.3 Vulkan backend の前提（重要）
+
+- `backend-vulkan` は `vk-video` + `ash` を通して Vulkan Video API を Rust から直接利用する
+- 現行実装は H.264 の decode/encode が主経路。HEVC decode は ash-level submit execution probe（GPU 実行確認）と Annex-B access-unit 数推定を組み合わせる実験段階で、`DecodeOutputMode::Metadata` では access-unit 推定数ぶんの metadata frame、非 metadata（`Nv12` / `Rgb24`）では access-unit 単位の NV12 readback を ARGB へ変換した frame を返す（フルストリーム HEVC decode/encode は `UnsupportedConfig`）
+- `require_hardware=true` では Vulkan 実行を必須とする
+- `require_hardware=false` でも direct Vulkan backend に software fallback はない（`allow_software_fallback` は現時点では実質未対応）
+- Vulkan loader/driver が `VK_KHR_video_queue` + H.264 decode/encode 拡張を提供していること
+- HEVC 直対応は着手中。`vk-video 0.2.1` が H.264 API のみのため、`VK_KHR_video_decode_h265` / `VK_KHR_video_encode_h265` を使う ash レベル実装が必要
+- unsafe 呼び出しは `vulkan_hevc_decode` モジュールへ閉じ込め、上位の `video-hw` API は safe な probe 結果だけを受け取る責務分割にしている
+- HEVC decode probe は拡張列挙だけでなく `VIDEO_DECODE_KHR` queue family と最小 logical-device 初期化まで確認し、失敗理由を診断メッセージへ反映する
+- HEVC Annex-B の VPS/SPS/PPS 抽出と SPS 解像度解析は `scuffle-h265` で実装済みで、decode 未実装時の診断メッセージに抽出結果を付与する
+- bitstream 付き decode パスでは HEVC profile の capability / output-format query に加えて、報告された output format 候補を順に試しながら `vkCreateVideoSessionKHR` / `vkCreateVideoSessionParametersKHR` の作成 probe まで実行し、SPS 解像度がデバイス許容範囲外なら診断メッセージで明示する
+- `vkCreateVideoSessionParametersKHR` probe では抽出済み VPS/SPS/PPS を `StdVideoH265*` 構造体へ変換して `VideoDecodeH265SessionParametersAddInfoKHR` に渡す（ID・解像度・DPB・短期/長期参照セットの基本項目を反映）
+- 現在は PPS の `pps_scaling_list_data_present_flag=1` および `pps_extension_present_flag=1` を未対応として明示エラー化しているため、該当ストリームでは診断メッセージに unsupported 理由が出る
+- 上記 probe 成功時には decode submit/reap 実装の次段用として DPB slot / reference slot の計画骨組み（decode submit skeleton）を生成し、先頭 VCL slice header（NAL type / PPS id / POC LSB）解析結果と合わせて blocker message に `decode_submit_skeleton=...` を追記する
+- submit 実行可否の前段確認として、`vkGetVideoSessionMemoryRequirementsKHR` / `vkBindVideoSessionMemoryKHR` / decode source buffer 準備 / `vkCmdBeginVideoCodingKHR`→`vkCmdDecodeVideoKHR`→`vkCmdEndVideoCodingKHR` の録画・submit・fence wait に加えて decode 出力 image の `vkCmdCopyImageToBuffer` readback と `vkMapMemory` 回収確認まで含む probe を実施し、blocker message に `decode_submit_execution=...` を追記する
+- 実験的 DPB 経路は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB`（`off`/`auto`/`on`）で制御する。`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` の残留検出時に自動で無効化され、`decode_submit_execution=ready(...)` では `experimental_dpb_mode` / `experimental_dpb_status`（判定理由）と `readback_bytes` / `readback_planes` / `readback_sample_stride` / `readback_sample_count`（readback handoff 状態）を確認できる
+- 非 metadata の HEVC 出力は submit probe の access-unit 上限を stream 長へ拡張して full coverage を要求する。`submitted_access_units` が不足した場合は `UnsupportedConfig` を返す。残課題は DPB/reference-slot を有効化した広範囲ストリームでの安定化
 
 #### Intel backend トラブルシュート（Windows）
 
@@ -137,6 +157,7 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 - VT + HEVC: `EncodedLayout::Hvcc`
 - NV: `EncodedLayout::AnnexB`
 - Intel: `EncodedLayout::AnnexB`
+- Vulkan: `EncodedLayout::AnnexB`
 
 ## 5. submit / reap / flush の意味
 
@@ -166,6 +187,8 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 cargo test -- --nocapture
 cargo test --features backend-nvidia -- --nocapture
 cargo check --all-targets --features backend-nvidia
+cargo test --features backend-vulkan -- --nocapture
+cargo check --all-targets --features backend-vulkan
 ```
 
 ## 8. 関連

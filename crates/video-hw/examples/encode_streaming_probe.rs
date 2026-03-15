@@ -224,7 +224,11 @@ fn parse_backend(raw: &str) -> Result<Backend> {
         #[cfg(any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                any(feature = "backend-nvidia", feature = "backend-intel"),
+                any(
+                    feature = "backend-nvidia",
+                    feature = "backend-intel",
+                    feature = "backend-vulkan"
+                ),
                 any(target_os = "linux", target_os = "windows")
             )
         ))]
@@ -241,6 +245,11 @@ fn parse_backend(raw: &str) -> Result<Backend> {
             any(target_os = "linux", target_os = "windows")
         ))]
         "intel" | "qsv" => Ok(Backend::Intel),
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        "vulkan" | "vk" => Ok(Backend::Vulkan),
         other => anyhow::bail!("unsupported backend: {other}"),
     }
 }

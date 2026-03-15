@@ -172,7 +172,11 @@ pub struct Frame {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            any(feature = "backend-nvidia", feature = "backend-intel"),
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -182,7 +186,11 @@ pub struct Frame {
         any(
             all(target_os = "macos", feature = "backend-vt"),
             all(
-                any(feature = "backend-nvidia", feature = "backend-intel"),
+                any(
+                    feature = "backend-nvidia",
+                    feature = "backend-intel",
+                    feature = "backend-vulkan"
+                ),
                 any(target_os = "linux", target_os = "windows")
             )
         )
@@ -191,7 +199,11 @@ pub struct Frame {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            any(feature = "backend-nvidia", feature = "backend-intel"),
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
             any(target_os = "linux", target_os = "windows")
         )
     ))]
@@ -266,6 +278,7 @@ pub enum BackendDecoderOptions {
     Default,
     Nvidia(NvidiaDecoderOptions),
     Intel(IntelDecoderOptions),
+    Vulkan(VulkanDecoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -274,6 +287,7 @@ pub enum BackendEncoderOptions {
     Default,
     Nvidia(NvidiaEncoderOptions),
     Intel(IntelEncoderOptions),
+    Vulkan(VulkanEncoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -284,6 +298,11 @@ pub struct NvidiaDecoderOptions {
 #[derive(Debug, Clone, Default)]
 pub struct IntelDecoderOptions {
     pub force_software: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VulkanDecoderOptions {
+    pub allow_software_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +321,11 @@ pub struct IntelEncoderOptions {
     pub target_kbps: Option<u16>,
     pub gop_length: Option<u16>,
     pub force_software: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VulkanEncoderOptions {
+    pub allow_software_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,7 +442,11 @@ impl Display for DecodeSummary {
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 ))]
@@ -433,7 +461,11 @@ pub struct EncodedPacket {
 #[cfg(not(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
-        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
         any(target_os = "linux", target_os = "windows")
     )
 )))]
@@ -549,7 +581,11 @@ pub trait VideoEncoder {
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
-            any(feature = "backend-nvidia", feature = "backend-intel"),
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
             any(target_os = "linux", target_os = "windows")
         )
     ))]

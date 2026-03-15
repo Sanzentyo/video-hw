@@ -9,6 +9,7 @@ default = []
 backend-vt = []
 backend-nvidia = []
 backend-intel = []
+backend-vulkan = []
 unstable-raw-inputs = []
 
 [dependencies]

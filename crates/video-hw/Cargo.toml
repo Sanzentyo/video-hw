@@ -26,6 +26,12 @@ backend-intel = [
   "dep:tokio",
   "dep:rayon",
 ]
+backend-vulkan = [
+  "video-hw-core/backend-vulkan",
+  "dep:vk-video",
+  "dep:ash",
+  "dep:scuffle-h265",
+]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core" }
@@ -50,6 +56,9 @@ cudarc = { version = "0.19.2", default-features = false, features = ["driver", "
 nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk", rev = "d2d0fec631365106d26adfe462f3ce15b043b879", version = "0.4.0", default-features = false, optional = true }
 onevpl = { git = "https://github.com/Sanzentyo/onevpl-rs", rev = "15ca8897ae7b410b7e639ea0222568b76905cfa2", default-features = false, optional = true }
 tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-thread"], optional = true }
+vk-video = { version = "0.2.1", optional = true }
+ash = { version = "0.38.0", optional = true }
+scuffle-h265 = { version = "0.2.2", optional = true }
 
 [[bench]]
 name = "decode_bench"

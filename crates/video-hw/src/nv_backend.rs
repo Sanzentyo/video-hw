@@ -154,9 +154,9 @@ impl NvDecoderAdapter {
                 .report_metrics
                 .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
                 .unwrap_or(false),
-            BackendDecoderOptions::Default | BackendDecoderOptions::Intel(_) => {
-                env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false)
-            }
+            BackendDecoderOptions::Default
+            | BackendDecoderOptions::Intel(_)
+            | BackendDecoderOptions::Vulkan(_) => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
         };
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
@@ -386,9 +386,9 @@ impl NvEncoderAdapter {
     ) -> Self {
         let options = match backend_options {
             BackendEncoderOptions::Nvidia(options) => options,
-            BackendEncoderOptions::Default | BackendEncoderOptions::Intel(_) => {
-                crate::NvidiaEncoderOptions::default()
-            }
+            BackendEncoderOptions::Default
+            | BackendEncoderOptions::Intel(_)
+            | BackendEncoderOptions::Vulkan(_) => crate::NvidiaEncoderOptions::default(),
         };
         let max_in_flight_outputs = options.max_in_flight_outputs.clamp(1, 64);
         let gop_length = options.gop_length;
