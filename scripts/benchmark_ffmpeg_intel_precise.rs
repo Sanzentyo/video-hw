@@ -144,7 +144,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     verify: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     equal_raw_input: bool,
 
     #[arg(long, value_enum, default_value_t = RawInputPixFmt::Argb)]

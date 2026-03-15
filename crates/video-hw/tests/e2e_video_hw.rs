@@ -82,8 +82,8 @@ use video_hw::VtSessionConfig;
     )
 ))]
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
-    DecodeSession, DecoderConfig,
+    Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput, Codec,
+    DecodeOutputMode, DecodeSession, DecoderConfig,
 };
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -223,12 +223,13 @@ fn decode_count(
         backend_options: BackendDecoderOptions::Default,
     };
 
-    match backend {
+    let resolved_backend = backend.resolve_decoder(&config)?;
+    match resolved_backend {
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Nvidia => {
+        BackendKind::Nvidia => {
             let mut decoder = DecodeSession::<NvDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -247,7 +248,7 @@ fn decode_count(
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Intel => {
+        BackendKind::Intel => {
             let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -266,7 +267,7 @@ fn decode_count(
             feature = "backend-vulkan",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Vulkan => {
+        BackendKind::Vulkan => {
             let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -282,7 +283,7 @@ fn decode_count(
             Ok(total)
         }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        Backend::VideoToolbox => {
+        BackendKind::VideoToolbox => {
             let mut decoder = DecodeSession::<VtDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -297,9 +298,6 @@ fn decode_count(
             total += decoder.flush()?.len();
             Ok(total)
         }
-        Backend::Auto => Err(BackendError::UnsupportedConfig(
-            "Backend::Auto is not available in static-only e2e path".to_string(),
-        )),
     }
 }
 
@@ -331,12 +329,13 @@ fn decode_total_and_summary(
         backend_options: BackendDecoderOptions::Default,
     };
 
-    match backend {
+    let resolved_backend = backend.resolve_decoder(&config)?;
+    match resolved_backend {
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Nvidia => {
+        BackendKind::Nvidia => {
             let mut decoder = DecodeSession::<NvDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -356,7 +355,7 @@ fn decode_total_and_summary(
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Intel => {
+        BackendKind::Intel => {
             let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -376,7 +375,7 @@ fn decode_total_and_summary(
             feature = "backend-vulkan",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Vulkan => {
+        BackendKind::Vulkan => {
             let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -393,7 +392,7 @@ fn decode_total_and_summary(
             Ok((total, summary.decoded_frames))
         }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        Backend::VideoToolbox => {
+        BackendKind::VideoToolbox => {
             let mut decoder = DecodeSession::<VtDecoderAdapter>::new(config);
             let mut total = 0usize;
             for chunk in data.chunks(chunk_bytes.max(1)) {
@@ -409,9 +408,6 @@ fn decode_total_and_summary(
             let summary = decoder.summary();
             Ok((total, summary.decoded_frames))
         }
-        Backend::Auto => Err(BackendError::UnsupportedConfig(
-            "Backend::Auto is not available in static-only e2e path".to_string(),
-        )),
     }
 }
 

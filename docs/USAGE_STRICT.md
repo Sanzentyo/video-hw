@@ -34,6 +34,9 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 `DecodeSession` / `EncodeSession` は static generic 運用を前提にし、
 `DecodeSession::<IntelDecoderAdapter>::new(config)` のように型で backend を固定して利用します。
+`Backend::Auto` は wrapper 側の backend 選択用であり、セッション生成時には concrete adapter が必要です。
+必要な場合は `Backend::resolve_decoder` / `Backend::resolve_encoder`（または `select_decoder_backend` / `select_encoder_backend`）で concrete `BackendKind` を解決してからセッションを組み立てます。
+同梱 examples（`decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe`）もこの解決 API に統一済みです。
 
 `video-hw-backend-*` は backend 実装crateです。`video-hw` は feature 有効化時にこれら（nvidia/intel/vulkan/vt）を内部で読み込みます。
 直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new(...)` を利用できます。

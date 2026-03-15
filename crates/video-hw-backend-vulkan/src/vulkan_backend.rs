@@ -83,22 +83,14 @@ impl VulkanDecoderAdapter {
                 err
             }
         })?;
-        let mut decoded = Vec::new();
-        for chunk in bitstream.chunks(4096) {
-            if chunk.is_empty() {
-                continue;
-            }
-            decoded.extend(
-                decoder
-                    .decode(EncodedInputChunk {
-                        data: chunk,
-                        pts: None,
-                    })
-                    .map_err(|err| {
-                        BackendError::UnsupportedConfig(format!("Vulkan decode failed: {err}"))
-                    })?,
-            );
-        }
+        let mut decoded = decoder
+            .decode(EncodedInputChunk {
+                data: bitstream,
+                pts: None,
+            })
+            .map_err(|err| {
+                BackendError::UnsupportedConfig(format!("Vulkan decode failed: {err}"))
+            })?;
         decoded.extend(decoder.flush().map_err(|err| {
             BackendError::UnsupportedConfig(format!("Vulkan decode flush failed: {err}"))
         })?);

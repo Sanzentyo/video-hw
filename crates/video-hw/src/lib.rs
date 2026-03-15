@@ -46,46 +46,29 @@ pub use video_hw_backend_vt::{VtDecoderAdapter, VtEncoderAdapter};
 pub use video_hw_backend_vulkan::{VulkanDecoderAdapter, VulkanEncoderAdapter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    ),
-    derive(Default)
-)]
 pub enum BackendKind {
-    #[cfg(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    VideoToolbox,
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
     ))]
-    #[cfg_attr(
-        any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        ),
-        default
-    )]
+    Nvidia,
+    #[cfg(all(
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Intel,
+    #[cfg(all(
+        feature = "backend-vulkan",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    Vulkan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    #[default]
     Auto,
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     VideoToolbox,
@@ -120,18 +103,6 @@ pub enum BackendKind {
 impl fmt::Display for BackendKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(any(
-                all(target_os = "macos", feature = "backend-vt"),
-                all(
-                    any(
-                        feature = "backend-nvidia",
-                        feature = "backend-intel",
-                        feature = "backend-vulkan"
-                    ),
-                    any(target_os = "linux", target_os = "windows")
-                )
-            ))]
-            Self::Auto => f.write_str("auto"),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Self::VideoToolbox => f.write_str("videotoolbox"),
             #[cfg(all(
@@ -170,7 +141,30 @@ impl fmt::Display for BackendKind {
     }
 }
 
-pub type Backend = BackendKind;
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Backend::Auto => f.write_str("auto"),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Backend::VideoToolbox => f.write_str("videotoolbox"),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Nvidia => f.write_str("nvidia"),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Intel => f.write_str("intel"),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Vulkan => f.write_str("vulkan"),
+        }
+    }
+}
 
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -217,6 +211,324 @@ impl BackendKind {
             BackendKind::Vulkan
         }
     }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+impl Default for BackendKind {
+    fn default() -> Self {
+        Self::os_default()
+    }
+}
+
+impl Backend {
+    pub fn resolve_decoder(self, config: &DecoderConfig) -> Result<BackendKind, BackendError> {
+        match self {
+            Backend::Auto => select_decoder_backend(config),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Backend::VideoToolbox => Ok(BackendKind::VideoToolbox),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Nvidia => Ok(BackendKind::Nvidia),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Intel => Ok(BackendKind::Intel),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Vulkan => Ok(BackendKind::Vulkan),
+        }
+    }
+
+    pub fn resolve_encoder(self, config: &EncoderConfig) -> Result<BackendKind, BackendError> {
+        match self {
+            Backend::Auto => select_encoder_backend(config),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Backend::VideoToolbox => Ok(BackendKind::VideoToolbox),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Nvidia => Ok(BackendKind::Nvidia),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Intel => Ok(BackendKind::Intel),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Backend::Vulkan => Ok(BackendKind::Vulkan),
+        }
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn preferred_backend_order() -> Vec<BackendKind> {
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    {
+        return vec![BackendKind::VideoToolbox];
+    }
+    vec![
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Nvidia,
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel,
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Vulkan,
+    ]
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn probe_decoder_capability(
+    kind: BackendKind,
+    config: &DecoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    match kind {
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        BackendKind::VideoToolbox => {
+            let probe = <vt_backend::VtDecoderAdapter as DecoderBackend>::from_decoder_config(
+                config.clone(),
+            );
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Nvidia => {
+            let probe = <NvDecoderAdapter as DecoderBackend>::from_decoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel => {
+            let probe =
+                <IntelDecoderAdapter as DecoderBackend>::from_decoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Vulkan => {
+            let probe =
+                <VulkanDecoderAdapter as DecoderBackend>::from_decoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn probe_encoder_capability(
+    kind: BackendKind,
+    config: &EncoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    match kind {
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        BackendKind::VideoToolbox => {
+            let probe = <vt_backend::VtEncoderAdapter as EncoderBackend>::from_encoder_config(
+                config.clone(),
+            );
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Nvidia => {
+            let probe = <NvEncoderAdapter as EncoderBackend>::from_encoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel => {
+            let probe =
+                <IntelEncoderAdapter as EncoderBackend>::from_encoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Vulkan => {
+            let probe =
+                <VulkanEncoderAdapter as EncoderBackend>::from_encoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+pub fn select_decoder_backend(config: &DecoderConfig) -> Result<BackendKind, BackendError> {
+    let mut diagnostics = Vec::new();
+    for candidate in preferred_backend_order() {
+        match probe_decoder_capability(candidate, config) {
+            Ok(capability) => {
+                if capability.decode_supported
+                    && (!config.require_hardware || capability.hardware_acceleration)
+                {
+                    return Ok(candidate);
+                }
+                diagnostics.push(format!(
+                    "{candidate:?}: decode_supported={}, hw_accel={}",
+                    capability.decode_supported, capability.hardware_acceleration
+                ));
+            }
+            Err(err) => diagnostics.push(format!("{candidate:?}: {err}")),
+        }
+    }
+    let detail = if diagnostics.is_empty() {
+        "no eligible backend candidate".to_string()
+    } else {
+        diagnostics.join("; ")
+    };
+    Err(BackendError::UnsupportedConfig(format!(
+        "auto backend selection failed for decode ({:?}): {}",
+        config.codec, detail
+    )))
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+pub fn select_decoder_backend(_config: &DecoderConfig) -> Result<BackendKind, BackendError> {
+    Err(BackendError::UnsupportedConfig(
+        "no backend feature enabled".to_string(),
+    ))
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+pub fn select_encoder_backend(config: &EncoderConfig) -> Result<BackendKind, BackendError> {
+    let mut diagnostics = Vec::new();
+    for candidate in preferred_backend_order() {
+        match probe_encoder_capability(candidate, config) {
+            Ok(capability) => {
+                if capability.encode_supported
+                    && (!config.require_hardware || capability.hardware_acceleration)
+                {
+                    return Ok(candidate);
+                }
+                diagnostics.push(format!(
+                    "{candidate:?}: encode_supported={}, hw_accel={}",
+                    capability.encode_supported, capability.hardware_acceleration
+                ));
+            }
+            Err(err) => diagnostics.push(format!("{candidate:?}: {err}")),
+        }
+    }
+    let detail = if diagnostics.is_empty() {
+        "no eligible backend candidate".to_string()
+    } else {
+        diagnostics.join("; ")
+    };
+    Err(BackendError::UnsupportedConfig(format!(
+        "auto backend selection failed for encode ({:?}): {}",
+        config.codec, detail
+    )))
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+pub fn select_encoder_backend(_config: &EncoderConfig) -> Result<BackendKind, BackendError> {
+    Err(BackendError::UnsupportedConfig(
+        "no backend feature enabled".to_string(),
+    ))
 }
 
 pub trait DecoderBackend: VideoDecoder {
@@ -783,55 +1095,46 @@ fn argb_to_nv12(
         .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
     let uv_size = y_size / 2;
     let mut out = vec![0_u8; y_size + uv_size];
-
-    let mut y_plane = vec![0_u8; y_size];
-    let mut u_plane = vec![0_u8; width * height];
-    let mut v_plane = vec![0_u8; width * height];
-
-    for y in 0..height {
-        for x in 0..width {
-            let src = (y * width + x) * 4;
-            let r = argb[src + 1] as f32;
-            let g = argb[src + 2] as f32;
-            let b = argb[src + 3] as f32;
-
-            let yy = (0.257 * r + 0.504 * g + 0.098 * b + 16.0).round() as i32;
-            let uu = (-0.148 * r - 0.291 * g + 0.439 * b + 128.0).round() as i32;
-            let vv = (0.439 * r - 0.368 * g - 0.071 * b + 128.0).round() as i32;
-
-            y_plane[y * pitch + x] = yy.clamp(0, 255) as u8;
-            u_plane[y * width + x] = uu.clamp(0, 255) as u8;
-            v_plane[y * width + x] = vv.clamp(0, 255) as u8;
-        }
-    }
-
-    out[..y_size].copy_from_slice(&y_plane);
     let uv_base = y_size;
     for y in (0..height).step_by(2) {
+        let uv_row = uv_base + (y / 2) * pitch;
         for x in (0..width).step_by(2) {
-            let idx = y * width + x;
-            let idx1 = idx;
-            let idx2 = idx + (x + 1 < width) as usize;
-            let idx3 = idx + if y + 1 < height { width } else { 0 };
-            let idx4 = idx3 + (x + 1 < width) as usize;
+            let mut u_acc = 0_i32;
+            let mut v_acc = 0_i32;
+            let mut sample_count = 0_i32;
 
-            let u_avg = ((u_plane[idx1] as u32
-                + u_plane[idx2] as u32
-                + u_plane[idx3] as u32
-                + u_plane[idx4] as u32)
-                / 4) as u8;
-            let v_avg = ((v_plane[idx1] as u32
-                + v_plane[idx2] as u32
-                + v_plane[idx3] as u32
-                + v_plane[idx4] as u32)
-                / 4) as u8;
+            for dy in 0..2 {
+                let py = y + dy;
+                if py >= height {
+                    continue;
+                }
+                let y_row = py * pitch;
+                for dx in 0..2 {
+                    let px = x + dx;
+                    if px >= width {
+                        continue;
+                    }
+                    let src = (py * width + px) * 4;
+                    let r = i32::from(argb[src + 1]);
+                    let g = i32::from(argb[src + 2]);
+                    let b = i32::from(argb[src + 3]);
 
-            let uv_row = (y / 2) * pitch;
-            let uv_col = x & !1;
-            let dst = uv_base + uv_row + uv_col;
-            out[dst] = u_avg;
-            if dst + 1 < out.len() {
-                out[dst + 1] = v_avg;
+                    let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                    let uu = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                    let vv = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+
+                    out[y_row + px] = yy.clamp(0, 255) as u8;
+                    u_acc += uu;
+                    v_acc += vv;
+                    sample_count += 1;
+                }
+            }
+
+            let dst = uv_row + x;
+            let denom = sample_count.max(1);
+            out[dst] = (u_acc / denom).clamp(0, 255) as u8;
+            if x + 1 < pitch {
+                out[dst + 1] = (v_acc / denom).clamp(0, 255) as u8;
             }
         }
     }
@@ -1020,10 +1323,6 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
 fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> EncodedChunk {
     let layout = match (kind, packet.codec) {
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        (BackendKind::Auto, Codec::H264) => EncodedLayout::Avcc,
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        (BackendKind::Auto, Codec::Hevc) => EncodedLayout::Hvcc,
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         (BackendKind::VideoToolbox, Codec::H264) => EncodedLayout::Avcc,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         (BackendKind::VideoToolbox, Codec::Hevc) => EncodedLayout::Hvcc,
@@ -1042,15 +1341,6 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
             any(target_os = "linux", target_os = "windows")
         ))]
         (BackendKind::Vulkan, _) => EncodedLayout::AnnexB,
-        #[cfg(all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        (BackendKind::Auto, _) => EncodedLayout::AnnexB,
     };
     EncodedChunk {
         codec: packet.codec,
@@ -1102,8 +1392,25 @@ mod tests {
         )
     ))]
     #[test]
-    fn backend_default_is_auto() {
-        assert_eq!(BackendKind::default(), BackendKind::Auto);
+    fn backend_default_resolves_to_os_default() {
+        assert_eq!(BackendKind::default(), BackendKind::os_default());
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    #[test]
+    fn backend_explicit_nvidia_resolution_returns_concrete_kind() {
+        let decode = Backend::Nvidia
+            .resolve_decoder(&DecoderConfig::new(Codec::H264, 30, false))
+            .expect("nvidia explicit backend resolution should succeed");
+        assert_eq!(decode, BackendKind::Nvidia);
+
+        let encode = Backend::Nvidia
+            .resolve_encoder(&EncoderConfig::new(Codec::H264, 30, false))
+            .expect("nvidia explicit backend resolution should succeed");
+        assert_eq!(encode, BackendKind::Nvidia);
     }
 
     #[cfg(all(

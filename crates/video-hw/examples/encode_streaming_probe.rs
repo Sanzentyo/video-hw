@@ -21,8 +21,8 @@ use video_hw::VtEncoderAdapter;
 ))]
 use video_hw::VulkanEncoderAdapter;
 use video_hw::{
-    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncodedChunk,
-    EncoderConfig, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
+    Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodeSession,
+    EncodedChunk, EncoderConfig, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Parser, Debug)]
@@ -189,7 +189,10 @@ fn reap_all(encoder: &mut BackendEncoderSession) -> Result<Vec<EncodedChunk>> {
 
 fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> Result<BackendEncoderSession> {
     let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
-    if backend_is_nvidia(backend) {
+    let resolved_backend = backend
+        .resolve_encoder(&config)
+        .context("failed to resolve encoder backend")?;
+    if backend_is_nvidia(resolved_backend) {
         let mut options = NvidiaEncoderOptions::default();
         if let Some(value) = args.nv_max_in_flight {
             options.max_in_flight_outputs = value.clamp(1, 64);
@@ -199,7 +202,7 @@ fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> Result<BackendE
         options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     }
-    BackendEncoderSession::new(backend, config)
+    BackendEncoderSession::new(resolved_backend, config)
 }
 
 enum BackendEncoderSession {
@@ -223,35 +226,33 @@ enum BackendEncoderSession {
 }
 
 impl BackendEncoderSession {
-    fn new(backend: Backend, config: EncoderConfig) -> Result<Self> {
-        let resolved = resolve_backend(backend)?;
-        let session = match resolved {
+    fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
+        let session = match backend {
             #[cfg(all(
                 feature = "backend-nvidia",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Nvidia => {
+            BackendKind::Nvidia => {
                 Self::Nvidia(Box::new(EncodeSession::<NvEncoderAdapter>::new(config)))
             }
             #[cfg(all(
                 feature = "backend-intel",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Intel => {
+            BackendKind::Intel => {
                 Self::Intel(Box::new(EncodeSession::<IntelEncoderAdapter>::new(config)))
             }
             #[cfg(all(
                 feature = "backend-vulkan",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Vulkan => {
+            BackendKind::Vulkan => {
                 Self::Vulkan(Box::new(EncodeSession::<VulkanEncoderAdapter>::new(config)))
             }
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            Backend::VideoToolbox => {
+            BackendKind::VideoToolbox => {
                 Self::VideoToolbox(Box::new(EncodeSession::<VtEncoderAdapter>::new(config)))
             }
-            Backend::Auto => unreachable!("auto is resolved in resolve_backend"),
         };
         Ok(session)
     }
@@ -321,42 +322,6 @@ impl BackendEncoderSession {
             Self::VideoToolbox(session) => session.flush(),
         }
     }
-}
-
-fn resolve_backend(backend: Backend) -> Result<Backend> {
-    if !matches!(backend, Backend::Auto) {
-        return Ok(backend);
-    }
-    let mut selected = None;
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Nvidia);
-    }
-    #[cfg(all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Intel);
-    }
-    #[cfg(all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Vulkan);
-    }
-    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    if selected.is_none() {
-        selected = Some(Backend::VideoToolbox);
-    }
-
-    selected.ok_or_else(|| {
-        anyhow::anyhow!("Backend::Auto is not available for this build target/feature set")
-    })
 }
 
 fn make_frame(width: usize, height: usize, index: usize, fps: i32) -> Result<EncodeFrame> {
@@ -433,15 +398,15 @@ fn parse_backend(raw: &str) -> Result<Backend> {
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
-fn backend_is_nvidia(backend: Backend) -> bool {
-    matches!(backend, Backend::Nvidia)
+fn backend_is_nvidia(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Nvidia)
 }
 
 #[cfg(not(all(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 )))]
-fn backend_is_nvidia(_backend: Backend) -> bool {
+fn backend_is_nvidia(_backend: BackendKind) -> bool {
     false
 }
 

@@ -813,7 +813,7 @@ async fn encode_with_onevpl(
         .ok()
         .and_then(|raw| raw.parse::<u16>().ok())
         .filter(|depth| (1..=16).contains(depth))
-        .unwrap_or(4);
+        .unwrap_or(10);
     let hw_width = onevpl::utils::hw_align_width(width_u16);
     let hw_height = onevpl::utils::hw_align_height(height_u16, input_pic_struct);
     let mut encode_params = onevpl::MfxVideoParams::default();

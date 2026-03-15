@@ -20,8 +20,8 @@ use video_hw::VtDecoderAdapter;
 ))]
 use video_hw::VulkanDecoderAdapter;
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec, DecodeOutputMode,
-    DecodeSession, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
+    Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput, Codec,
+    DecodeOutputMode, DecodeSession, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -48,50 +48,55 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let codec = parse_codec(&args.codec)?;
-    let backend = resolve_backend(parse_backend(&args.backend)?)?;
+    let backend = parse_backend(&args.backend)?;
+    let mut config = DecoderConfig {
+        codec,
+        fps: args.fps,
+        require_hardware: args.require_hardware,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    };
+    let resolved_backend = backend
+        .resolve_decoder(&config)
+        .context("failed to resolve decoder backend")?;
     let input_path = args.input.unwrap_or_else(|| default_decode_input(codec));
-    let backend_options = if backend_is_nvidia(backend) {
+    let backend_options = if backend_is_nvidia(resolved_backend) {
         BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
             report_metrics: args.nv_report_metrics,
         })
-    } else if backend_is_intel(backend) {
+    } else if backend_is_intel(resolved_backend) {
         BackendDecoderOptions::Intel(IntelDecoderOptions {
             force_software: args.intel_force_software,
         })
     } else {
         BackendDecoderOptions::Default
     };
-    let config = DecoderConfig {
-        codec,
-        fps: args.fps,
-        require_hardware: args.require_hardware,
-        output_mode: DecodeOutputMode::Metadata,
-        backend_options,
-    };
+    config.backend_options = backend_options;
 
     let data = fs::read(&input_path)
         .with_context(|| format!("failed to read input stream: {}", input_path.display()))?;
     let step = args.chunk_bytes.max(1);
 
-    let (total_decoded, summary) = match backend {
+    let (total_decoded, summary) = match resolved_backend {
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Nvidia => decode_with_nvidia(config, &data, step).context("decode failed")?,
+        BackendKind::Nvidia => decode_with_nvidia(config, &data, step).context("decode failed")?,
         #[cfg(all(
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Intel => decode_with_intel(config, &data, step).context("decode failed")?,
+        BackendKind::Intel => decode_with_intel(config, &data, step).context("decode failed")?,
         #[cfg(all(
             feature = "backend-vulkan",
             any(target_os = "linux", target_os = "windows")
         ))]
-        Backend::Vulkan => decode_with_vulkan(config, &data, step).context("decode failed")?,
+        BackendKind::Vulkan => decode_with_vulkan(config, &data, step).context("decode failed")?,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        Backend::VideoToolbox => decode_with_vt(config, &data, step).context("decode failed")?,
-        Backend::Auto => unreachable!("auto is resolved in resolve_backend"),
+        BackendKind::VideoToolbox => {
+            decode_with_vt(config, &data, step).context("decode failed")?
+        }
     };
 
     println!(
@@ -102,7 +107,7 @@ fn main() -> Result<()> {
         summary.pixel_format,
         input_path.display(),
         step,
-        args.backend
+        resolved_backend
     );
 
     Ok(())
@@ -149,42 +154,6 @@ fn parse_backend(raw: &str) -> Result<Backend> {
         "vulkan" | "vk" => Ok(Backend::Vulkan),
         other => anyhow::bail!("unsupported backend: {other}"),
     }
-}
-
-fn resolve_backend(backend: Backend) -> Result<Backend> {
-    if !matches!(backend, Backend::Auto) {
-        return Ok(backend);
-    }
-    let mut selected = None;
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Nvidia);
-    }
-    #[cfg(all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Intel);
-    }
-    #[cfg(all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Vulkan);
-    }
-    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    if selected.is_none() {
-        selected = Some(Backend::VideoToolbox);
-    }
-
-    selected.ok_or_else(|| {
-        anyhow::anyhow!("Backend::Auto is not available for this build target/feature set")
-    })
 }
 
 #[cfg(all(
@@ -324,15 +293,15 @@ fn decode_with_vt(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
-fn backend_is_nvidia(backend: Backend) -> bool {
-    matches!(backend, Backend::Nvidia)
+fn backend_is_nvidia(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Nvidia)
 }
 
 #[cfg(not(all(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 )))]
-fn backend_is_nvidia(_backend: Backend) -> bool {
+fn backend_is_nvidia(_backend: BackendKind) -> bool {
     false
 }
 
@@ -340,15 +309,15 @@ fn backend_is_nvidia(_backend: Backend) -> bool {
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
 ))]
-fn backend_is_intel(backend: Backend) -> bool {
-    matches!(backend, Backend::Intel)
+fn backend_is_intel(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Intel)
 }
 
 #[cfg(not(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
 )))]
-fn backend_is_intel(_backend: Backend) -> bool {
+fn backend_is_intel(_backend: BackendKind) -> bool {
     false
 }
 

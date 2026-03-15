@@ -109,55 +109,46 @@ pub fn argb_to_nv12(
         .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
     let uv_size = y_size / 2;
     let mut out = vec![0_u8; y_size + uv_size];
-
-    let mut y_plane = vec![0_u8; y_size];
-    let mut u_plane = vec![0_u8; width * height];
-    let mut v_plane = vec![0_u8; width * height];
-
-    for y in 0..height {
-        for x in 0..width {
-            let src = (y * width + x) * 4;
-            let r = argb[src + 1] as f32;
-            let g = argb[src + 2] as f32;
-            let b = argb[src + 3] as f32;
-
-            let yy = (0.257 * r + 0.504 * g + 0.098 * b + 16.0).round() as i32;
-            let uu = (-0.148 * r - 0.291 * g + 0.439 * b + 128.0).round() as i32;
-            let vv = (0.439 * r - 0.368 * g - 0.071 * b + 128.0).round() as i32;
-
-            y_plane[y * pitch + x] = yy.clamp(0, 255) as u8;
-            u_plane[y * width + x] = uu.clamp(0, 255) as u8;
-            v_plane[y * width + x] = vv.clamp(0, 255) as u8;
-        }
-    }
-
-    out[..y_size].copy_from_slice(&y_plane);
     let uv_base = y_size;
     for y in (0..height).step_by(2) {
+        let uv_row = uv_base + (y / 2) * pitch;
         for x in (0..width).step_by(2) {
-            let idx = y * width + x;
-            let idx1 = idx;
-            let idx2 = idx + (x + 1 < width) as usize;
-            let idx3 = idx + if y + 1 < height { width } else { 0 };
-            let idx4 = idx3 + (x + 1 < width) as usize;
+            let mut u_acc = 0_i32;
+            let mut v_acc = 0_i32;
+            let mut sample_count = 0_i32;
 
-            let u_avg = ((u_plane[idx1] as u32
-                + u_plane[idx2] as u32
-                + u_plane[idx3] as u32
-                + u_plane[idx4] as u32)
-                / 4) as u8;
-            let v_avg = ((v_plane[idx1] as u32
-                + v_plane[idx2] as u32
-                + v_plane[idx3] as u32
-                + v_plane[idx4] as u32)
-                / 4) as u8;
+            for dy in 0..2 {
+                let py = y + dy;
+                if py >= height {
+                    continue;
+                }
+                let y_row = py * pitch;
+                for dx in 0..2 {
+                    let px = x + dx;
+                    if px >= width {
+                        continue;
+                    }
+                    let src = (py * width + px) * 4;
+                    let r = i32::from(argb[src + 1]);
+                    let g = i32::from(argb[src + 2]);
+                    let b = i32::from(argb[src + 3]);
 
-            let uv_row = (y / 2) * pitch;
-            let uv_col = x & !1;
-            let dst = uv_base + uv_row + uv_col;
-            out[dst] = u_avg;
-            if dst + 1 < out.len() {
-                out[dst + 1] = v_avg;
+                    let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                    let uu = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                    let vv = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+
+                    out[y_row + px] = clip_to_u8(yy);
+                    u_acc += uu;
+                    v_acc += vv;
+                    sample_count += 1;
+                }
+            }
+
+            let dst = uv_row + x;
+            let denom = sample_count.max(1);
+            out[dst] = clip_to_u8(u_acc / denom);
+            if x + 1 < pitch {
+                out[dst + 1] = clip_to_u8(v_acc / denom);
             }
         }
     }

@@ -25,8 +25,9 @@ use video_hw::VtEncoderAdapter;
 ))]
 use video_hw::VulkanEncoderAdapter;
 use video_hw::{
-    Backend, BackendEncoderOptions, Codec, Dimensions, EncodeFrame, EncodeSession, EncodedChunk,
-    EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
+    Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodeSession,
+    EncodedChunk, EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer,
+    Timestamp90k,
 };
 
 #[derive(Parser, Debug)]
@@ -71,7 +72,10 @@ fn main() -> Result<()> {
     let backend = parse_backend(&args.backend)?;
 
     let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
-    if backend_is_nvidia(backend) {
+    let resolved_backend = backend
+        .resolve_encoder(&config)
+        .context("failed to resolve encoder backend")?;
+    if backend_is_nvidia(resolved_backend) {
         let mut options = NvidiaEncoderOptions::default();
         if let Some(value) = args.nv_max_in_flight {
             options.max_in_flight_outputs = value.clamp(1, 64);
@@ -83,13 +87,13 @@ fn main() -> Result<()> {
         options.enable_pipeline_scheduler = args.nv_enable_pipeline_scheduler;
         options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
-    } else if backend_is_intel(backend) {
+    } else if backend_is_intel(resolved_backend) {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
             force_software: args.intel_force_software,
             ..Default::default()
         });
     }
-    let mut encoder = BackendEncoderSession::new(backend, config)?;
+    let mut encoder = BackendEncoderSession::new(resolved_backend, config)?;
     let mut output_writer = if args.discard_output {
         None
     } else {
@@ -142,7 +146,7 @@ fn main() -> Result<()> {
         output_bytes,
         args.output.display(),
         args.discard_output,
-        args.backend,
+        resolved_backend,
         args.codec
     );
 
@@ -170,35 +174,33 @@ enum BackendEncoderSession {
 }
 
 impl BackendEncoderSession {
-    fn new(backend: Backend, config: EncoderConfig) -> Result<Self> {
-        let resolved = resolve_backend(backend)?;
-        let session = match resolved {
+    fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
+        let session = match backend {
             #[cfg(all(
                 feature = "backend-nvidia",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Nvidia => {
+            BackendKind::Nvidia => {
                 Self::Nvidia(Box::new(EncodeSession::<NvEncoderAdapter>::new(config)))
             }
             #[cfg(all(
                 feature = "backend-intel",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Intel => {
+            BackendKind::Intel => {
                 Self::Intel(Box::new(EncodeSession::<IntelEncoderAdapter>::new(config)))
             }
             #[cfg(all(
                 feature = "backend-vulkan",
                 any(target_os = "linux", target_os = "windows")
             ))]
-            Backend::Vulkan => {
+            BackendKind::Vulkan => {
                 Self::Vulkan(Box::new(EncodeSession::<VulkanEncoderAdapter>::new(config)))
             }
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            Backend::VideoToolbox => {
+            BackendKind::VideoToolbox => {
                 Self::VideoToolbox(Box::new(EncodeSession::<VtEncoderAdapter>::new(config)))
             }
-            Backend::Auto => unreachable!("auto is resolved in resolve_backend"),
         };
         Ok(session)
     }
@@ -270,42 +272,6 @@ impl BackendEncoderSession {
     }
 }
 
-fn resolve_backend(backend: Backend) -> Result<Backend> {
-    if !matches!(backend, Backend::Auto) {
-        return Ok(backend);
-    }
-    let mut selected = None;
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Nvidia);
-    }
-    #[cfg(all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Intel);
-    }
-    #[cfg(all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    if selected.is_none() {
-        selected = Some(Backend::Vulkan);
-    }
-    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    if selected.is_none() {
-        selected = Some(Backend::VideoToolbox);
-    }
-
-    selected.ok_or_else(|| {
-        anyhow::anyhow!("Backend::Auto is not available for this build target/feature set")
-    })
-}
-
 fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
@@ -353,15 +319,15 @@ fn parse_backend(raw: &str) -> Result<Backend> {
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 ))]
-fn backend_is_nvidia(backend: Backend) -> bool {
-    matches!(backend, Backend::Nvidia)
+fn backend_is_nvidia(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Nvidia)
 }
 
 #[cfg(not(all(
     feature = "backend-nvidia",
     any(target_os = "linux", target_os = "windows")
 )))]
-fn backend_is_nvidia(_backend: Backend) -> bool {
+fn backend_is_nvidia(_backend: BackendKind) -> bool {
     false
 }
 
@@ -369,15 +335,15 @@ fn backend_is_nvidia(_backend: Backend) -> bool {
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
 ))]
-fn backend_is_intel(backend: Backend) -> bool {
-    matches!(backend, Backend::Intel)
+fn backend_is_intel(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Intel)
 }
 
 #[cfg(not(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
 )))]
-fn backend_is_intel(_backend: Backend) -> bool {
+fn backend_is_intel(_backend: BackendKind) -> bool {
     false
 }
 
@@ -389,13 +355,19 @@ fn dims(width: u32, height: u32) -> Result<Dimensions> {
 
 fn synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
     let mut buffer = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-    for y in 0..height {
-        for x in 0..width {
-            let offset = (y * width + x) * 4;
-            buffer[offset] = 255;
-            buffer[offset + 1] = ((x + frame_index) % 256) as u8;
-            buffer[offset + 2] = ((y + frame_index * 2) % 256) as u8;
-            buffer[offset + 3] = ((frame_index * 5) % 256) as u8;
+    let frame_shift = frame_index as u8;
+    let green_shift = frame_shift.wrapping_mul(2);
+    let blue = frame_shift.wrapping_mul(5);
+
+    for (y, row) in buffer.chunks_exact_mut(width.saturating_mul(4)).enumerate() {
+        let mut red = frame_shift;
+        let green = (y as u8).wrapping_add(green_shift);
+        for px in row.chunks_exact_mut(4) {
+            px[0] = 255;
+            px[1] = red;
+            px[2] = green;
+            px[3] = blue;
+            red = red.wrapping_add(1);
         }
     }
     buffer

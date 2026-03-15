@@ -23,6 +23,8 @@ scripts/              # 補助スクリプト
 - Linux/Windows は `backend-nvidia` / `backend-intel` / `backend-vulkan` のいずれかを有効化
 - backend 実装は static generic 前提（`DecodeSession::<...>::new(...)` / `EncodeSession::<...>::new(...)`）
 - セッション API は static-only。`DecodeSession::<Adapter>::new(...)` / `EncodeSession::<Adapter>::new(...)` を利用する
+- `Backend::Auto` は wrapper/example 側で concrete adapter を選ぶ用途に限定し、セッション本体は concrete adapter で生成する
+- Auto 相当の選択は `Backend::resolve_decoder` / `Backend::resolve_encoder`（または `select_decoder_backend` / `select_encoder_backend`）で concrete `BackendKind` を取得して実行する
 
 ### 利用側 Cargo.toml（推奨, git rev 固定）
 
@@ -230,6 +232,8 @@ cargo deny check licenses advisories bans sources
 ```
 
 ## 実行例
+
+`--backend auto` は各 example 内で `Backend::resolve_decoder` / `Backend::resolve_encoder` を使って concrete `BackendKind` に解決されます。
 
 ```bash
 # decode
