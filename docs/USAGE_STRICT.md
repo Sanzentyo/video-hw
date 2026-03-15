@@ -14,6 +14,12 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] } # or ["backend-intel"] / ["backend-vulkan"]
+
+# backend 実装crate（video-hw が内部で利用。直接使う場合のみ追加）
+video-hw-backend-nvidia = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-intel = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-vulkan = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
 ```
 
 ## 2. Backend 選択
@@ -25,6 +31,14 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 - `Backend::Vulkan`（Linux/Windows + `backend-vulkan`）
 
 `Backend::Auto` は OS 既定 backend を選択します。
+
+`DecodeSession` / `EncodeSession` は generic 化されており、次の2系統を使えます。
+
+- 動的選択: `DecodeSession::new(Backend, DecoderConfig)` / `EncodeSession::new(Backend, EncoderConfig)`
+- 静的選択: `DecodeSession::<IntelDecoderAdapter>::new_static(config)` のように型で backend 固定
+
+`video-hw-backend-*` は backend 実装crateです。`video-hw` は feature 有効化時にこれら（nvidia/intel/vulkan/vt）を内部で読み込みます。
+直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new_static(...)` を利用できます。
 
 ### 2.1 NVIDIA backend の前提（重要）
 
@@ -96,6 +110,8 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 ## 3. Decode API
 
 - `DecodeSession::new(Backend, DecoderConfig)`
+- `DecodeSession::<ConcreteDecoder>::new_static(DecoderConfig)`
+- `DecodeSession::from_decoder(DecodeOutputMode, concrete_decoder)`
 - `submit(BitstreamInput)`
 - `try_reap()`
 - `reap_timeout(Duration)`
@@ -130,12 +146,15 @@ ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 ## 4. Encode API
 
 - `EncodeSession::new(Backend, EncoderConfig)`
+- `EncodeSession::<ConcreteEncoder>::new_static(EncoderConfig)`
+- `EncodeSession::from_encoder(BackendKind, concrete_encoder)`
 - `submit(EncodeFrame)`
 - `try_reap()`
 - `reap_timeout(Duration)`
 - `flush()`
 - `query_capability(Codec)`
 - `request_session_switch(SessionSwitchRequest)`
+- `request_session_switch_strict(SessionSwitchRequest)`（`SessionSwitchingBackendEncoder` 実装backendのみ）
 
 ### 4.1 Encode 入力（重要）
 

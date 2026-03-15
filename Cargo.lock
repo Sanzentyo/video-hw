@@ -2473,23 +2473,55 @@ name = "video-hw"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ash",
  "clap",
+ "criterion",
+ "rstest",
+ "thiserror 2.0.18",
+ "video-hw-backend-intel",
+ "video-hw-backend-nvidia",
+ "video-hw-backend-vt",
+ "video-hw-backend-vulkan",
+ "video-hw-core",
+]
+
+[[package]]
+name = "video-hw-backend-intel"
+version = "0.1.0"
+dependencies = [
+ "onevpl",
+ "rayon",
+ "tokio",
+ "video-hw-core",
+]
+
+[[package]]
+name = "video-hw-backend-nvidia"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "nvidia-video-codec-sdk",
+ "video-hw-core",
+]
+
+[[package]]
+name = "video-hw-backend-vt"
+version = "0.1.0"
+dependencies = [
  "core-foundation",
  "core-media",
  "core-video",
- "criterion",
- "cudarc",
  "metal",
- "nvidia-video-codec-sdk",
- "onevpl",
- "rayon",
- "rstest",
- "scuffle-h265",
- "thiserror 2.0.18",
- "tokio",
  "video-hw-core",
  "video-toolbox",
+]
+
+[[package]]
+name = "video-hw-backend-vulkan"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "scuffle-h265",
+ "video-hw-core",
  "vk-video",
 ]
 

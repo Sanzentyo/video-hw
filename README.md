@@ -7,7 +7,11 @@
 ```text
 crates/
   video-hw-core/      # 共通型・エラー・契約（公開core crate）
-  video-hw/           # facade + backend 実装（公開crate）
+  video-hw/           # facade + backend選択/セッションAPI（公開crate）
+  video-hw-backend-nvidia/ # NVIDIA backend 実装crate
+  video-hw-backend-intel/  # Intel backend 実装crate
+  video-hw-backend-vulkan/ # Vulkan backend 実装crate
+  video-hw-backend-vt/     # VideoToolbox backend 実装crate
 sample-videos/        # E2E/bench 入力素材
 scripts/              # 補助スクリプト
 ```
@@ -18,6 +22,7 @@ scripts/              # 補助スクリプト
 - macOS は `backend-vt` を有効化
 - Linux/Windows は `backend-nvidia` / `backend-intel` / `backend-vulkan` のいずれかを有効化
 - 実行時は `Backend` を選択（`Backend::Auto` で OS 既定を自動選択）
+- 静的ディスパッチを使う場合は `DecodeSession::<...>::new_static(...)` / `EncodeSession::<...>::new_static(...)` を利用
 
 ### 利用側 Cargo.toml（推奨, git rev 固定）
 
@@ -28,6 +33,22 @@ video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e895
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 video-hw = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3", default-features = false, features = ["backend-nvidia"] } # or ["backend-intel"] / ["backend-vulkan"]
 ```
+
+### 分割backend crate（video-hw が内部で読込）
+
+`video-hw` は feature 有効化時に、対応する backend 実装crate
+（`video-hw-backend-nvidia/intel/vulkan/vt`）を依存として読み込みます。  
+通常利用では `video-hw` だけ依存追加すれば十分です。
+
+```toml
+video-hw-backend-intel = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-nvidia = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-vulkan = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b88b0d9a5e8954c8443659e0b8fb1f1c7bc120b3" }
+```
+
+上記crateを直接使う場合は adapter 型を受け取り、`DecodeSession::<Adapter>::new_static(...)` /
+`EncodeSession::<Adapter>::new_static(...)` で静的ディスパッチできます。
 
 ## 現行APIの重要制約
 
@@ -205,6 +226,7 @@ cargo clippy --workspace --all-targets --features backend-vulkan
 cargo test --workspace --features backend-vulkan -- --nocapture
 cargo test --workspace --all-features -- --nocapture
 cargo bench --package video-hw --features backend-nvidia --bench decode_bench -- --noplot
+cargo run --release --package video-hw --example dispatch_compare --features "backend-nvidia backend-intel"
 cargo deny check licenses advisories bans sources
 ```
 

@@ -2,6 +2,10 @@
 members = [
   "crates/video-hw-core",
   "crates/video-hw",
+  "crates/video-hw-backend-nvidia",
+  "crates/video-hw-backend-intel",
+  "crates/video-hw-backend-vulkan",
+  "crates/video-hw-backend-vt",
 ]
 exclude = ["third_party/onevpl-rs", "third_party/onevpl-rs/intel-onevpl-sys"]
 default-members = ["crates/video-hw"]

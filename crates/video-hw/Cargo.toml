@@ -6,59 +6,49 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
+unstable-raw-inputs = [
+  "video-hw-core/unstable-raw-inputs",
+  "video-hw-backend-nvidia?/unstable-raw-inputs",
+  "video-hw-backend-intel?/unstable-raw-inputs",
+  "video-hw-backend-vulkan?/unstable-raw-inputs",
+  "video-hw-backend-vt?/unstable-raw-inputs",
+]
 backend-vt = [
   "video-hw-core/backend-vt",
-  "dep:core-foundation",
-  "dep:core-media",
-  "dep:core-video",
-  "dep:metal",
-  "dep:video-toolbox",
+  "dep:video-hw-backend-vt",
+  "video-hw-backend-vt/backend-vt",
 ]
 backend-nvidia = [
   "video-hw-core/backend-nvidia",
-  "dep:nvidia-video-codec-sdk",
-  "dep:cudarc",
+  "dep:video-hw-backend-nvidia",
+  "video-hw-backend-nvidia/backend-nvidia",
 ]
 backend-intel = [
   "video-hw-core/backend-intel",
-  "dep:onevpl",
-  "dep:tokio",
-  "dep:rayon",
+  "dep:video-hw-backend-intel",
+  "video-hw-backend-intel/backend-intel",
 ]
 backend-vulkan = [
   "video-hw-core/backend-vulkan",
-  "dep:vk-video",
-  "dep:ash",
-  "dep:scuffle-h265",
+  "dep:video-hw-backend-vulkan",
+  "video-hw-backend-vulkan/backend-vulkan",
 ]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core" }
+video-hw-backend-nvidia = { path = "../video-hw-backend-nvidia", optional = true, default-features = false }
+video-hw-backend-intel = { path = "../video-hw-backend-intel", optional = true, default-features = false }
+video-hw-backend-vulkan = { path = "../video-hw-backend-vulkan", optional = true, default-features = false }
+video-hw-backend-vt = { path = "../video-hw-backend-vt", optional = true, default-features = false }
 thiserror = "2.0.18"
 anyhow = "1.0.101"
 clap = { version = "4.5.59", features = ["derive"] }
-rayon = { version = "1.11.0", optional = true }
 
 [dev-dependencies]
 rstest = "0.26.1"
 criterion = "0.8.2"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = { version = "0.10.1", optional = true }
-core-media = { version = "0.7.1", optional = true }
-core-video = { version = "0.5.2", optional = true }
-metal = { version = "0.33.0", optional = true }
-video-toolbox = { version = "0.2.1", optional = true }
-
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.19.2", default-features = false, features = ["driver", "nvrtc", "cuda-version-from-build-system"], optional = true }
-nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk", rev = "d2d0fec631365106d26adfe462f3ce15b043b879", version = "0.4.0", default-features = false, optional = true }
-onevpl = { git = "https://github.com/Sanzentyo/onevpl-rs", rev = "15ca8897ae7b410b7e639ea0222568b76905cfa2", default-features = false, optional = true }
-tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-thread"], optional = true }
-vk-video = { version = "0.2.1", optional = true }
-ash = { version = "0.38.0", optional = true }
-scuffle-h265 = { version = "0.2.2", optional = true }
 
 [[bench]]
 name = "decode_bench"

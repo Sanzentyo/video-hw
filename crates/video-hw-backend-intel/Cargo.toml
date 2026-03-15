@@ -1,0 +1,18 @@
+[package]
+name = "video-hw-backend-intel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["backend-intel"]
+backend-intel = ["video-hw-core/backend-intel"]
+unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
+
+[dependencies]
+video-hw-core = { path = "../video-hw-core", default-features = false }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+onevpl = { git = "https://github.com/Sanzentyo/onevpl-rs", rev = "15ca8897ae7b410b7e639ea0222568b76905cfa2", default-features = false }
+tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-thread"] }
+rayon = { version = "1.11.0" }
