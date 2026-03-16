@@ -87,7 +87,7 @@ $env:NVIDIA_VIDEO_CODEC_SDK_PATH = "C:\Path\To\Video_Codec_SDK\Lib\x64"
 依存宣言は `https://github.com/Sanzentyo/onevpl-rs` を参照し、`rev` 固定で利用しています。  
 現状は H.264 / HEVC の encode/decode をサポートします。`require_hardware=false` は「HW優先で初期化し、失敗時にSWへフォールバック」です。  
 SW を明示的に使う場合は `IntelDecoderOptions::force_software=true` / `IntelEncoderOptions::force_software=true`（CLI では `--intel-force-software`）を利用してください。
-Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きできます。未指定時は H.264=CBR、HEVC=CQP を使います（CQP 値は `VIDEO_HW_INTEL_CQP`, default=24）。
+Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きできます。未指定時は H.264=CBR、HEVC=CQP を使います（CQP 値は `VIDEO_HW_INTEL_CQP`, default=24）。encode async depth は `VIDEO_HW_INTEL_ASYNC_DEPTH`（1..=16, default=10）で調整できます。HEVC hardware encode は既定で CPU 側 ARGB→NV12 変換 + `IN_SYSTEM_MEMORY` 投入を優先し、旧来の VPP 経路を強制したい場合は `VIDEO_HW_INTEL_HEVC_USE_VPP=1`、low-power を無効化したい場合は `VIDEO_HW_INTEL_HEVC_LOW_POWER=0` を設定してください。HEVC parity を厳密比較する場合は `--equal-raw-input true --raw-input-pix-fmt nv12` を推奨します（ARGB 入力は環境依存の揺らぎで ±10% を外れることがあります）。
 
 #### onevpl fork 更新時の手順
 
@@ -262,6 +262,12 @@ cargo run --features backend-vulkan --example encode_synthetic -- --backend vulk
 
 # encode raw (Intel NV12 input, unstable-raw-inputs)
 cargo run --features "backend-intel unstable-raw-inputs" --example encode_raw_argb -- --backend intel --codec hevc --fps 30 --frame-count 300 --width 640 --height 360 --input-raw output/benchmark-input-nv12-640x360-300f.raw --input-pix-fmt nv12 --require-hardware --output output/video-hw-intel-hevc-nv12.bin
+
+# camera preview + fragmented MP4 recorder (list devices)
+cargo run --example camera_record_fmp4 -- --list-devices
+# camera preview + fragmented MP4 recorder (toggle Start/Stop in GUI)
+cargo run --features backend-intel --example camera_record_fmp4 -- --backend intel --codec h264 --resolution 1280x720 --fps 30 --fragment-frames 15 --require-hardware --output-dir output/camera-fmp4
+# GUI上で codec (h264/hevc)・capture 解像度/FPS・fragment頻度(frame数)を変更し、Apply Capture/Apply Fragment で反映可能（fragment頻度に合わせてI-frameを揃える）
 
 # precise benchmark (Intel vs ffmpeg QSV)
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware true

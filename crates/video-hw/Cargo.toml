@@ -47,6 +47,9 @@ clap = { version = "4.5.59", features = ["derive"] }
 [dev-dependencies]
 rstest = "0.26.1"
 criterion = "0.8.2"
+shiguredo_video_device = "2026.1.0-canary.3"
+shiguredo_mp4 = "2026.2.0"
+eframe = "0.33.3"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 

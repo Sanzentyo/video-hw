@@ -36,7 +36,8 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 `DecodeSession::<IntelDecoderAdapter>::new(config)` のように型で backend を固定して利用します。
 `Backend::Auto` は wrapper 側の backend 選択用であり、セッション生成時には concrete adapter が必要です。
 必要な場合は `Backend::resolve_decoder` / `Backend::resolve_encoder`（または `select_decoder_backend` / `select_encoder_backend`）で concrete `BackendKind` を解決してからセッションを組み立てます。
-同梱 examples（`decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe`）もこの解決 API に統一済みです。
+同梱 examples（`decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe` / `camera_record_fmp4`）もこの解決 API に統一済みです。
+`camera_record_fmp4` は `shiguredo_video_device` + `shiguredo_mp4` 連携の GUI 例で、プレビューしながら Start/Stop 録画、codec（h264/hevc）切替、capture 解像度/FPS の再設定（Apply Capture）、fragment頻度（frame数）の再設定（Apply Fragment）を行えます。fragment頻度の適用時は I-frame も同周期に合わせて再同期されます。
 
 `video-hw-backend-*` は backend 実装crateです。`video-hw` は feature 有効化時にこれら（nvidia/intel/vulkan/vt）を内部で読み込みます。
 直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new(...)` を利用できます。
@@ -71,7 +72,8 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - decode チューニングが必要な場合は `VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH`（1..=16, default=10）で oneVPL decode async depth を調整できる
 - benchmark script からは `--intel-decode-async-depth <N>`（1..=16）で同設定を video-hw decode ケースに注入できる
 - Intel precise benchmark の既定値は `--warmup 2` / `--decode-loops 10`（揺れが大きい環境での判定安定化のため）
-- encode レート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きでき、未指定時は H.264=CBR / HEVC=CQP を使う（`CQP` の既定量子化パラメータは `VIDEO_HW_INTEL_CQP=24`）
+- encode レート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きでき、未指定時は H.264=CBR / HEVC=CQP を使う（`CQP` の既定量子化パラメータは `VIDEO_HW_INTEL_CQP=24`）。encode async depth は `VIDEO_HW_INTEL_ASYNC_DEPTH`（1..=16, default=10）で調整可能。HEVC hardware encode は既定で CPU 側 ARGB→NV12 変換 + `IN_SYSTEM_MEMORY` 投入を優先し、VPP 経路を強制する場合は `VIDEO_HW_INTEL_HEVC_USE_VPP=1`、low-power を無効化する場合は `VIDEO_HW_INTEL_HEVC_LOW_POWER=0` を使う
+- HEVC parity を狙う場合は `--equal-raw-input true --raw-input-pix-fmt nv12` を推奨（直近 report 1773584282 は decode/encode とも ±10% 内）。ARGB 入力や VPP 強制は環境依存で encode 差が残ることがある
 - 計測揺れが大きい環境では `--settle-ms 300` 前後を併用すると parity 判定が安定しやすい
 - `build.rs` で oneVPL を自動取得/自動ビルドする方式は採用しない（依存 `onevpl-sys` の `build.rs` が先に実行されるため）
 - oneVPL導入後は再起動が必要な場合がある（インストーラログに reboot 要求が出た場合）

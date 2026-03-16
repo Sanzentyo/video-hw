@@ -43,6 +43,12 @@ impl EncodeCtrl {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeSubmission {
+    sync_point: ffi::mfxSyncPoint,
+    buffer_start_size: u32,
+}
+
 #[derive(Debug)]
 pub struct Encoder<'a, 'b: 'a> {
     session: &'a Session<'b>,
@@ -80,23 +86,14 @@ impl<'a, 'b: 'a> Encoder<'a, 'b> {
         Ok(encoder)
     }
 
-    /// Takes a single input frame in either encoded or display order and generates its output bitstream. Make sure the output buffer is at least the size of params.BufferSizeInKB after you've created a new encoder.
-    ///
-    /// To mark the end of the encoding sequence, call this function with `input` set to [`None`]. Repeat the call to drain any remaining internally cached bitstreams (one frame at a time) until [`MfxStatus::MoreData`] is returned.
-    ///
-    /// Returns the number of bytes written to output.
-    ///
-    /// See https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_func_vid_encode.html#mfxvideoencode-encodeframeasync for more info.
-    pub async fn encode(
+    fn queue_encode(
         &mut self,
         controller: &mut EncodeCtrl,
-        mut input: Option<FrameSurface<'_>>,
+        mut input: Option<&mut FrameSurface<'_>>,
         output: &mut Bitstream<'_>,
-        timeout: Option<u32>,
-    ) -> Result<usize, MfxStatus> {
+    ) -> Result<EncodeSubmission, MfxStatus> {
         let lib = get_library().unwrap();
         let session = self.session.inner.0;
-        let encode_start = Instant::now();
         let buffer_start_size = output.size();
 
         if output.len() < self.suggested_buffer_size {
@@ -108,7 +105,7 @@ impl<'a, 'b: 'a> Encoder<'a, 'b> {
         }
 
         let surface = input
-            .as_mut()
+            .as_deref_mut()
             .map_or(std::ptr::null_mut(), |s| s.inner as *mut _);
 
         let mut sync_point: ffi::mfxSyncPoint = std::ptr::null_mut();
@@ -129,12 +126,53 @@ impl<'a, 'b: 'a> Encoder<'a, 'b> {
             return Err(status);
         }
 
-        task::block_in_place(|| self.session.sync(sync_point, timeout))?;
-        // dbg!(unsafe {output.inner.__bindgen_anon_1.__bindgen_anon_1.NumExtParam});
+        Ok(EncodeSubmission {
+            sync_point,
+            buffer_start_size,
+        })
+    }
+
+    pub fn encode_async(
+        &mut self,
+        controller: &mut EncodeCtrl,
+        input: Option<&mut FrameSurface<'_>>,
+        output: &mut Bitstream<'_>,
+    ) -> Result<EncodeSubmission, MfxStatus> {
+        self.queue_encode(controller, input, output)
+    }
+
+    pub fn sync_encode(
+        &self,
+        submission: EncodeSubmission,
+        output: &Bitstream<'_>,
+        timeout: Option<u32>,
+    ) -> Result<usize, MfxStatus> {
+        self.session.sync(submission.sync_point, timeout)?;
+        let bytes_written = output.size().saturating_sub(submission.buffer_start_size);
+        Ok(bytes_written as usize)
+    }
+
+    /// Takes a single input frame in either encoded or display order and generates its output bitstream. Make sure the output buffer is at least the size of params.BufferSizeInKB after you've created a new encoder.
+    ///
+    /// To mark the end of the encoding sequence, call this function with `input` set to [`None`]. Repeat the call to drain any remaining internally cached bitstreams (one frame at a time) until [`MfxStatus::MoreData`] is returned.
+    ///
+    /// Returns the number of bytes written to output.
+    ///
+    /// See https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_func_vid_encode.html#mfxvideoencode-encodeframeasync for more info.
+    pub async fn encode(
+        &mut self,
+        controller: &mut EncodeCtrl,
+        mut input: Option<FrameSurface<'_>>,
+        output: &mut Bitstream<'_>,
+        timeout: Option<u32>,
+    ) -> Result<usize, MfxStatus> {
+        let encode_start = Instant::now();
+        let submission = self.queue_encode(controller, input.as_mut(), output)?;
+        task::block_in_place(|| self.session.sync(submission.sync_point, timeout))?;
 
         trace!("Encoded frame: {:?}", encode_start.elapsed());
 
-        let bytes_written = output.size() - buffer_start_size;
+        let bytes_written = output.size().saturating_sub(submission.buffer_start_size);
         Ok(bytes_written as usize)
     }
 

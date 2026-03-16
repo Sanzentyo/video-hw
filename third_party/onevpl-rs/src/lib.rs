@@ -299,7 +299,7 @@ impl Config {
 }
 
 #[derive(Debug)]
-pub struct FrameRate(u32, u32);
+pub struct FrameRate(pub u32, pub u32);
 
 impl FrameRate {
     pub fn new(numerator: u32, denominator: u32) -> Self {

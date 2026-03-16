@@ -1,7 +1,6 @@
-#[cfg(feature = "unstable-raw-inputs")]
-use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Cursor, Read, Write};
+use std::sync::OnceLock;
 
 use onevpl::MfxStatus;
 use onevpl::bitstream::Bitstream;
@@ -11,6 +10,7 @@ use onevpl::constants::{
 };
 use onevpl::encode::EncodeCtrl;
 use onevpl::vpp::VppVideoParams;
+use rayon::prelude::*;
 use tokio::runtime::Builder as RuntimeBuilder;
 
 #[cfg(feature = "unstable-raw-inputs")]
@@ -809,6 +809,8 @@ async fn encode_with_onevpl(
         .ok()
         .and_then(|raw| parse_rate_control_method(&raw))
         .unwrap_or(default_rate_control_method);
+    let hevc_low_power =
+        codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_LOW_POWER").unwrap_or(true);
     let async_depth = std::env::var("VIDEO_HW_INTEL_ASYNC_DEPTH")
         .ok()
         .and_then(|raw| raw.parse::<u16>().ok())
@@ -840,7 +842,11 @@ async fn encode_with_onevpl(
         let raw = &mut **encode_params;
         raw.__bindgen_anon_1.mfx.FrameInfo.PicStruct = input_pic_struct.repr() as u16;
         if codec == Codec::Hevc {
-            raw.__bindgen_anon_1.mfx.LowPower = CodingOptionValue::On.repr() as u16;
+            raw.__bindgen_anon_1.mfx.LowPower = if hevc_low_power {
+                CodingOptionValue::On.repr() as u16
+            } else {
+                CodingOptionValue::Off.repr() as u16
+            };
         }
     }
     if let Some(gop_length) = options.gop_length {
@@ -850,15 +856,19 @@ async fn encode_with_onevpl(
     let mut vpp = None;
     let mut vpp_input_fourcc = None;
     let mut hw_direct_rgb4 = false;
+    let mut hevc_cpu_nv12 = false;
     if use_hardware {
         let hevc_direct_rgb4 =
             codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_DIRECT_RGB4").unwrap_or(false);
-        if use_nv12_input {
+        let hevc_force_vpp =
+            codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_USE_VPP").unwrap_or(false);
+        if use_nv12_input || (codec == Codec::Hevc && !hevc_direct_rgb4 && !hevc_force_vpp) {
             encode_params.set_fourcc(FourCC::NV12);
             encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);
             encode_params.set_height(hw_height);
             encode_params.set_width(hw_width);
             encode_params.set_crop(width_u16, height_u16);
+            hevc_cpu_nv12 = codec == Codec::Hevc && !use_nv12_input;
         } else if codec == Codec::H264 || hevc_direct_rgb4 {
             encode_params.set_fourcc(FourCC::Rgb4OrBgra);
             encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);
@@ -957,11 +967,25 @@ async fn encode_with_onevpl(
         .params()
         .map_err(|status| map_onevpl_status(status, "Encoder::params"))?;
 
-    let buffer_size = encoder_params.suggested_buffer_size().max(1024 * 128);
+    let min_bitstream_capacity = if codec == Codec::Hevc {
+        2 * 1024 * 1024
+    } else {
+        512 * 1024
+    };
+    let buffer_size = encoder_params
+        .suggested_buffer_size()
+        .max(min_bitstream_capacity);
     let mut backing_buffer = vec![0_u8; buffer_size];
     let mut bitstream = Bitstream::with_codec(&mut backing_buffer, to_onevpl_codec(codec));
+    struct PendingEncodeSubmission<'a> {
+        _surface: Option<onevpl::FrameSurface<'a>>,
+        bitstream: Bitstream<'static>,
+        submission: onevpl::encode::EncodeSubmission,
+    }
     let mut packets = Vec::new();
     let mut pending_pts = VecDeque::new();
+    let mut pending_encode_submissions = VecDeque::new();
+    let encode_queue_limit = usize::from(async_depth.max(1));
     let aligned_width = usize::from(hw_width);
     let aligned_height = usize::from(hw_height);
 
@@ -983,12 +1007,7 @@ async fn encode_with_onevpl(
                 let mut input_surface = encoder
                     .get_surface()
                     .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
-                let packed_nv12 = pack_nv12_payload(nv12, width, height)?;
-                let mut input_reader = Cursor::new(packed_nv12.as_ref());
-                input_surface
-                    .read_raw_frame(&mut input_reader, FourCC::NV12)
-                    .await
-                    .map_err(|status| map_onevpl_status(status, "FrameSurface::read_raw_frame"))?;
+                write_nv12_to_surface(&mut input_surface, nv12, width, height)?;
                 match encoder
                     .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
                     .await
@@ -1009,6 +1028,126 @@ async fn encode_with_onevpl(
                     "NV12 input payloads require unstable-raw-inputs feature".to_string(),
                 ));
             }
+        }
+        if hevc_cpu_nv12 {
+            let argb = frame.argb.as_deref().ok_or_else(|| {
+                BackendError::InvalidInput("Intel backend requires ARGB frame payload".to_string())
+            })?;
+            let mut input_surface = encoder
+                .get_surface()
+                .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
+            write_argb_to_nv12_surface(&mut input_surface, argb, width, height)?;
+            let mut queued_surface = Some(input_surface);
+            let max_queued_bitstream_capacity = 32 * 1024 * 1024;
+            let mut queued_bitstream_capacity = buffer_size;
+            let mut queued_bitstream = Some(Bitstream::with_owned_capacity(
+                queued_bitstream_capacity,
+                to_onevpl_codec(codec),
+            ));
+            let mut queued = false;
+            loop {
+                let submission_result = encoder.encode_async(
+                    &mut ctrl,
+                    queued_surface.as_mut(),
+                    queued_bitstream
+                        .as_mut()
+                        .expect("queued bitstream is initialized"),
+                );
+                match submission_result {
+                    Ok(submission) => {
+                        pending_encode_submissions.push_back(PendingEncodeSubmission {
+                            _surface: queued_surface.take(),
+                            bitstream: queued_bitstream
+                                .take()
+                                .expect("queued bitstream is initialized"),
+                            submission,
+                        });
+                        queued = true;
+                        break;
+                    }
+                    Err(MfxStatus::MoreData) => break,
+                    Err(MfxStatus::NotEnoughBuffer) => {
+                        let next_capacity = queued_bitstream_capacity
+                            .saturating_mul(2)
+                            .min(max_queued_bitstream_capacity);
+                        if next_capacity <= queued_bitstream_capacity {
+                            let context = format!(
+                                "Encoder::encode_async (hardware hevc-nv12, bitstream_capacity={} reached max {})",
+                                queued_bitstream_capacity, max_queued_bitstream_capacity
+                            );
+                            return Err(map_onevpl_status(MfxStatus::NotEnoughBuffer, &context));
+                        }
+                        queued_bitstream_capacity = next_capacity;
+                        queued_bitstream = Some(Bitstream::with_owned_capacity(
+                            queued_bitstream_capacity,
+                            to_onevpl_codec(codec),
+                        ));
+                    }
+                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
+                        if let Some(mut pending) = pending_encode_submissions.pop_front() {
+                            match encoder.sync_encode(
+                                pending.submission,
+                                &pending.bitstream,
+                                Some(0),
+                            ) {
+                                Ok(_) => {
+                                    collect_packets(
+                                        &mut pending.bitstream,
+                                        codec,
+                                        &mut pending_pts,
+                                        &mut packets,
+                                    )?;
+                                }
+                                Err(
+                                    MfxStatus::InExecution
+                                    | MfxStatus::DeviceBusy
+                                    | MfxStatus::TaskBusy,
+                                ) => {
+                                    pending_encode_submissions.push_back(pending);
+                                }
+                                Err(status) => {
+                                    return Err(map_onevpl_status(
+                                        status,
+                                        "Encoder::sync_encode (hardware hevc-nv12)",
+                                    ));
+                                }
+                            }
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(status) => {
+                        return Err(map_onevpl_status(
+                            status,
+                            "Encoder::encode_async (hardware hevc-nv12)",
+                        ));
+                    }
+                }
+            }
+            if queued
+                && pending_encode_submissions.len() >= encode_queue_limit
+                && let Some(mut pending) = pending_encode_submissions.pop_front()
+            {
+                match encoder.sync_encode(pending.submission, &pending.bitstream, Some(0)) {
+                    Ok(_) => {
+                        collect_packets(
+                            &mut pending.bitstream,
+                            codec,
+                            &mut pending_pts,
+                            &mut packets,
+                        )?;
+                    }
+                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
+                        pending_encode_submissions.push_back(pending);
+                    }
+                    Err(status) => {
+                        return Err(map_onevpl_status(
+                            status,
+                            "Encoder::sync_encode (hardware hevc-nv12)",
+                        ));
+                    }
+                }
+            }
+            continue;
         }
         let argb = frame.argb.as_deref().ok_or_else(|| {
             BackendError::InvalidInput("Intel backend requires ARGB frame payload".to_string())
@@ -1122,6 +1261,22 @@ async fn encode_with_onevpl(
         }
     }
 
+    if hevc_cpu_nv12 {
+        while let Some(mut pending) = pending_encode_submissions.pop_front() {
+            encoder
+                .sync_encode(pending.submission, &pending.bitstream, None)
+                .map_err(|status| {
+                    map_onevpl_status(status, "Encoder::sync_encode drain (hardware hevc-nv12)")
+                })?;
+            collect_packets(
+                &mut pending.bitstream,
+                codec,
+                &mut pending_pts,
+                &mut packets,
+            )?;
+        }
+    }
+
     loop {
         let mut ctrl = EncodeCtrl::new();
         match encoder.encode(&mut ctrl, None, &mut bitstream, None).await {
@@ -1163,11 +1318,12 @@ fn collect_packets(
 }
 
 #[cfg(feature = "unstable-raw-inputs")]
-fn pack_nv12_payload<'a>(
-    nv12: &'a Nv12FramePayload,
+fn write_nv12_to_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    nv12: &Nv12FramePayload,
     width: usize,
     height: usize,
-) -> Result<Cow<'a, [u8]>, BackendError> {
+) -> Result<(), BackendError> {
     if nv12.pitch < width {
         return Err(BackendError::InvalidInput(format!(
             "nv12 pitch is smaller than width: pitch={}, width={}",
@@ -1198,38 +1354,302 @@ fn pack_nv12_payload<'a>(
             nv12.data.len()
         )));
     }
+    copy_nv12_to_surface(surface, nv12.data.as_slice(), nv12.pitch, width, height)
+}
 
-    if nv12.pitch == width {
-        return Ok(Cow::Borrowed(nv12.data.as_slice()));
-    }
+#[cfg(feature = "unstable-raw-inputs")]
+fn copy_nv12_to_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    nv12: &[u8],
+    source_pitch: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), BackendError> {
+    surface
+        .map(MemoryFlag::WRITE)
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::map"))?;
+    let conversion_result = (|| {
+        let bounds = surface.bounds();
+        let pitch = usize::from(bounds.pitch);
+        if !pitch.is_multiple_of(2) {
+            return Err(BackendError::Backend(format!(
+                "unexpected NV12 surface pitch (not 2-byte aligned): {}",
+                bounds.pitch
+            )));
+        }
+        if pitch < width {
+            return Err(BackendError::Backend(format!(
+                "unexpected NV12 surface pitch (smaller than width): pitch={}, width={width}",
+                bounds.pitch
+            )));
+        }
+        if usize::from(bounds.crop_width) < width || usize::from(bounds.crop_height) < height {
+            return Err(BackendError::Backend(format!(
+                "NV12 surface crop is smaller than input: crop={}x{}, input={}x{}",
+                bounds.crop_width, bounds.crop_height, width, height
+            )));
+        }
 
-    let output_y = width
+        let y_plane = surface.y();
+        let u_plane = surface.u();
+        let v_plane = surface.v();
+        y_plane.fill(16);
+        u_plane.fill(128);
+        v_plane.fill(128);
+
+        for row in 0..height {
+            let src_start = row * source_pitch;
+            let src_end = src_start + width;
+            let dst_start = row * pitch;
+            y_plane[dst_start..(dst_start + width)].copy_from_slice(&nv12[src_start..src_end]);
+        }
+
+        let src_uv_base = source_pitch
+            .checked_mul(height)
+            .ok_or_else(|| BackendError::InvalidInput("nv12 Y size overflow".to_string()))?;
+        let dst_uv_pitch = pitch / 2;
+        let uv_width = width / 2;
+        for row in 0..(height / 2) {
+            let src_row = &nv12
+                [(src_uv_base + row * source_pitch)..(src_uv_base + row * source_pitch + width)];
+            let dst_u = &mut u_plane[(row * dst_uv_pitch)..(row * dst_uv_pitch + uv_width)];
+            let dst_v = &mut v_plane[(row * dst_uv_pitch)..(row * dst_uv_pitch + uv_width)];
+            for col in 0..uv_width {
+                let src_col = col * 2;
+                dst_u[col] = src_row[src_col];
+                dst_v[col] = src_row[src_col + 1];
+            }
+        }
+
+        Ok(())
+    })();
+
+    let unmap_result = surface
+        .unmap()
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::unmap"));
+
+    conversion_result?;
+    unmap_result
+}
+
+#[derive(Debug)]
+struct ArgbToNv12Tables {
+    y_r: [i32; 256],
+    y_g: [i32; 256],
+    y_b: [i32; 256],
+    u_r: [i32; 256],
+    u_g: [i32; 256],
+    u_b: [i32; 256],
+    v_r: [i32; 256],
+    v_g: [i32; 256],
+    v_b: [i32; 256],
+}
+
+static ARGB_TO_NV12_TABLES: OnceLock<ArgbToNv12Tables> = OnceLock::new();
+
+fn argb_to_yuv_tables() -> &'static ArgbToNv12Tables {
+    ARGB_TO_NV12_TABLES.get_or_init(|| {
+        let mut tables = ArgbToNv12Tables {
+            y_r: [0; 256],
+            y_g: [0; 256],
+            y_b: [0; 256],
+            u_r: [0; 256],
+            u_g: [0; 256],
+            u_b: [0; 256],
+            v_r: [0; 256],
+            v_g: [0; 256],
+            v_b: [0; 256],
+        };
+        for idx in 0..256 {
+            let value = idx as i32;
+            tables.y_r[idx] = 66 * value;
+            tables.y_g[idx] = 129 * value;
+            tables.y_b[idx] = 25 * value;
+            tables.u_r[idx] = -38 * value;
+            tables.u_g[idx] = -74 * value;
+            tables.u_b[idx] = 112 * value;
+            tables.v_r[idx] = 112 * value;
+            tables.v_g[idx] = -94 * value;
+            tables.v_b[idx] = -18 * value;
+        }
+        tables
+    })
+}
+
+#[inline]
+fn clip_to_u8(value: i32) -> u8 {
+    value.clamp(0, 255) as u8
+}
+
+#[inline]
+fn argb_pixel_to_nv12_yuv(tables: &ArgbToNv12Tables, r: u8, g: u8, b: u8) -> (u8, i32, i32) {
+    let r = usize::from(r);
+    let g = usize::from(g);
+    let b = usize::from(b);
+    let y = ((tables.y_r[r] + tables.y_g[g] + tables.y_b[b] + 128) >> 8) + 16;
+    let u = ((tables.u_r[r] + tables.u_g[g] + tables.u_b[b] + 128) >> 8) + 128;
+    let v = ((tables.v_r[r] + tables.v_g[g] + tables.v_b[b] + 128) >> 8) + 128;
+    (
+        clip_to_u8(y),
+        i32::from(clip_to_u8(u)),
+        i32::from(clip_to_u8(v)),
+    )
+}
+
+fn write_argb_to_nv12_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    argb: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(), BackendError> {
+    let expected = width
         .checked_mul(height)
-        .ok_or_else(|| BackendError::InvalidInput("nv12 Y size overflow".to_string()))?;
-    let output_uv = output_y
-        .checked_div(2)
-        .ok_or_else(|| BackendError::InvalidInput("nv12 UV size overflow".to_string()))?;
-    let output_total = output_y
-        .checked_add(output_uv)
-        .ok_or_else(|| BackendError::InvalidInput("nv12 packed size overflow".to_string()))?;
-    let mut packed = vec![0_u8; output_total];
-
-    for row in 0..height {
-        let src_start = row * nv12.pitch;
-        let src_end = src_start + width;
-        let dst_start = row * width;
-        packed[dst_start..(dst_start + width)].copy_from_slice(&nv12.data[src_start..src_end]);
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| BackendError::InvalidInput("argb size overflow".to_string()))?;
+    if argb.len() != expected {
+        return Err(BackendError::InvalidInput(format!(
+            "argb payload size mismatch: expected {}, got {}",
+            expected,
+            argb.len()
+        )));
     }
+    surface
+        .map(MemoryFlag::WRITE)
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::map"))?;
+    let conversion_result = (|| {
+        let bounds = surface.bounds();
+        let pitch = usize::from(bounds.pitch);
+        if !pitch.is_multiple_of(2) {
+            return Err(BackendError::Backend(format!(
+                "unexpected NV12 surface pitch (not 2-byte aligned): {}",
+                bounds.pitch
+            )));
+        }
+        if pitch < width {
+            return Err(BackendError::Backend(format!(
+                "unexpected NV12 surface pitch (smaller than width): pitch={}, width={width}",
+                bounds.pitch
+            )));
+        }
+        if usize::from(bounds.crop_width) < width || usize::from(bounds.crop_height) < height {
+            return Err(BackendError::Backend(format!(
+                "NV12 surface crop is smaller than input: crop={}x{}, input={}x{}",
+                bounds.crop_width, bounds.crop_height, width, height
+            )));
+        }
 
-    let src_uv_base = expected_y;
-    let dst_uv_base = output_y;
-    for row in 0..(height / 2) {
-        let src_start = src_uv_base + row * nv12.pitch;
-        let src_end = src_start + width;
-        let dst_start = dst_uv_base + row * width;
-        packed[dst_start..(dst_start + width)].copy_from_slice(&nv12.data[src_start..src_end]);
-    }
-    Ok(Cow::Owned(packed))
+        let y_plane = surface.y();
+        let u_plane = surface.u();
+        let v_plane = surface.v();
+        y_plane.fill(16);
+        u_plane.fill(128);
+        v_plane.fill(128);
+
+        let tables = argb_to_yuv_tables();
+        let uv_pitch = pitch / 2;
+        if width.is_multiple_of(2) && height.is_multiple_of(2) {
+            let y_rows_len = pitch * height;
+            let uv_rows_len = uv_pitch * (height / 2);
+            y_plane[..y_rows_len]
+                .par_chunks_mut(pitch * 2)
+                .zip(u_plane[..uv_rows_len].par_chunks_mut(uv_pitch))
+                .zip(v_plane[..uv_rows_len].par_chunks_mut(uv_pitch))
+                .enumerate()
+                .for_each(|(row_pair, ((y_rows, u_row), v_row))| {
+                    let (y_row0, y_row1) = y_rows.split_at_mut(pitch);
+                    let src_row0 = row_pair * width * 8;
+                    let src_row1 = src_row0 + width * 4;
+                    for x in (0..width).step_by(2) {
+                        let src00 = src_row0 + x * 4;
+                        let src01 = src00 + 4;
+                        let src10 = src_row1 + x * 4;
+                        let src11 = src10 + 4;
+
+                        let (y00, u00, v00) = argb_pixel_to_nv12_yuv(
+                            tables,
+                            argb[src00 + 1],
+                            argb[src00 + 2],
+                            argb[src00 + 3],
+                        );
+                        let (y01, u01, v01) = argb_pixel_to_nv12_yuv(
+                            tables,
+                            argb[src01 + 1],
+                            argb[src01 + 2],
+                            argb[src01 + 3],
+                        );
+                        let (y10, u10, v10) = argb_pixel_to_nv12_yuv(
+                            tables,
+                            argb[src10 + 1],
+                            argb[src10 + 2],
+                            argb[src10 + 3],
+                        );
+                        let (y11, u11, v11) = argb_pixel_to_nv12_yuv(
+                            tables,
+                            argb[src11 + 1],
+                            argb[src11 + 2],
+                            argb[src11 + 3],
+                        );
+
+                        y_row0[x] = y00;
+                        y_row0[x + 1] = y01;
+                        y_row1[x] = y10;
+                        y_row1[x + 1] = y11;
+
+                        let uv_col = x / 2;
+                        u_row[uv_col] = clip_to_u8((u00 + u01 + u10 + u11) / 4);
+                        v_row[uv_col] = clip_to_u8((v00 + v01 + v10 + v11) / 4);
+                    }
+                });
+        } else {
+            for y in (0..height).step_by(2) {
+                let uv_row = (y / 2) * uv_pitch;
+                for x in (0..width).step_by(2) {
+                    let mut u_acc = 0_i32;
+                    let mut v_acc = 0_i32;
+                    let mut sample_count = 0_i32;
+
+                    for dy in 0..2 {
+                        let py = y + dy;
+                        if py >= height {
+                            continue;
+                        }
+                        let y_row = py * pitch;
+                        for dx in 0..2 {
+                            let px = x + dx;
+                            if px >= width {
+                                continue;
+                            }
+                            let src = (py * width + px) * 4;
+                            let (yy, uu, vv) = argb_pixel_to_nv12_yuv(
+                                tables,
+                                argb[src + 1],
+                                argb[src + 2],
+                                argb[src + 3],
+                            );
+                            y_plane[y_row + px] = yy;
+                            u_acc += uu;
+                            v_acc += vv;
+                            sample_count += 1;
+                        }
+                    }
+
+                    let uv_col = x / 2;
+                    let denom = sample_count.max(1);
+                    u_plane[uv_row + uv_col] = clip_to_u8(u_acc / denom);
+                    v_plane[uv_row + uv_col] = clip_to_u8(v_acc / denom);
+                }
+            }
+        }
+
+        Ok(())
+    })();
+
+    let unmap_result = surface
+        .unmap()
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::unmap"));
+
+    conversion_result?;
+    unmap_result
 }
 
 fn argb_to_i420(
@@ -1541,7 +1961,7 @@ fn map_onevpl_status(status: MfxStatus, context: &str) -> BackendError {
 
 #[cfg(test)]
 mod tests {
-    use super::{i420_to_argb, nv12_to_argb};
+    use super::{argb_pixel_to_nv12_yuv, argb_to_yuv_tables, i420_to_argb, nv12_to_argb};
 
     #[test]
     fn nv12_to_argb_neutral_chroma_produces_grayscale() {
@@ -1581,6 +2001,27 @@ mod tests {
         for px in pixels {
             assert_eq!(px[1], px[2]);
             assert_eq!(px[2], px[3]);
+        }
+    }
+
+    #[test]
+    fn argb_pixel_to_nv12_yuv_matches_reference_formula() {
+        let tables = argb_to_yuv_tables();
+        for r in (0_u8..=255).step_by(17) {
+            for g in (0_u8..=255).step_by(17) {
+                for b in (0_u8..=255).step_by(17) {
+                    let (y, u, v) = argb_pixel_to_nv12_yuv(tables, r, g, b);
+                    let rr = i32::from(r);
+                    let gg = i32::from(g);
+                    let bb = i32::from(b);
+                    let expected_y = ((66 * rr + 129 * gg + 25 * bb + 128) >> 8) + 16;
+                    let expected_u = ((-38 * rr - 74 * gg + 112 * bb + 128) >> 8) + 128;
+                    let expected_v = ((112 * rr - 94 * gg - 18 * bb + 128) >> 8) + 128;
+                    assert_eq!(y, expected_y.clamp(0, 255) as u8);
+                    assert_eq!(u, expected_u.clamp(0, 255));
+                    assert_eq!(v, expected_v.clamp(0, 255));
+                }
+            }
         }
     }
 }

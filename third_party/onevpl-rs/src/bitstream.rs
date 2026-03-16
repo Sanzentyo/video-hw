@@ -1,18 +1,38 @@
 use std::{
     io::{self, Write},
     mem,
-    sync::Arc,
 };
 
 use ffi::mfxBitstream;
 use intel_onevpl_sys as ffi;
-use std::sync::Mutex;
 
 use crate::constants::{BitstreamDataFlags, Codec, FrameType, PicStruct};
 
 #[derive(Debug)]
+enum BitstreamStorage<'a> {
+    Borrowed(&'a mut [u8]),
+    Owned(Vec<u8>),
+}
+
+impl BitstreamStorage<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(buffer) => buffer.len(),
+            Self::Owned(buffer) => buffer.len(),
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Borrowed(buffer) => buffer,
+            Self::Owned(buffer) => buffer,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Bitstream<'a> {
-    buffer: Arc<Mutex<&'a mut [u8]>>,
+    storage: BitstreamStorage<'a>,
     pub(crate) inner: mfxBitstream,
 }
 unsafe impl Send for Bitstream<'_> {}
@@ -21,12 +41,21 @@ impl<'a> Bitstream<'a> {
     /// Creates a data source/destination for encoded/decoded/processed data
     #[tracing::instrument]
     pub fn with_codec(buffer: &'a mut [u8], codec: Codec) -> Self {
+        Self::new_with_storage(BitstreamStorage::Borrowed(buffer), codec)
+    }
+
+    fn new_with_storage(storage: BitstreamStorage<'a>, codec: Codec) -> Self {
+        let mut storage = storage;
         let mut bitstream: mfxBitstream = unsafe { mem::zeroed() };
-        bitstream.Data = buffer.as_mut_ptr();
-        bitstream.MaxLength = buffer.len() as u32;
+        let (data_ptr, max_len) = match &mut storage {
+            BitstreamStorage::Borrowed(buffer) => (buffer.as_mut_ptr(), buffer.len()),
+            BitstreamStorage::Owned(buffer) => (buffer.as_mut_ptr(), buffer.len()),
+        };
+        bitstream.Data = data_ptr;
+        bitstream.MaxLength = max_len as u32;
         bitstream.__bindgen_anon_1.__bindgen_anon_1.CodecId = codec as u32;
         Self {
-            buffer: Arc::new(Mutex::new(buffer)),
+            storage,
             inner: bitstream,
         }
     }
@@ -40,7 +69,7 @@ impl<'a> Bitstream<'a> {
 
     /// The size of the backing buffer
     pub fn len(&self) -> usize {
-        self.buffer.lock().unwrap().len()
+        self.storage.len()
     }
 
     /// The amount of data currently in the bitstream
@@ -53,7 +82,8 @@ impl<'a> Bitstream<'a> {
         self.inner.DataOffset
     }
 
-    /// Set the amount of data currently in the bitstream. Useful for when you add a buffer to a bitstream that already contains data.
+    /// Set the amount of data currently in the bitstream. Useful for when you
+    /// add a buffer to a bitstream that already contains data.
     pub fn set_size(&mut self, size: usize) {
         assert!(size <= self.inner.MaxLength as usize);
         self.inner.DataLength = size as u32;
@@ -81,29 +111,38 @@ impl<'a> Bitstream<'a> {
     }
 }
 
+impl Bitstream<'static> {
+    /// Creates a bitstream backed by an owned buffer.
+    pub fn with_owned_capacity(capacity: usize, codec: Codec) -> Self {
+        Self::new_with_storage(BitstreamStorage::Owned(vec![0_u8; capacity]), codec)
+    }
+}
+
 impl io::Write for Bitstream<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let data_offset = self.inner.DataOffset as usize;
         let data_len = self.inner.DataLength as usize;
-        let mut buffer = self.buffer.lock().unwrap();
+        let buffer_len = self.storage.len();
 
-        if data_len >= buffer.len() {
+        if data_len >= buffer_len {
             return Ok(0);
         }
 
-        if data_offset > 0 {
-            // Move all data after DataOffset to the beginning of Data
-            let data_end = data_offset + data_len;
-            buffer.copy_within(data_offset..data_end, 0);
-            self.inner.DataOffset = 0;
+        {
+            let buffer = self.storage.as_mut_slice();
+            if data_offset > 0 {
+                // Move all data after DataOffset to the beginning of Data
+                let data_end = data_offset + data_len;
+                buffer.copy_within(data_offset..data_end, 0);
+                self.inner.DataOffset = 0;
+            }
+
+            let free_buffer_len = buffer.len() - data_len;
+            let copy_len = usize::min(free_buffer_len, buf.len());
+            buffer[data_len..data_len + copy_len].copy_from_slice(&buf[..copy_len]);
+            self.inner.DataLength += copy_len as u32;
+            Ok(copy_len)
         }
-
-        let free_buffer_len = buffer.len() - data_len;
-        let copy_len = usize::min(free_buffer_len, buf.len());
-        buffer[data_len..data_len + copy_len].copy_from_slice(&buf[..copy_len]);
-        self.inner.DataLength += copy_len as u32;
-
-        Ok(copy_len)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -113,9 +152,13 @@ impl io::Write for Bitstream<'_> {
 
 impl io::Read for Bitstream<'_> {
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
-        let mut buffer = self.buffer.lock().unwrap();
-        let bytes = buf.write(&buffer[..self.inner.DataLength as usize])?;
-        buffer.copy_within(bytes..self.inner.DataLength as usize, 0);
+        let data_len = self.inner.DataLength as usize;
+        let bytes = {
+            let buffer = self.storage.as_mut_slice();
+            let bytes = buf.write(&buffer[..data_len])?;
+            buffer.copy_within(bytes..data_len, 0);
+            bytes
+        };
         self.inner.DataLength -= bytes as u32;
 
         Ok(bytes)
@@ -156,5 +199,12 @@ mod tests {
         }
 
         assert_eq!(bytes_read, copy_input_data.len());
+    }
+
+    #[test]
+    fn owned_bitstream_has_requested_capacity() {
+        let bitstream = Bitstream::with_owned_capacity(4096, crate::constants::Codec::HEVC);
+        assert_eq!(bitstream.len(), 4096);
+        assert_eq!(bitstream.size(), 0);
     }
 }
