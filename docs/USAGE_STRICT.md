@@ -37,7 +37,7 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 `Backend::Auto` は wrapper 側の backend 選択用であり、セッション生成時には concrete adapter が必要です。
 必要な場合は `Backend::resolve_decoder` / `Backend::resolve_encoder`（または `select_decoder_backend` / `select_encoder_backend`）で concrete `BackendKind` を解決してからセッションを組み立てます。
 同梱 examples（`decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe` / `camera_record_fmp4`）もこの解決 API に統一済みです。
-`camera_record_fmp4` は `shiguredo_video_device` + `shiguredo_mp4` 連携の GUI 例で、プレビューしながら Start/Stop 録画、codec（h264/hevc）切替、capture 解像度/FPS の再設定（Apply Capture）、fragment頻度（frame数）の再設定（Apply Fragment）を行えます。fragment頻度の適用時は I-frame も同周期に合わせて再同期されます。
+`camera_record_fmp4` は `shiguredo_video_device` + `shiguredo_mp4` 連携の GUI 例で、プレビューしながら Start/Stop 録画、codec（h264/hevc）切替、capture 解像度/FPS の再設定（Apply Capture）、fragment頻度（frame数）の再設定（Apply Fragment）を行えます。fragment頻度の適用時は I-frame も同周期に合わせて再同期されます。録画中 status には packets/segments/bytes の逐次進捗が表示され、Stop時は `flush_packets`（停止時に追加回収されたpacket数）で逐次取り出し状況を確認できます。各fragment書き込み時は flush + sync_data を実行して逐次保存を強化しています。
 
 `video-hw-backend-*` は backend 実装crateです。`video-hw` は feature 有効化時にこれら（nvidia/intel/vulkan/vt）を内部で読み込みます。
 直接 `video-hw-backend-*` を使う場合も adapter 型は同じで、`DecodeSession::<Adapter>::new(...)` を利用できます。

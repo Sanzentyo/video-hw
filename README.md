@@ -268,6 +268,8 @@ cargo run --example camera_record_fmp4 -- --list-devices
 # camera preview + fragmented MP4 recorder (toggle Start/Stop in GUI)
 cargo run --features backend-intel --example camera_record_fmp4 -- --backend intel --codec h264 --resolution 1280x720 --fps 30 --fragment-frames 15 --require-hardware --output-dir output/camera-fmp4
 # GUI上で codec (h264/hevc)・capture 解像度/FPS・fragment頻度(frame数)を変更し、Apply Capture/Apply Fragment で反映可能（fragment頻度に合わせてI-frameを揃える）
+# 録画中 status の packets/segments/bytes は逐次更新。Stop時は flush_packets を表示（小さいほど録画中に取り出せている）
+# 各 fragment 書き込み時に flush + sync_data を実行して逐次保存を強化
 
 # precise benchmark (Intel vs ffmpeg QSV)
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware true
