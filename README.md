@@ -267,9 +267,15 @@ cargo run --features "backend-intel unstable-raw-inputs" --example encode_raw_ar
 cargo run --example camera_record_fmp4 -- --list-devices
 # camera preview + fragmented MP4 recorder (toggle Start/Stop in GUI)
 cargo run --features backend-intel --example camera_record_fmp4 -- --backend intel --codec h264 --resolution 1280x720 --fps 30 --fragment-frames 15 --require-hardware --output-dir output/camera-fmp4
-# GUI上で codec (h264/hevc)・capture 解像度/FPS・fragment頻度(frame数)を変更し、Apply Capture/Apply Fragment で反映可能（fragment頻度に合わせてI-frameを揃える）
+# camera preview + fragmented MP4 recorder (non-interactive timed run)
+cargo run --features backend-intel --example camera_record_fmp4 -- --backend intel --codec h264 --resolution 1280x720 --fps 30 --fragment-frames 15 --require-hardware --auto-start-recording --duration 3 --output-dir output/camera-fmp4
+# GUI は左ペイン（折りたたみ可）に操作系、右ペインに自動スケーリング表示のプレビューを配置
+# 左ペインの Start/Stop + status は固定表示、その他の設定群は独立スクロール領域に配置
+# backend 選択（auto/nvidia/intel/vulkan）と backend availability の確認、codec (h264/hevc)・capture 解像度/FPS・fragment頻度(frame数)を変更し、Apply Capture/Apply Fragment で反映可能（fragment頻度に合わせてI-frameを揃える）
 # 録画中 status の packets/segments/bytes は逐次更新。Stop時は flush_packets を表示（小さいほど録画中に取り出せている）
+# 録画フレーム投入は recorder worker thread へ非同期キューイングし、GUI 側には pending queue 件数を表示
 # 各 fragment 書き込み時に flush + sync_data を実行して逐次保存を強化
+# unsupported な backend+codec 組み合わせは auto-start preflight で即時エラー終了（zero-byte MP4を残さない）
 
 # precise benchmark (Intel vs ffmpeg QSV)
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9 --require-hardware true

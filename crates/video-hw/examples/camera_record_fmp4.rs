@@ -9,7 +9,7 @@ use std::{
     borrow::Cow,
     collections::VecDeque,
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::{BufWriter, Seek, SeekFrom, Write},
     num::NonZeroU32,
     path::PathBuf,
     sync::mpsc,
@@ -21,11 +21,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use eframe::egui::{self, ColorImage};
 use shiguredo_mp4::{
-    TrackKind, Uint,
+    Decode, Encode, Mp4FileTime, TrackKind, Uint,
     boxes::{
-        Avc1Box, AvccBox, Hev1Box, HvccBox, HvccNalUintArray, SampleEntry, VisualSampleEntryFields,
+        Avc1Box, AvccBox, FtypBox, Hev1Box, HvccBox, HvccNalUintArray, MoovBox, SampleEntry,
+        VisualSampleEntryFields,
     },
-    mux::{Fmp4SegmentMuxer, Sample},
+    mux::{Fmp4SegmentMuxer, Sample, SegmentMuxerOptions},
 };
 use shiguredo_video_device::{
     PixelFormat, VideoCapture, VideoCaptureConfig, VideoDeviceList, VideoFrame, VideoFrameOwned,
@@ -66,6 +67,8 @@ struct CliArgs {
     fps: i32,
     #[arg(long)]
     duration: Option<f64>,
+    #[arg(long, default_value_t = false)]
+    auto_start_recording: bool,
     #[arg(long, default_value = "auto")]
     backend: String,
     #[arg(long, default_value = "h264")]
@@ -74,7 +77,7 @@ struct CliArgs {
     require_hardware: bool,
     #[arg(long, default_value_t = false)]
     intel_force_software: bool,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 30)]
     fragment_frames: u32,
     #[arg(long, default_value = "output\\camera-fmp4")]
     output_dir: PathBuf,
@@ -114,6 +117,7 @@ struct Args {
     width: i32,
     height: i32,
     fps: i32,
+    auto_start_recording: bool,
     fragment_frames: usize,
     duration: Option<Duration>,
     output_dir: PathBuf,
@@ -142,13 +146,194 @@ struct RecorderSummary {
     packets_seen: u64,
     flush_packets: u64,
     bytes_written: u64,
+    duration_90k: u64,
+}
+
+enum RecorderWriterCommand {
+    WriteInit(Vec<u8>),
+    WriteFragment {
+        metadata: Vec<u8>,
+        payload: Vec<u8>,
+    },
+    RewriteInit {
+        init: Vec<u8>,
+        expected_len: usize,
+    },
+    WriteMfra(Vec<u8>),
+    Finish {
+        reply_tx: mpsc::Sender<std::result::Result<u64, String>>,
+    },
+}
+
+struct RecorderFileWriter {
+    command_tx: mpsc::Sender<RecorderWriterCommand>,
+    error_rx: mpsc::Receiver<String>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl RecorderFileWriter {
+    fn spawn(output_path: PathBuf) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::channel::<RecorderWriterCommand>();
+        let (error_tx, error_rx) = mpsc::channel::<String>();
+        let thread_name = format!("camera-record-file-writer-{}", output_path.display());
+        let join_handle = thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || run_recorder_file_writer(output_path, command_rx, error_tx))
+            .context("failed to spawn recorder file writer thread")?;
+        Ok(Self {
+            command_tx,
+            error_rx,
+            join_handle: Some(join_handle),
+        })
+    }
+
+    fn send(&mut self, command: RecorderWriterCommand) -> Result<()> {
+        self.poll_error()?;
+        self.command_tx
+            .send(command)
+            .context("failed to send recorder writer command")
+    }
+
+    fn poll_error(&mut self) -> Result<()> {
+        if let Ok(message) = self.error_rx.try_recv() {
+            anyhow::bail!("recorder file writer failed: {message}");
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<u64> {
+        self.poll_error()?;
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RecorderWriterCommand::Finish { reply_tx })
+            .context("failed to send recorder writer finish command")?;
+        let bytes_written = reply_rx
+            .recv()
+            .context("failed to receive recorder writer completion")?
+            .map_err(anyhow::Error::msg)?;
+        self.join()?;
+        Ok(bytes_written)
+    }
+
+    fn join(&mut self) -> Result<()> {
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("recorder file writer thread panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+fn run_recorder_file_writer(
+    output_path: PathBuf,
+    command_rx: mpsc::Receiver<RecorderWriterCommand>,
+    error_tx: mpsc::Sender<String>,
+) {
+    let result = (|| -> Result<()> {
+        let file = File::create(&output_path)
+            .with_context(|| format!("failed to create {}", output_path.display()))?;
+        let mut writer = BufWriter::new(file);
+        let mut init_bytes_written = None::<usize>;
+        let mut bytes_written = 0_u64;
+
+        while let Ok(command) = command_rx.recv() {
+            match command {
+                RecorderWriterCommand::WriteInit(init) => {
+                    writer
+                        .write_all(&init)
+                        .context("failed to write init segment")?;
+                    init_bytes_written = Some(init.len());
+                    bytes_written = bytes_written.saturating_add(init.len() as u64);
+                }
+                RecorderWriterCommand::WriteFragment { metadata, payload } => {
+                    writer
+                        .write_all(&metadata)
+                        .context("failed to write media segment metadata")?;
+                    writer
+                        .write_all(&payload)
+                        .context("failed to write media segment payload")?;
+                    writer
+                        .flush()
+                        .context("failed to flush media fragment writer")?;
+                    writer
+                        .get_ref()
+                        .sync_data()
+                        .context("failed to sync media fragment to disk")?;
+                    bytes_written =
+                        bytes_written.saturating_add((metadata.len() + payload.len()) as u64);
+                }
+                RecorderWriterCommand::RewriteInit { init, expected_len } => {
+                    if init.len() != expected_len {
+                        anyhow::bail!(
+                            "rewrite init size mismatch (expected {}, got {})",
+                            expected_len,
+                            init.len()
+                        );
+                    }
+                    if let Some(written_len) = init_bytes_written
+                        && written_len != expected_len
+                    {
+                        anyhow::bail!(
+                            "rewrite init expected {} bytes but writer initialized with {} bytes",
+                            expected_len,
+                            written_len
+                        );
+                    }
+                    writer
+                        .flush()
+                        .context("failed to flush before init rewrite")?;
+                    writer
+                        .seek(SeekFrom::Start(0))
+                        .context("failed to seek to init segment start")?;
+                    writer
+                        .write_all(&init)
+                        .context("failed to rewrite init segment timing metadata")?;
+                    writer
+                        .seek(SeekFrom::End(0))
+                        .context("failed to seek back to output end after init rewrite")?;
+                }
+                RecorderWriterCommand::WriteMfra(mfra) => {
+                    writer
+                        .write_all(&mfra)
+                        .context("failed to write mfra box")?;
+                    bytes_written = bytes_written.saturating_add(mfra.len() as u64);
+                }
+                RecorderWriterCommand::Finish { reply_tx } => {
+                    let finish_result = (|| -> Result<u64> {
+                        writer
+                            .flush()
+                            .context("failed to flush output file during finish")?;
+                        writer
+                            .get_ref()
+                            .sync_data()
+                            .context("failed to sync output file during finish")?;
+                        Ok(bytes_written)
+                    })();
+                    let send_result =
+                        reply_tx.send(finish_result.map_err(|err| format!("{err:#}")));
+                    if let Err(err) = send_result {
+                        anyhow::bail!("failed to return recorder finish result: {err}");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        anyhow::bail!("recorder writer command channel closed before finish")
+    })();
+
+    if let Err(err) = result {
+        let _ = error_tx.send(format!("{err:#}"));
+    }
 }
 
 struct RecorderState {
     encoder: BackendEncoderSession,
     muxer: Fmp4SegmentMuxer,
-    writer: BufWriter<File>,
+    writer: RecorderFileWriter,
     output_path: PathBuf,
+    creation_timestamp: Duration,
     dims: Dimensions,
     width_u16: u16,
     height_u16: u16,
@@ -157,6 +342,7 @@ struct RecorderState {
     default_duration: u32,
     next_fallback_pts_90k: i64,
     last_written_pts_90k: Option<i64>,
+    pending_submitted_pts_90k: VecDeque<i64>,
     pending_force_keyframe: bool,
     submitted_frames: u64,
     vps: Option<Vec<u8>>,
@@ -165,11 +351,66 @@ struct RecorderState {
     sample_entry: Option<SampleEntry>,
     sample_entry_emitted: bool,
     init_written: bool,
+    init_bytes_written: Option<usize>,
+    total_duration_90k: u64,
     pending_samples: VecDeque<PendingSample>,
     fragment_frames: usize,
     segments_written: u64,
     packets_seen: u64,
     bytes_written: u64,
+}
+
+fn resolve_recording_backend_and_config(
+    settings: &RecordingSettings,
+    fps: i32,
+) -> Result<(BackendKind, EncoderConfig)> {
+    let mut config = EncoderConfig::new(settings.codec, fps, settings.require_hardware);
+    let resolved_backend = settings.backend.resolve_encoder(&config).with_context(|| {
+        format!(
+            "failed to resolve encoder backend (backend={}, codec={}, require_hardware={})",
+            settings.backend, settings.codec, settings.require_hardware
+        )
+    })?;
+    if backend_is_intel(resolved_backend) {
+        config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
+            force_software: settings.intel_force_software,
+            ..Default::default()
+        });
+    }
+    Ok((resolved_backend, config))
+}
+
+fn probe_recording_backend_path(
+    settings: &RecordingSettings,
+    width: i32,
+    height: i32,
+    fps: i32,
+) -> Result<BackendKind> {
+    let (resolved_backend, config) = resolve_recording_backend_and_config(settings, fps)?;
+    let mut session = BackendEncoderSession::new(resolved_backend, config).with_context(|| {
+        format!("failed to initialize encoder session (backend={resolved_backend})")
+    })?;
+    let probe_dims = dims(
+        u32::try_from(width).context("probe width must be >= 0")?,
+        u32::try_from(height).context("probe height must be >= 0")?,
+    )?;
+    let pixel_count = usize::try_from(probe_dims.width.get())
+        .context("probe width overflow")?
+        .saturating_mul(usize::try_from(probe_dims.height.get()).context("probe height overflow")?);
+    let frame_argb = vec![0_u8; pixel_count.saturating_mul(4)];
+    session
+        .submit(EncodeFrame {
+            dims: probe_dims,
+            pts_90k: Some(Timestamp90k(0)),
+            buffer: RawFrameBuffer::Argb8888(frame_argb),
+            force_keyframe: true,
+        })
+        .context("encoder probe submit failed")?;
+    let _ = session
+        .try_reap()
+        .context("encoder probe try_reap failed")?;
+    let _ = session.flush().context("encoder probe flush failed")?;
+    Ok(resolved_backend)
 }
 
 impl RecorderState {
@@ -188,17 +429,7 @@ impl RecorderState {
         let height_u16 =
             u16::try_from(height).context("height must fit in u16 for mp4 sample entry")?;
 
-        let mut config = EncoderConfig::new(settings.codec, fps, settings.require_hardware);
-        let resolved_backend = settings
-            .backend
-            .resolve_encoder(&config)
-            .context("failed to resolve encoder backend")?;
-        if backend_is_intel(resolved_backend) {
-            config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
-                force_software: settings.intel_force_software,
-                ..Default::default()
-            });
-        }
+        let (resolved_backend, config) = resolve_recording_backend_and_config(settings, fps)?;
 
         if let Some(parent) = output_path.parent()
             && !parent.as_os_str().is_empty()
@@ -206,18 +437,21 @@ impl RecorderState {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create output dir: {}", parent.display()))?;
         }
-        let file = File::create(&output_path)
-            .with_context(|| format!("failed to create {}", output_path.display()))?;
-        let writer = BufWriter::new(file);
+        let writer = RecorderFileWriter::spawn(output_path.clone())?;
+        let creation_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
 
         let default_duration = u32::try_from((90_000 / fps.max(1)).max(1))
             .context("failed to compute default frame duration")?;
 
         Ok(Self {
             encoder: BackendEncoderSession::new(resolved_backend, config)?,
-            muxer: Fmp4SegmentMuxer::new().context("failed to create fMP4 muxer")?,
+            muxer: Fmp4SegmentMuxer::with_options(SegmentMuxerOptions { creation_timestamp })
+                .context("failed to create fMP4 muxer")?,
             writer,
             output_path,
+            creation_timestamp,
             dims,
             width_u16,
             height_u16,
@@ -226,6 +460,7 @@ impl RecorderState {
             default_duration,
             next_fallback_pts_90k: 0,
             last_written_pts_90k: None,
+            pending_submitted_pts_90k: VecDeque::new(),
             pending_force_keyframe: true,
             submitted_frames: 0,
             vps: None,
@@ -234,6 +469,8 @@ impl RecorderState {
             sample_entry: None,
             sample_entry_emitted: false,
             init_written: false,
+            init_bytes_written: None,
+            total_duration_90k: 0,
             pending_samples: VecDeque::new(),
             fragment_frames: settings.fragment_frames.max(1),
             segments_written: 0,
@@ -242,20 +479,12 @@ impl RecorderState {
         })
     }
 
-    fn submit_argb_frame(
-        &mut self,
-        frame_argb: Vec<u8>,
-        dims: Dimensions,
-        pts_90k: i64,
-    ) -> Result<()> {
-        if dims != self.dims {
-            anyhow::bail!(
-                "captured frame dimensions changed during recording: expected {}, got {}",
-                self.dims,
-                dims
-            );
-        }
+    fn submit_rgba_frame(&mut self, frame_rgba: Vec<u8>, pts_90k: i64) -> Result<()> {
+        self.submit_argb_frame(rgba_to_argb_bytes(&frame_rgba), pts_90k)
+    }
 
+    fn submit_argb_frame(&mut self, frame_argb: Vec<u8>, pts_90k: i64) -> Result<()> {
+        let dims = self.dims;
         let fragment_interval = self.fragment_frames.max(1) as u64;
         let force_keyframe =
             self.pending_force_keyframe || self.submitted_frames.is_multiple_of(fragment_interval);
@@ -267,6 +496,7 @@ impl RecorderState {
                 force_keyframe,
             })
             .context("encoder submit failed")?;
+        self.pending_submitted_pts_90k.push_back(pts_90k);
         self.pending_force_keyframe = false;
         self.submitted_frames = self.submitted_frames.saturating_add(1);
 
@@ -301,25 +531,30 @@ impl RecorderState {
         }
 
         self.flush_pending_if_ready(true)?;
+        self.rewrite_init_segment_with_final_timing()?;
 
         if self.segments_written > 0 {
             let mfra = self
                 .muxer
                 .mfra_bytes()
                 .context("failed to build mfra box")?;
-            self.writer
-                .write_all(&mfra)
-                .context("failed to write mfra box")?;
-            self.bytes_written = self.bytes_written.saturating_add(mfra.len() as u64);
+            self.writer.send(RecorderWriterCommand::WriteMfra(mfra))?;
         }
 
-        self.writer.flush().context("failed to flush output file")?;
+        self.bytes_written = match self.writer.finish() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let _ = self.writer.join();
+                return Err(err);
+            }
+        };
         Ok(RecorderSummary {
             output_path: self.output_path,
             segments_written: self.segments_written,
             packets_seen: self.packets_seen,
             flush_packets,
             bytes_written: self.bytes_written,
+            duration_90k: self.total_duration_90k,
         })
     }
 
@@ -357,14 +592,6 @@ impl RecorderState {
             );
         }
 
-        let pts_90k = chunk.pts_90k.map(|pts| pts.0).unwrap_or_else(|| {
-            let fallback = self.next_fallback_pts_90k;
-            self.next_fallback_pts_90k = self
-                .next_fallback_pts_90k
-                .saturating_add(i64::from(self.default_duration));
-            fallback
-        });
-
         let sample_data = match self.codec {
             Codec::H264 => annexb_chunk_to_avcc_sample(&chunk.data, &mut self.sps, &mut self.pps)?,
             Codec::Hevc => annexb_chunk_to_hvcc_sample(
@@ -375,6 +602,7 @@ impl RecorderState {
             )?,
         };
         if let Some(sample_data) = sample_data {
+            let pts_90k = self.resolve_sample_pts_90k(chunk.pts_90k.map(|pts| pts.0));
             self.pending_samples.push_back(PendingSample {
                 keyframe: chunk.is_keyframe,
                 pts_90k,
@@ -456,6 +684,7 @@ impl RecorderState {
                 None
             };
             let duration = self.sample_duration_for_pts(pending.pts_90k);
+            self.total_duration_90k = self.total_duration_90k.saturating_add(u64::from(duration));
             let data_offset =
                 u64::try_from(payload.len()).context("segment payload offset overflow")?;
             samples.push(Sample {
@@ -482,29 +711,20 @@ impl RecorderState {
                 .init_segment_bytes()
                 .context("failed to build init segment")?;
             self.writer
-                .write_all(&init)
-                .context("failed to write init segment")?;
+                .send(RecorderWriterCommand::WriteInit(init.clone()))?;
             self.bytes_written = self.bytes_written.saturating_add(init.len() as u64);
             self.init_written = true;
+            self.init_bytes_written = Some(init.len());
         }
 
+        let metadata_len = metadata.len();
+        let payload_len = payload.len();
         self.writer
-            .write_all(&metadata)
-            .context("failed to write media segment metadata")?;
-        self.writer
-            .write_all(&payload)
-            .context("failed to write media segment payload")?;
-        self.writer
-            .flush()
-            .context("failed to flush media fragment")?;
-        self.writer
-            .get_ref()
-            .sync_data()
-            .context("failed to sync media fragment to disk")?;
+            .send(RecorderWriterCommand::WriteFragment { metadata, payload })?;
 
         self.bytes_written = self
             .bytes_written
-            .saturating_add((metadata.len() + payload.len()) as u64);
+            .saturating_add((metadata_len + payload_len) as u64);
         self.segments_written = self.segments_written.saturating_add(1);
         self.sample_entry_emitted = true;
         Ok(())
@@ -525,6 +745,227 @@ impl RecorderState {
         self.last_written_pts_90k = Some(pts_90k);
         duration
     }
+
+    fn resolve_sample_pts_90k(&mut self, chunk_pts_90k: Option<i64>) -> i64 {
+        let resolved = match chunk_pts_90k {
+            Some(pts) => {
+                let _ = self.pending_submitted_pts_90k.pop_front();
+                pts
+            }
+            None => self
+                .pending_submitted_pts_90k
+                .pop_front()
+                .unwrap_or_else(|| {
+                    let fallback = self.next_fallback_pts_90k;
+                    self.next_fallback_pts_90k = self
+                        .next_fallback_pts_90k
+                        .saturating_add(i64::from(self.default_duration));
+                    fallback
+                }),
+        };
+        self.next_fallback_pts_90k = resolved.saturating_add(i64::from(self.default_duration));
+        resolved
+    }
+
+    fn rewrite_init_segment_with_final_timing(&mut self) -> Result<()> {
+        if !self.init_written {
+            return Ok(());
+        }
+        let expected_init_len = self
+            .init_bytes_written
+            .context("init segment length is missing")?;
+        let init = self
+            .muxer
+            .init_segment_bytes()
+            .context("failed to rebuild init segment")?;
+        let patched_init = patch_fmp4_init_segment_timing(
+            &init,
+            self.creation_timestamp,
+            self.total_duration_90k,
+            self.timescale,
+        )?;
+        if patched_init.len() != expected_init_len {
+            anyhow::bail!(
+                "finalized init segment size changed (expected {}, got {}), cannot rewrite in-place",
+                expected_init_len,
+                patched_init.len()
+            );
+        }
+        self.writer.send(RecorderWriterCommand::RewriteInit {
+            init: patched_init,
+            expected_len: expected_init_len,
+        })?;
+        Ok(())
+    }
+}
+
+enum RecorderWorkerCommand {
+    SubmitFrame {
+        frame_rgba: Vec<u8>,
+        pts_90k: i64,
+    },
+    SetFragmentFrames {
+        fragment_frames: usize,
+    },
+    Finish {
+        reply_tx: mpsc::Sender<std::result::Result<RecorderSummary, String>>,
+    },
+}
+
+enum RecorderWorkerEvent {
+    FrameConsumed,
+    Status(String),
+    Error(String),
+}
+
+struct RecorderWorker {
+    command_tx: mpsc::Sender<RecorderWorkerCommand>,
+    event_rx: mpsc::Receiver<RecorderWorkerEvent>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl RecorderWorker {
+    fn spawn(
+        settings: RecordingSettings,
+        width: i32,
+        height: i32,
+        fps: i32,
+        output_path: PathBuf,
+    ) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::channel::<RecorderWorkerCommand>();
+        let (event_tx, event_rx) = mpsc::channel::<RecorderWorkerEvent>();
+        let (startup_tx, startup_rx) = mpsc::channel::<std::result::Result<(), String>>();
+        let join_handle = thread::Builder::new()
+            .name("camera-record-worker-thread".to_string())
+            .spawn(move || {
+                let recorder = match RecorderState::new(&settings, width, height, fps, output_path)
+                {
+                    Ok(state) => state,
+                    Err(err) => {
+                        let _ = startup_tx.send(Err(format!("{err:#}")));
+                        return;
+                    }
+                };
+                let _ = startup_tx.send(Ok(()));
+                run_recorder_worker(recorder, command_rx, event_tx);
+            })
+            .context("failed to spawn recorder worker thread")?;
+        match startup_rx
+            .recv()
+            .context("recorder worker exited before startup status")?
+        {
+            Ok(()) => {}
+            Err(message) => {
+                let _ = join_handle.join();
+                anyhow::bail!("{message}");
+            }
+        }
+        Ok(Self {
+            command_tx,
+            event_rx,
+            join_handle: Some(join_handle),
+        })
+    }
+
+    fn submit_frame(&mut self, frame_rgba: Vec<u8>, pts_90k: i64) -> Result<()> {
+        self.command_tx
+            .send(RecorderWorkerCommand::SubmitFrame {
+                frame_rgba,
+                pts_90k,
+            })
+            .context("failed to queue recorder frame")
+    }
+
+    fn set_fragment_frames(&mut self, fragment_frames: usize) -> Result<()> {
+        self.command_tx
+            .send(RecorderWorkerCommand::SetFragmentFrames { fragment_frames })
+            .context("failed to queue fragment frame update")
+    }
+
+    fn try_recv_event(&mut self) -> Option<RecorderWorkerEvent> {
+        self.event_rx.try_recv().ok()
+    }
+
+    fn finish(&mut self) -> Result<RecorderSummary> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RecorderWorkerCommand::Finish { reply_tx })
+            .context("failed to send recorder worker finish command")?;
+        let summary = reply_rx
+            .recv()
+            .context("failed to receive recorder worker finish result")?
+            .map_err(anyhow::Error::msg)?;
+        self.join()?;
+        Ok(summary)
+    }
+
+    fn join(&mut self) -> Result<()> {
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("recorder worker thread panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+fn run_recorder_worker(
+    mut recorder: RecorderState,
+    command_rx: mpsc::Receiver<RecorderWorkerCommand>,
+    event_tx: mpsc::Sender<RecorderWorkerEvent>,
+) {
+    let mut last_segments_written = recorder.segments_written;
+    let _ = event_tx.send(RecorderWorkerEvent::Status(recorder.progress_status()));
+    while let Ok(command) = command_rx.recv() {
+        match command {
+            RecorderWorkerCommand::SubmitFrame {
+                frame_rgba,
+                pts_90k,
+            } => {
+                let submit_result = recorder.submit_rgba_frame(frame_rgba, pts_90k);
+                let _ = event_tx.send(RecorderWorkerEvent::FrameConsumed);
+                if let Err(err) = submit_result {
+                    let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+                        "failed to submit frame: {err:#}"
+                    )));
+                    break;
+                }
+                if recorder.segments_written != last_segments_written
+                    || recorder.packets_seen.is_multiple_of(15)
+                {
+                    last_segments_written = recorder.segments_written;
+                    let _ = event_tx.send(RecorderWorkerEvent::Status(recorder.progress_status()));
+                }
+            }
+            RecorderWorkerCommand::SetFragmentFrames { fragment_frames } => {
+                if let Err(err) = recorder.set_fragment_frames(fragment_frames) {
+                    let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+                        "failed to update fragment frequency: {err:#}"
+                    )));
+                    break;
+                }
+                let _ = event_tx.send(RecorderWorkerEvent::Status(recorder.progress_status()));
+            }
+            RecorderWorkerCommand::Finish { reply_tx } => {
+                let result = recorder.finish().map_err(|err| format!("{err:#}"));
+                let _ = reply_tx.send(result);
+                return;
+            }
+        }
+    }
+
+    if let Err(err) = recorder.finish() {
+        let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+            "recorder worker shutdown failed: {err:#}"
+        )));
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BackendProbeStatus {
+    backend: Backend,
+    available: bool,
+    detail: String,
 }
 
 struct CameraRecordApp {
@@ -542,14 +983,18 @@ struct CameraRecordApp {
     fps: i32,
     output_dir: PathBuf,
     recording_settings: RecordingSettings,
+    selected_backend: Backend,
     selected_codec: Codec,
+    backend_probe_statuses: Vec<BackendProbeStatus>,
     pending_width: i32,
     pending_height: i32,
     pending_fps: i32,
     fragment_frames: usize,
     pending_fragment_frames: usize,
     recording_seq: u64,
-    recording: Option<RecorderState>,
+    recording: Option<RecorderWorker>,
+    recording_queue_depth: usize,
+    controls_collapsed: bool,
     total_received: u64,
     total_rendered: u64,
     status_message: String,
@@ -560,6 +1005,7 @@ struct CameraAppInit {
     width: i32,
     height: i32,
     fps: i32,
+    auto_start_recording: bool,
     fragment_frames: usize,
     duration: Option<Duration>,
     output_dir: PathBuf,
@@ -573,7 +1019,7 @@ impl CameraRecordApp {
         capture_event_rx: mpsc::Receiver<CaptureEvent>,
         init: CameraAppInit,
     ) -> Self {
-        Self {
+        let mut app = Self {
             rx,
             capture_cmd_tx,
             capture_event_rx,
@@ -587,7 +1033,9 @@ impl CameraRecordApp {
             height: init.height,
             fps: init.fps,
             output_dir: init.output_dir,
+            selected_backend: init.recording_settings.backend,
             selected_codec: init.recording_settings.codec,
+            backend_probe_statuses: Vec::new(),
             pending_width: init.width,
             pending_height: init.height,
             pending_fps: init.fps,
@@ -596,10 +1044,57 @@ impl CameraRecordApp {
             recording_settings: init.recording_settings,
             recording_seq: 0,
             recording: None,
+            recording_queue_depth: 0,
+            controls_collapsed: false,
             total_received: 0,
             total_rendered: 0,
             status_message: "ready".to_string(),
+        };
+        app.refresh_backend_probe_statuses();
+        if init.auto_start_recording {
+            app.start_recording();
         }
+        app
+    }
+
+    fn current_recording_settings(&self) -> RecordingSettings {
+        let mut settings = self.recording_settings.clone();
+        settings.backend = self.selected_backend;
+        settings.codec = self.selected_codec;
+        settings.fragment_frames = self.fragment_frames.max(1);
+        settings
+    }
+
+    fn refresh_backend_probe_statuses(&mut self) {
+        if self.recording.is_some() {
+            return;
+        }
+        let mut statuses = Vec::new();
+        for backend in selectable_backends() {
+            let mut settings = self.current_recording_settings();
+            settings.backend = backend;
+            let status =
+                match probe_recording_backend_path(&settings, self.width, self.height, self.fps) {
+                    Ok(resolved_backend) => BackendProbeStatus {
+                        backend,
+                        available: true,
+                        detail: format!("available (resolved={resolved_backend})"),
+                    },
+                    Err(err) => BackendProbeStatus {
+                        backend,
+                        available: false,
+                        detail: format!("{err:#}"),
+                    },
+                };
+            statuses.push(status);
+        }
+        self.backend_probe_statuses = statuses;
+    }
+
+    fn selected_backend_probe(&self) -> Option<&BackendProbeStatus> {
+        self.backend_probe_statuses
+            .iter()
+            .find(|status| status.backend == self.selected_backend)
     }
 
     fn handle_owned_frame(&mut self, owned: VideoFrameOwned) -> Result<()> {
@@ -609,14 +1104,9 @@ impl CameraRecordApp {
         self.total_received = self.total_received.saturating_add(1);
 
         if let Some(recorder) = self.recording.as_mut() {
-            let argb = rgba_to_argb_bytes(&ui_frame.rgba);
-            let dims = dims(
-                u32::try_from(ui_frame.width).context("frame width overflow")?,
-                u32::try_from(ui_frame.height).context("frame height overflow")?,
-            )?;
             let pts_90k = timestamp_us_to_90k(ui_frame.timestamp_us);
-            recorder.submit_argb_frame(argb, dims, pts_90k)?;
-            self.status_message = recorder.progress_status();
+            recorder.submit_frame(ui_frame.rgba.clone(), pts_90k)?;
+            self.recording_queue_depth = self.recording_queue_depth.saturating_add(1);
         }
 
         self.latest = Some(ui_frame);
@@ -660,6 +1150,7 @@ impl CameraRecordApp {
                     self.latest = None;
                     self.texture = None;
                     self.displayed_timestamp_us = None;
+                    self.refresh_backend_probe_statuses();
                     self.status_message = format!(
                         "capture reconfigured: {}x{} @ {} fps",
                         config.width, config.height, config.fps
@@ -708,7 +1199,10 @@ impl CameraRecordApp {
                 self.status_message = format!("failed to apply fragment settings: {err:#}");
                 return;
             }
-            self.status_message = recorder.progress_status();
+            self.status_message = format!(
+                "fragment settings queued: {} frame(s)/fragment",
+                self.fragment_frames
+            );
         } else {
             self.status_message = format!(
                 "fragment settings applied: {} frame(s)/fragment",
@@ -717,28 +1211,14 @@ impl CameraRecordApp {
         }
     }
 
-    fn recording_preflight(&self) -> Result<()> {
-        let config = EncoderConfig::new(
-            self.selected_codec,
-            self.fps,
-            self.recording_settings.require_hardware,
-        );
-        self.recording_settings
-            .backend
-            .resolve_encoder(&config)
-            .with_context(|| {
-                format!(
-                    "encoder backend resolution failed (backend={}, codec={}, require_hardware={})",
-                    self.recording_settings.backend,
-                    self.selected_codec,
-                    self.recording_settings.require_hardware
-                )
-            })?;
-        Ok(())
-    }
-
     fn start_recording(&mut self) {
         if self.recording.is_some() {
+            return;
+        }
+        if let Some(status) = self.selected_backend_probe()
+            && !status.available
+        {
+            self.status_message = format!("record start blocked: {}", status.detail);
             return;
         }
 
@@ -751,20 +1231,20 @@ impl CameraRecordApp {
             }
         };
 
-        let mut settings = self.recording_settings.clone();
-        settings.codec = self.selected_codec;
-        settings.fragment_frames = self.fragment_frames.max(1);
+        let settings = self.current_recording_settings();
 
-        match RecorderState::new(
-            &settings,
+        match RecorderWorker::spawn(
+            settings,
             self.width,
             self.height,
             self.fps,
             output_path.clone(),
         ) {
-            Ok(state) => {
-                self.status_message = state.progress_status();
-                self.recording = Some(state);
+            Ok(worker) => {
+                self.started_at = Instant::now();
+                self.recording_queue_depth = 0;
+                self.status_message = "recording ON: worker started".to_string();
+                self.recording = Some(worker);
             }
             Err(err) => {
                 self.status_message = format!("record start failed: {err:#}");
@@ -773,66 +1253,55 @@ impl CameraRecordApp {
     }
 
     fn stop_recording(&mut self) {
-        if let Some(recorder) = self.recording.take() {
+        if let Some(mut recorder) = self.recording.take() {
+            self.recording_queue_depth = 0;
             match recorder.finish() {
                 Ok(summary) => {
                     self.status_message = format!(
-                        "recording OFF: {} (segments={}, packets={}, flush_packets={}, bytes={})",
+                        "recording OFF: {} (segments={}, packets={}, flush_packets={}, bytes={}, duration_s={:.3})",
                         summary.output_path.display(),
                         summary.segments_written,
                         summary.packets_seen,
                         summary.flush_packets,
-                        summary.bytes_written
+                        summary.bytes_written,
+                        duration_90k_to_seconds(summary.duration_90k)
                     );
                 }
                 Err(err) => {
                     self.status_message = format!("record stop failed: {err:#}");
                 }
             }
+            self.refresh_backend_probe_statuses();
         }
     }
-}
 
-impl Drop for CameraRecordApp {
-    fn drop(&mut self) {
-        if let Some(recorder) = self.recording.take()
-            && let Err(err) = recorder.finish()
-        {
-            eprintln!("failed to finalize recording on drop: {err:#}");
-        }
-    }
-}
-
-impl eframe::App for CameraRecordApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(16));
-        self.poll_capture_events();
-
-        while let Ok(owned) = self.rx.try_recv() {
-            if let Err(err) = self.handle_owned_frame(owned) {
-                self.status_message = format!("recording error: {err:#}");
-                self.stop_recording();
-                break;
+    fn poll_recording_events(&mut self) {
+        let mut worker_error = None::<String>;
+        if let Some(recorder) = self.recording.as_mut() {
+            while let Some(event) = recorder.try_recv_event() {
+                match event {
+                    RecorderWorkerEvent::FrameConsumed => {
+                        self.recording_queue_depth = self.recording_queue_depth.saturating_sub(1);
+                    }
+                    RecorderWorkerEvent::Status(message) => {
+                        self.status_message = message;
+                    }
+                    RecorderWorkerEvent::Error(message) => {
+                        worker_error = Some(message);
+                        break;
+                    }
+                }
             }
         }
 
-        if let Some(duration) = self.duration
-            && self.started_at.elapsed() >= duration
-        {
+        if let Some(message) = worker_error {
+            self.status_message = format!("recording worker error: {message}");
             self.stop_recording();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Camera Preview + fMP4 Recorder");
-            ui.label(format!(
-                "capture: {}x{} @ {} fps",
-                self.width, self.height, self.fps
-            ));
-            ui.label(format!(
-                "frames: received={} rendered={}",
-                self.total_received, self.total_rendered
-            ));
+    fn show_recording_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
             ui.label(format!(
                 "recording: {}",
                 if self.recording.is_some() {
@@ -841,14 +1310,63 @@ impl eframe::App for CameraRecordApp {
                     "OFF"
                 }
             ));
-            ui.label(format!("status: {}", self.status_message));
-
-            if let Some(latest) = &self.latest {
-                ui.label(format!("timestamp_us: {}", latest.timestamp_us));
-            } else {
-                ui.label("waiting for frames...");
+            if self.recording.is_some() {
+                if ui.button("Stop Recording").clicked() {
+                    self.stop_recording();
+                }
+            } else if ui.button("Start Recording").clicked() {
+                self.start_recording();
             }
+        });
+        if let Some(status) = self.selected_backend_probe()
+            && !status.available
+            && self.recording.is_none()
+        {
+            ui.label(format!("start preflight warning: {}", status.detail));
+        }
+        ui.label(format!("status: {}", self.status_message));
+    }
 
+    fn show_controls_scroll_contents(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Camera Controls");
+        ui.label(format!(
+            "capture: {}x{} @ {} fps",
+            self.width, self.height, self.fps
+        ));
+        ui.label(format!(
+            "frames: received={} rendered={}",
+            self.total_received, self.total_rendered
+        ));
+        if self.recording.is_some() {
+            ui.label(format!(
+                "record queue: pending={}",
+                self.recording_queue_depth
+            ));
+        }
+
+        if let Some(latest) = &self.latest {
+            ui.label(format!("timestamp_us: {}", latest.timestamp_us));
+        } else {
+            ui.label("waiting for frames...");
+        }
+
+        let previous_backend = self.selected_backend;
+        let previous_codec = self.selected_codec;
+        ui.add_enabled_ui(self.recording.is_none(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("backend:");
+                egui::ComboBox::from_id_salt("record-backend")
+                    .selected_text(self.selected_backend.to_string())
+                    .show_ui(ui, |ui| {
+                        for backend in selectable_backends() {
+                            ui.selectable_value(
+                                &mut self.selected_backend,
+                                backend,
+                                backend.to_string(),
+                            );
+                        }
+                    });
+            });
             ui.horizontal(|ui| {
                 ui.label("codec:");
                 egui::ComboBox::from_id_salt("record-codec")
@@ -861,51 +1379,136 @@ impl eframe::App for CameraRecordApp {
                         ui.selectable_value(&mut self.selected_codec, Codec::Hevc, "hevc");
                     });
             });
+        });
+        if previous_backend != self.selected_backend || previous_codec != self.selected_codec {
+            self.refresh_backend_probe_statuses();
+        }
 
-            ui.horizontal(|ui| {
-                ui.label("capture settings:");
-                ui.add(egui::DragValue::new(&mut self.pending_width).range(160..=3840));
-                ui.label("x");
-                ui.add(egui::DragValue::new(&mut self.pending_height).range(120..=2160));
-                ui.label("@");
-                ui.add(egui::DragValue::new(&mut self.pending_fps).range(1..=120));
-                ui.label("fps");
-                if ui.button("Apply Capture").clicked() {
-                    self.apply_capture_settings();
+        egui::CollapsingHeader::new("backend availability")
+            .default_open(true)
+            .show(ui, |ui| {
+                for status in &self.backend_probe_statuses {
+                    let availability = if status.available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    };
+                    let selected_mark = if status.backend == self.selected_backend {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    ui.label(format!(
+                        "{selected_mark} {}: {} ({})",
+                        status.backend, availability, status.detail
+                    ));
                 }
             });
 
-            ui.horizontal(|ui| {
-                ui.label("fragment frequency:");
-                ui.add(egui::DragValue::new(&mut self.pending_fragment_frames).range(1..=300));
-                ui.label("frame(s)/fragment");
-                if ui.button("Apply Fragment").clicked() {
-                    self.apply_fragment_settings();
+        ui.horizontal(|ui| {
+            ui.label("capture settings:");
+            ui.add(egui::DragValue::new(&mut self.pending_width).range(160..=3840));
+            ui.label("x");
+            ui.add(egui::DragValue::new(&mut self.pending_height).range(120..=2160));
+            ui.label("@");
+            ui.add(egui::DragValue::new(&mut self.pending_fps).range(1..=120));
+            ui.label("fps");
+            if ui.button("Apply Capture").clicked() {
+                self.apply_capture_settings();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("fragment frequency:");
+            ui.add(egui::DragValue::new(&mut self.pending_fragment_frames).range(1..=300));
+            ui.label("frame(s)/fragment");
+            if ui.button("Apply Fragment").clicked() {
+                self.apply_fragment_settings();
+            }
+        });
+    }
+}
+
+impl Drop for CameraRecordApp {
+    fn drop(&mut self) {
+        if let Some(mut recorder) = self.recording.take()
+            && let Err(err) = recorder.finish()
+        {
+            eprintln!("failed to finalize recording on drop: {err:#}");
+        }
+    }
+}
+
+impl eframe::App for CameraRecordApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_millis(16));
+        self.poll_capture_events();
+        self.poll_recording_events();
+
+        if let Some(duration) = self.duration
+            && self.recording.is_some()
+            && self.started_at.elapsed() >= duration
+        {
+            self.stop_recording();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        const MAX_FRAMES_PER_TICK: usize = 8;
+        for _ in 0..MAX_FRAMES_PER_TICK {
+            let Ok(owned) = self.rx.try_recv() else {
+                break;
+            };
+            if let Err(err) = self.handle_owned_frame(owned) {
+                self.status_message = format!("recording error: {err:#}");
+                self.stop_recording();
+                break;
+            }
+        }
+
+        if let Some(duration) = self.duration
+            && self.recording.is_some()
+            && self.started_at.elapsed() >= duration
+        {
+            self.stop_recording();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        egui::SidePanel::left("camera-controls")
+            .resizable(true)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let toggle_label = if self.controls_collapsed {
+                        ">> expand controls"
+                    } else {
+                        "<< collapse controls"
+                    };
+                    if ui.button(toggle_label).clicked() {
+                        self.controls_collapsed = !self.controls_collapsed;
+                    }
+                });
+                self.show_recording_toolbar(ui);
+                if !self.controls_collapsed {
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("camera-controls-scroll")
+                        .show(ui, |ui| {
+                            self.show_controls_scroll_contents(ui);
+                        });
                 }
             });
 
-            ui.horizontal(|ui| {
-                if self.recording.is_some() {
-                    if ui.button("Stop Recording").clicked() {
-                        self.stop_recording();
-                    }
-                } else {
-                    let preflight = self.recording_preflight();
-                    if ui.button("Start Recording").clicked() {
-                        self.start_recording();
-                    }
-                    if let Err(err) = preflight {
-                        ui.label(format!("start preflight warning: {err:#}"));
-                    }
-                }
-            });
-
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Camera Preview");
             self.update_texture_if_needed(ui);
             if let Some(texture) = &self.texture {
                 ui.add(
                     egui::Image::from_texture(egui::load::SizedTexture::from_handle(texture))
                         .shrink_to_fit(),
                 );
+            } else {
+                ui.label("waiting for frames...");
             }
         });
     }
@@ -917,6 +1520,13 @@ fn main() -> Result<()> {
     if args.list_devices {
         list_devices();
         return Ok(());
+    }
+
+    if args.auto_start_recording {
+        let mut preflight_settings = args.recording_settings.clone();
+        preflight_settings.fragment_frames = args.fragment_frames;
+        probe_recording_backend_path(&preflight_settings, args.width, args.height, args.fps)
+            .context("auto-start preflight failed")?;
     }
 
     let (tx, rx) = mpsc::channel::<VideoFrameOwned>();
@@ -1014,12 +1624,19 @@ fn main() -> Result<()> {
         args.width, args.height, args.fps
     );
     println!("recording output dir: {}", args.output_dir.display());
+    println!(
+        "initial recording backend: {}",
+        args.recording_settings.backend
+    );
     println!("initial recording codec: {}", args.recording_settings.codec);
     println!(
         "initial fragment frequency: {} frame(s)/fragment",
         args.fragment_frames
     );
-    println!("codec/resolution/fragment frequency can be changed in GUI");
+    if args.auto_start_recording {
+        println!("auto-start recording: enabled");
+    }
+    println!("backend/codec/resolution/fragment frequency can be changed in GUI");
     println!("toggle recording with Start/Stop buttons");
 
     let mut options = eframe::NativeOptions::default();
@@ -1038,6 +1655,7 @@ fn main() -> Result<()> {
                 width: args.width,
                 height: args.height,
                 fps: args.fps,
+                auto_start_recording: args.auto_start_recording,
                 fragment_frames: args.fragment_frames,
                 duration: args.duration,
                 output_dir: args.output_dir.clone(),
@@ -1087,6 +1705,7 @@ fn parse_args() -> Result<Args> {
         width,
         height,
         fps: cli.fps,
+        auto_start_recording: cli.auto_start_recording,
         fragment_frames,
         duration: cli.duration.map(Duration::from_secs_f64),
         output_dir: cli.output_dir,
@@ -1119,6 +1738,32 @@ fn parse_codec(raw: &str) -> Result<Codec> {
         "hevc" | "h265" => Ok(Codec::Hevc),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
+}
+
+fn selectable_backends() -> Vec<Backend> {
+    [
+        Some(Backend::Auto),
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        Some(Backend::VideoToolbox),
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Some(Backend::Nvidia),
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Some(Backend::Intel),
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        Some(Backend::Vulkan),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn parse_backend(raw: &str) -> Result<Backend> {
@@ -1388,6 +2033,87 @@ fn hevc_nal_type(nalu: &[u8]) -> u8 {
 
 fn timestamp_us_to_90k(timestamp_us: i64) -> i64 {
     timestamp_us.saturating_mul(90).div_euclid(1000)
+}
+
+fn duration_90k_to_seconds(duration_90k: u64) -> f64 {
+    duration_90k as f64 / 90_000.0
+}
+
+fn convert_duration_timescale(
+    duration: u64,
+    from_timescale: NonZeroU32,
+    to_timescale: NonZeroU32,
+) -> u64 {
+    if duration == 0 || from_timescale == to_timescale {
+        return duration;
+    }
+    let from = u64::from(from_timescale.get());
+    let to = u64::from(to_timescale.get());
+    duration
+        .saturating_mul(to)
+        .saturating_add(from / 2)
+        .saturating_div(from)
+}
+
+fn patch_fmp4_init_segment_timing(
+    init_segment: &[u8],
+    creation_timestamp: Duration,
+    duration_in_input_timescale: u64,
+    input_timescale: NonZeroU32,
+) -> Result<Vec<u8>> {
+    let (ftyp_box, ftyp_size) =
+        FtypBox::decode(init_segment).context("failed to decode ftyp from init segment")?;
+    let moov_input = init_segment
+        .get(ftyp_size..)
+        .context("init segment is missing moov payload")?;
+    let (mut moov_box, moov_size) =
+        MoovBox::decode(moov_input).context("failed to decode moov from init segment")?;
+    let creation_time = Mp4FileTime::from_unix_time(creation_timestamp);
+
+    let movie_duration = convert_duration_timescale(
+        duration_in_input_timescale,
+        input_timescale,
+        moov_box.mvhd_box.timescale,
+    );
+    moov_box.mvhd_box.creation_time = creation_time;
+    moov_box.mvhd_box.modification_time = creation_time;
+    moov_box.mvhd_box.duration = movie_duration;
+
+    for trak in &mut moov_box.trak_boxes {
+        trak.tkhd_box.creation_time = creation_time;
+        trak.tkhd_box.modification_time = creation_time;
+        trak.tkhd_box.duration = movie_duration;
+
+        let media_duration = convert_duration_timescale(
+            duration_in_input_timescale,
+            input_timescale,
+            trak.mdia_box.mdhd_box.timescale,
+        );
+        trak.mdia_box.mdhd_box.creation_time = creation_time;
+        trak.mdia_box.mdhd_box.modification_time = creation_time;
+        trak.mdia_box.mdhd_box.duration = media_duration;
+    }
+
+    if let Some(mvex_box) = moov_box.mvex_box.as_mut()
+        && let Some(mehd_box) = mvex_box.mehd_box.as_mut()
+    {
+        mehd_box.fragment_duration = movie_duration;
+    }
+
+    let mut patched = ftyp_box
+        .encode_to_vec()
+        .context("failed to encode ftyp for patched init segment")?;
+    patched.extend_from_slice(
+        &moov_box
+            .encode_to_vec()
+            .context("failed to encode moov for patched init segment")?,
+    );
+
+    let consumed = ftyp_size.saturating_add(moov_size);
+    if consumed < init_segment.len() {
+        patched.extend_from_slice(&init_segment[consumed..]);
+    }
+    Ok(patched)
 }
 
 fn rgba_to_argb_bytes(rgba: &[u8]) -> Vec<u8> {
@@ -1674,14 +2400,7 @@ impl BackendEncoderSession {
     }
 
     fn requires_periodic_fragment_flush(&self) -> bool {
-        #[cfg(all(
-            feature = "backend-intel",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        if matches!(self, Self::Intel(_)) {
-            return true;
-        }
-        false
+        true
     }
 }
 
@@ -1802,5 +2521,75 @@ mod tests {
             .expect("init segment should be buildable");
 
         assert!(!init.is_empty());
+    }
+
+    #[test]
+    fn patch_fmp4_init_segment_timing_sets_creation_and_duration() {
+        let sample_entry = create_h264_sample_entry(
+            1280,
+            720,
+            &[0x67, 0x64, 0x00, 0x1f],
+            &[0x68, 0xee, 0x3c, 0x80],
+        );
+        let mut muxer = Fmp4SegmentMuxer::new().expect("muxer should initialize");
+        let first_sample = Sample {
+            track_kind: TrackKind::Video,
+            sample_entry: Some(sample_entry),
+            keyframe: true,
+            timescale: NonZeroU32::new(90_000).expect("constant timescale is non-zero"),
+            duration: 3_000,
+            composition_time_offset: None,
+            data_offset: 0,
+            data_size: 4,
+        };
+        let second_sample = Sample {
+            sample_entry: None,
+            data_offset: 4,
+            ..first_sample.clone()
+        };
+        muxer
+            .create_media_segment_metadata(&[first_sample, second_sample])
+            .expect("sample metadata should initialize track");
+        let init = muxer
+            .init_segment_bytes()
+            .expect("init segment should be buildable");
+
+        let creation_timestamp = Duration::from_secs(1_700_000_000);
+        let patched = patch_fmp4_init_segment_timing(
+            &init,
+            creation_timestamp,
+            6_000,
+            NonZeroU32::new(90_000).expect("constant timescale is non-zero"),
+        )
+        .expect("init patch should succeed");
+
+        let (_, ftyp_size) = FtypBox::decode(&patched).expect("ftyp should decode");
+        let (moov, _) = MoovBox::decode(&patched[ftyp_size..]).expect("moov should decode");
+        let expected_creation = Mp4FileTime::from_unix_time(creation_timestamp).as_secs();
+
+        assert_eq!(moov.mvhd_box.creation_time.as_secs(), expected_creation);
+        assert_eq!(moov.mvhd_box.modification_time.as_secs(), expected_creation);
+        assert!(moov.mvhd_box.duration > 0);
+
+        for trak in &moov.trak_boxes {
+            assert_eq!(trak.tkhd_box.creation_time.as_secs(), expected_creation);
+            assert_eq!(trak.tkhd_box.modification_time.as_secs(), expected_creation);
+            assert_eq!(
+                trak.mdia_box.mdhd_box.creation_time.as_secs(),
+                expected_creation
+            );
+            assert_eq!(
+                trak.mdia_box.mdhd_box.modification_time.as_secs(),
+                expected_creation
+            );
+            assert_eq!(trak.mdia_box.mdhd_box.duration, 6_000);
+        }
+
+        let mehd_duration = moov
+            .mvex_box
+            .and_then(|mvex| mvex.mehd_box)
+            .map(|mehd| mehd.fragment_duration)
+            .expect("mehd should exist");
+        assert_eq!(mehd_duration, moov.mvhd_box.duration);
     }
 }
