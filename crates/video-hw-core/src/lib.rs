@@ -170,42 +170,20 @@ pub struct Frame {
     pub transfer_function: Option<i32>,
     pub ycbcr_matrix: Option<i32>,
     #[cfg(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
     ))]
     pub argb: Option<Vec<u8>>,
     #[cfg(all(
         feature = "unstable-raw-inputs",
-        any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        )
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
     ))]
     pub nv12: Option<Nv12FramePayload>,
     #[cfg(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
     ))]
     pub force_keyframe: bool,
 }

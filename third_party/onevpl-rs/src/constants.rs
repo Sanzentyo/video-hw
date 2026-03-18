@@ -4,7 +4,7 @@ use intel_onevpl_sys as ffi;
 
 use crate::utils::FilterProperty;
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Debug, Clone, Copy)]
 #[doc = " The SkipFrame enumerator is used to define usage of mfxEncodeCtrl::SkipFrame parameter."]
@@ -51,7 +51,7 @@ bitflags! {
     }
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Debug, Clone, Copy)]
 #[doc = "The MfxNalUnitType enumerator specifies NAL unit types supported by the HEVC encoder."]
@@ -70,7 +70,7 @@ pub enum NalUnitType {
     CraNut = ffi::MFX_HEVC_NALU_TYPE_CRA_NUT,
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Debug, Clone, Copy)]
 #[doc = " The ColorFourCC enumerator itemizes color formats."]
@@ -139,7 +139,7 @@ pub enum FourCC {
 }
 
 #[doc = " This enum itemizes hardware acceleration stack to use."]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 // #[repf(i32)]
 #[derive(Debug)]
@@ -164,7 +164,7 @@ pub enum AccelerationMode {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 pub enum PicStruct {
     #[doc = "< Unspecified or mixed progressive/interlaced/field pictures."]
@@ -207,7 +207,7 @@ bitflags! {
     }
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[doc = " The TargetUsage enumerator itemizes a range of numbers from MFX_TARGETUSAGE_1, best quality, to MFX_TARGETUSAGE_7, best speed.\nIt indicates trade-offs between quality and speed. The application can use any number in the range. The actual number of supported\ntarget usages depends on implementation. If specified target usage is not supported, the encoder will use the closest supported value."]
@@ -226,7 +226,7 @@ pub enum TargetUsage {
     Unknown = ffi::MFX_TARGETUSAGE_UNKNOWN,
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[doc = " The RateControlMethod enumerator itemizes bitrate control methods."]
@@ -253,7 +253,7 @@ pub enum RateControlMethod {
     QVBR = ffi::MFX_RATECONTROL_QVBR,
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[doc = " The CodecFormatFourCC enumerator itemizes codecs in the FourCC format."]
@@ -280,7 +280,7 @@ impl Into<FilterProperty> for Codec {
     }
 }
 
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ImplementationCapabilitiesDeliverFormat {
@@ -378,7 +378,7 @@ bitflags! {
     }
 }
 
-#[cfg_attr(target_os = "linux", bitmask_enum::bitmask(u32))]
+#[cfg_attr(target_os = "linux", bitmask_enum::bitmask(i32))]
 #[cfg_attr(target_os = "windows", bitmask_enum::bitmask(i32))]
 #[doc = "This enumerator itemizes implementation types.\nThe implementation type is a bit OR'ed value of the base type and any decorative flags.\n@note This enumerator is for legacy dispatcher compatibility only. The new dispatcher does not use it."]
 pub enum MfxImpl {
@@ -446,7 +446,7 @@ bitflags! {
 }
 
 #[doc = " The mfxSkipMode enumerator describes the decoder skip-mode options."]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 pub enum SkipMode {
     NoSkip = ffi::mfxSkipMode_MFX_SKIPMODE_NOSKIP,
@@ -457,7 +457,7 @@ pub enum SkipMode {
 }
 
 #[derive(Debug)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 pub enum ChromaFormat {
     #[doc = "< Monochrome or YUV400."]
@@ -477,7 +477,7 @@ pub enum ChromaFormat {
 }
 
 #[derive(Debug)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[doc = " The CodingOptionValue enumerator defines a three-state coding option setting."]
 pub enum CodingOptionValue {
@@ -492,7 +492,7 @@ pub enum CodingOptionValue {
 }
 
 #[derive(Debug)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[doc = " The BRefControl enumerator is used to control usage of B-frames as reference in AVC encoder."]
 pub enum BRefControl {
@@ -505,7 +505,7 @@ pub enum BRefControl {
 }
 
 #[derive(Debug)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[doc = " The ScenarioInfo enumerator itemizes scenarios for the encoding session."]
 pub enum ScenarioInfo {
@@ -521,7 +521,7 @@ pub enum ScenarioInfo {
 }
 
 #[derive(Debug)]
-#[cfg_attr(target_os = "linux", EnumRepr(type = "u32"))]
+#[cfg_attr(target_os = "linux", EnumRepr(type = "i32"))]
 #[cfg_attr(target_os = "windows", EnumRepr(type = "i32"))]
 #[doc = " The ContentInfo enumerator itemizes content types for the encoding session."]
 pub enum ContentInfo {
@@ -530,7 +530,7 @@ pub enum ContentInfo {
     NonVideoScreen = ffi::MFX_CONTENT_NON_VIDEO_SCREEN,
 }
 
-#[cfg_attr(target_os = "linux", bitmask_enum::bitmask(u32))]
+#[cfg_attr(target_os = "linux", bitmask_enum::bitmask(i32))]
 #[cfg_attr(target_os = "windows", bitmask_enum::bitmask(i32))]
 #[doc = "The ExtMemFrameType enumerator specifies the memory type of frame. It is a bit-ORed value of the following.\n\\verbatim embed:rst\nFor information on working with video memory surfaces, see the :ref:`Working with Hardware Acceleration section<hw-acceleration>`.\n\\endverbatim"]
 pub enum ExtMemFrameType {
