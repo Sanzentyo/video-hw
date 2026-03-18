@@ -6,6 +6,7 @@
 
 - `USAGE_STRICT.md`（厳密 I/O 仕様つき利用ガイド）
 - `spec/IO_FORMAT_CONTRACT.md`（I/O形式の標準化方針）
+- `spec/INTEL_LINUX_TROUBLESHOOTING.md`（Intel oneVPL / libva / 権限トラブルシュート）
 - `spec/NVIDIA_SDK_DISTRIBUTION_POLICY.md`（NVIDIA SDK の配布・運用ポリシー）
 - `spec/TEST_SPEC_INVENTORY.md`（現存テスト仕様の棚卸し）
 - `spec/FEATURE_GATING_AND_DEAD_CODE_POLICY.md`（feature有効範囲とdead code運用）
