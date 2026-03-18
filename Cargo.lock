@@ -2151,6 +2151,7 @@ dependencies = [
 [[package]]
 name = "intel-onevpl-sys"
 version = "0.1.1"
+source = "git+https://github.com/Sanzentyo/onevpl-rs?rev=d6bbdfe88753a7b6809783ca2be44f8a24ef2199#d6bbdfe88753a7b6809783ca2be44f8a24ef2199"
 dependencies = [
  "bindgen 0.64.0",
  "libloading 0.7.4",
@@ -3098,6 +3099,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "onevpl"
 version = "0.1.1"
+source = "git+https://github.com/Sanzentyo/onevpl-rs?rev=d6bbdfe88753a7b6809783ca2be44f8a24ef2199#d6bbdfe88753a7b6809783ca2be44f8a24ef2199"
 dependencies = [
  "bitflags 1.3.2",
  "bitmask-enum",
