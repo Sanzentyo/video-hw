@@ -4473,6 +4473,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "video-hw-fmp4"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "eframe",
+ "shiguredo_mp4",
+ "shiguredo_video_device",
+ "tokio",
+ "video-hw",
+]
+
+[[package]]
 name = "video-toolbox"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

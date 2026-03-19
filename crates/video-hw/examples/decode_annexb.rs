@@ -2,26 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-#[cfg(all(
-    feature = "backend-intel",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::IntelDecoderAdapter;
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::NvDecoderAdapter;
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
-use video_hw::VtDecoderAdapter;
-#[cfg(all(
-    feature = "backend-vulkan",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::VulkanDecoderAdapter;
 use video_hw::{
-    Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput, Codec,
-    DecodeOutputMode, DecodeSession, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
+    AnyDecodeSession, Backend, BackendDecoderOptions, BackendKind, BitstreamInput, Codec,
+    DecodeOutputMode, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -48,7 +31,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let codec = parse_codec(&args.codec)?;
-    let backend = parse_backend(&args.backend)?;
+    let backend: Backend = args.backend.parse()?;
     let mut config = DecoderConfig {
         codec,
         fps: args.fps,
@@ -60,7 +43,7 @@ fn main() -> Result<()> {
         .resolve_decoder(&config)
         .context("failed to resolve decoder backend")?;
     let input_path = args.input.unwrap_or_else(|| default_decode_input(codec));
-    let backend_options = if backend_is_nvidia(resolved_backend) {
+    config.backend_options = if backend_is_nvidia(resolved_backend) {
         BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
             report_metrics: args.nv_report_metrics,
         })
@@ -71,35 +54,12 @@ fn main() -> Result<()> {
     } else {
         BackendDecoderOptions::Default
     };
-    config.backend_options = backend_options;
 
     let data = fs::read(&input_path)
         .with_context(|| format!("failed to read input stream: {}", input_path.display()))?;
     let step = args.chunk_bytes.max(1);
-
-    #[allow(unreachable_patterns)]
-    let (total_decoded, summary): (usize, video_hw::DecodeSummary) = match resolved_backend {
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        BackendKind::Nvidia => decode_with_nvidia(config, &data, step).context("decode failed")?,
-        #[cfg(all(
-            feature = "backend-intel",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        BackendKind::Intel => decode_with_intel(config, &data, step).context("decode failed")?,
-        #[cfg(all(
-            feature = "backend-vulkan",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        BackendKind::Vulkan => decode_with_vulkan(config, &data, step).context("decode failed")?,
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        BackendKind::VideoToolbox => {
-            decode_with_vt(config, &data, step).context("decode failed")?
-        }
-        _ => anyhow::bail!("resolved backend is not enabled in this build: {resolved_backend}"),
-    };
+    let (total_decoded, summary) =
+        decode_with_backend(resolved_backend, config, &data, step).context("decode failed")?;
 
     println!(
         "decoded_frames={}, width={:?}, height={:?}, pixel_format={:?}, input={}, chunk_bytes={}, backend={}",
@@ -115,180 +75,43 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn decode_with_backend(
+    resolved_backend: BackendKind,
+    config: DecoderConfig,
+    data: &[u8],
+    step: usize,
+) -> Result<(usize, video_hw::DecodeSummary), video_hw::BackendError> {
+    let mut decoder = AnyDecodeSession::with_backend_kind(resolved_backend, config)?;
+    let mut total_decoded = 0usize;
+    for chunk in data.chunks(step) {
+        loop {
+            match decoder.submit(BitstreamInput::AnnexBChunk {
+                chunk: chunk.to_vec(),
+                pts_90k: None,
+            }) {
+                Ok(()) => break,
+                Err(video_hw::BackendError::TemporaryBackpressure(_)) => {
+                    while decoder.try_reap()?.is_some() {
+                        total_decoded += 1;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    while decoder.try_reap()?.is_some() {
+        total_decoded += 1;
+    }
+    total_decoded += decoder.flush()?.len();
+    Ok((total_decoded, decoder.summary()))
+}
+
 fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
-}
-
-fn parse_backend(raw: &str) -> Result<Backend> {
-    match raw.to_ascii_lowercase().as_str() {
-        #[cfg(any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        ))]
-        "auto" => Ok(Backend::Auto),
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        "vt" | "videotoolbox" => Ok(Backend::VideoToolbox),
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "nvidia" | "nv" => Ok(Backend::Nvidia),
-        #[cfg(all(
-            feature = "backend-intel",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "intel" | "qsv" => Ok(Backend::Intel),
-        #[cfg(all(
-            feature = "backend-vulkan",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "vulkan" | "vk" => Ok(Backend::Vulkan),
-        other => anyhow::bail!("unsupported backend: {other}"),
-    }
-}
-
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-fn decode_with_nvidia(
-    config: DecoderConfig,
-    data: &[u8],
-    step: usize,
-) -> Result<(usize, video_hw::DecodeSummary), BackendError> {
-    let mut decoder = DecodeSession::<NvDecoderAdapter>::new(config);
-    let mut total_decoded = 0usize;
-    for chunk in data.chunks(step) {
-        loop {
-            match decoder.submit(BitstreamInput::AnnexBChunk {
-                chunk: chunk.to_vec(),
-                pts_90k: None,
-            }) {
-                Ok(()) => break,
-                Err(BackendError::TemporaryBackpressure(_)) => {
-                    while decoder.try_reap()?.is_some() {
-                        total_decoded += 1;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-    while decoder.try_reap()?.is_some() {
-        total_decoded += 1;
-    }
-    total_decoded += decoder.flush()?.len();
-    Ok((total_decoded, decoder.summary()))
-}
-
-#[cfg(all(
-    feature = "backend-intel",
-    any(target_os = "linux", target_os = "windows")
-))]
-fn decode_with_intel(
-    config: DecoderConfig,
-    data: &[u8],
-    step: usize,
-) -> Result<(usize, video_hw::DecodeSummary), BackendError> {
-    let mut decoder = DecodeSession::<IntelDecoderAdapter>::new(config);
-    let mut total_decoded = 0usize;
-    for chunk in data.chunks(step) {
-        loop {
-            match decoder.submit(BitstreamInput::AnnexBChunk {
-                chunk: chunk.to_vec(),
-                pts_90k: None,
-            }) {
-                Ok(()) => break,
-                Err(BackendError::TemporaryBackpressure(_)) => {
-                    while decoder.try_reap()?.is_some() {
-                        total_decoded += 1;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-    while decoder.try_reap()?.is_some() {
-        total_decoded += 1;
-    }
-    total_decoded += decoder.flush()?.len();
-    Ok((total_decoded, decoder.summary()))
-}
-
-#[cfg(all(
-    feature = "backend-vulkan",
-    any(target_os = "linux", target_os = "windows")
-))]
-fn decode_with_vulkan(
-    config: DecoderConfig,
-    data: &[u8],
-    step: usize,
-) -> Result<(usize, video_hw::DecodeSummary), BackendError> {
-    let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(config);
-    let mut total_decoded = 0usize;
-    for chunk in data.chunks(step) {
-        loop {
-            match decoder.submit(BitstreamInput::AnnexBChunk {
-                chunk: chunk.to_vec(),
-                pts_90k: None,
-            }) {
-                Ok(()) => break,
-                Err(BackendError::TemporaryBackpressure(_)) => {
-                    while decoder.try_reap()?.is_some() {
-                        total_decoded += 1;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-    while decoder.try_reap()?.is_some() {
-        total_decoded += 1;
-    }
-    total_decoded += decoder.flush()?.len();
-    Ok((total_decoded, decoder.summary()))
-}
-
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
-fn decode_with_vt(
-    config: DecoderConfig,
-    data: &[u8],
-    step: usize,
-) -> Result<(usize, video_hw::DecodeSummary), BackendError> {
-    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(config);
-    let mut total_decoded = 0usize;
-    for chunk in data.chunks(step) {
-        loop {
-            match decoder.submit(BitstreamInput::AnnexBChunk {
-                chunk: chunk.to_vec(),
-                pts_90k: None,
-            }) {
-                Ok(()) => break,
-                Err(BackendError::TemporaryBackpressure(_)) => {
-                    while decoder.try_reap()?.is_some() {
-                        total_decoded += 1;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-    while decoder.try_reap()?.is_some() {
-        total_decoded += 1;
-    }
-    total_decoded += decoder.flush()?.len();
-    Ok((total_decoded, decoder.summary()))
 }
 
 #[cfg(all(
@@ -325,7 +148,7 @@ fn backend_is_intel(_backend: BackendKind) -> bool {
 
 fn default_decode_input(codec: Codec) -> PathBuf {
     match codec {
-        Codec::H264 => PathBuf::from("sample-videos/sample-10s.h264"),
-        Codec::Hevc => PathBuf::from("sample-videos/sample-10s.h265"),
+        Codec::H264 => PathBuf::from("assets/h264_annexb.ts.h264"),
+        Codec::Hevc => PathBuf::from("assets/hevc_annexb.ts.h265"),
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 mod contract;
@@ -89,6 +90,27 @@ pub enum Backend {
     Vulkan,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendParseError {
+    input: String,
+}
+
+impl BackendParseError {
+    fn new(input: &str) -> Self {
+        Self {
+            input: input.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for BackendParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unsupported backend: {}", self.input)
+    }
+}
+
+impl std::error::Error for BackendParseError {}
+
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -162,6 +184,63 @@ impl fmt::Display for Backend {
                 any(target_os = "linux", target_os = "windows")
             ))]
             Backend::Vulkan => f.write_str("vulkan"),
+        }
+    }
+}
+
+impl Backend {
+    #[must_use]
+    pub fn supported() -> Vec<Self> {
+        [
+            Some(Self::Auto),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            Some(Self::VideoToolbox),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Some(Self::Nvidia),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Some(Self::Intel),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            Some(Self::Vulkan),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+impl FromStr for Backend {
+    type Err = BackendParseError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            "vt" | "videotoolbox" => Ok(Self::VideoToolbox),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "nvidia" | "nv" => Ok(Self::Nvidia),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "intel" | "qsv" => Ok(Self::Intel),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "vulkan" | "vk" => Ok(Self::Vulkan),
+            _ => Err(BackendParseError::new(raw)),
         }
     }
 }
@@ -548,6 +627,174 @@ pub trait EncoderBackend: VideoEncoder {
 
 pub trait SessionSwitchingEncoderBackend: EncoderBackend {}
 
+trait DynDecodeSession {
+    fn backend_kind(&self) -> BackendKind;
+    fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError>;
+    fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError>;
+    fn flush(&mut self) -> Result<Vec<DecodedFrame>, BackendError>;
+    fn summary(&self) -> DecodeSummary;
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
+}
+
+trait DynEncodeSession {
+    fn backend_kind(&self) -> BackendKind;
+    fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError>;
+    fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError>;
+    fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError>;
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError>;
+    fn request_session_switch(&mut self, request: SessionSwitchRequest)
+    -> Result<(), BackendError>;
+    fn requires_periodic_fragment_flush(&self) -> bool;
+}
+
+pub struct AnyDecodeSession {
+    inner: Box<dyn DynDecodeSession>,
+}
+
+impl AnyDecodeSession {
+    pub fn new(backend: Backend, config: DecoderConfig) -> Result<Self, BackendError> {
+        let kind = backend.resolve_decoder(&config)?;
+        Self::with_backend_kind(kind, config)
+    }
+
+    pub fn with_backend_kind(
+        kind: BackendKind,
+        config: DecoderConfig,
+    ) -> Result<Self, BackendError> {
+        let _ = &config;
+        match kind {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            BackendKind::VideoToolbox => Ok(Self {
+                inner: Box::new(DecodeSession::<VtDecoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Nvidia => Ok(Self {
+                inner: Box::new(DecodeSession::<NvDecoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Intel => Ok(Self {
+                inner: Box::new(DecodeSession::<IntelDecoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Vulkan => Ok(Self {
+                inner: Box::new(DecodeSession::<VulkanDecoderAdapter>::new(config)),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn backend_kind(&self) -> BackendKind {
+        self.inner.backend_kind()
+    }
+
+    pub fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
+        self.inner.submit(input)
+    }
+
+    pub fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError> {
+        self.inner.try_reap()
+    }
+
+    pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, BackendError> {
+        self.inner.flush()
+    }
+
+    pub fn summary(&self) -> DecodeSummary {
+        self.inner.summary()
+    }
+
+    pub fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        self.inner.query_capability(codec)
+    }
+}
+
+pub struct AnyEncodeSession {
+    inner: Box<dyn DynEncodeSession>,
+}
+
+impl AnyEncodeSession {
+    pub fn new(backend: Backend, config: EncoderConfig) -> Result<Self, BackendError> {
+        let kind = backend.resolve_encoder(&config)?;
+        Self::with_backend_kind(kind, config)
+    }
+
+    pub fn with_backend_kind(
+        kind: BackendKind,
+        config: EncoderConfig,
+    ) -> Result<Self, BackendError> {
+        let _ = &config;
+        match kind {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            BackendKind::VideoToolbox => Ok(Self {
+                inner: Box::new(EncodeSession::<VtEncoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Nvidia => Ok(Self {
+                inner: Box::new(EncodeSession::<NvEncoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Intel => Ok(Self {
+                inner: Box::new(EncodeSession::<IntelEncoderAdapter>::new(config)),
+            }),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            BackendKind::Vulkan => Ok(Self {
+                inner: Box::new(EncodeSession::<VulkanEncoderAdapter>::new(config)),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn backend_kind(&self) -> BackendKind {
+        self.inner.backend_kind()
+    }
+
+    pub fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
+        self.inner.submit(frame)
+    }
+
+    pub fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
+        self.inner.try_reap()
+    }
+
+    pub fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
+        self.inner.flush()
+    }
+
+    pub fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        self.inner.query_capability(codec)
+    }
+
+    pub fn request_session_switch(
+        &mut self,
+        request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        self.inner.request_session_switch(request)
+    }
+
+    #[must_use]
+    pub fn requires_periodic_fragment_flush(&self) -> bool {
+        self.inner.requires_periodic_fragment_flush()
+    }
+}
+
 pub struct DecodeSession<D: VideoDecoder> {
     decoder_inner: D,
     output_mode: DecodeOutputMode,
@@ -671,6 +918,35 @@ where
     #[must_use]
     pub fn backend_kind_static() -> BackendKind {
         D::BACKEND_KIND
+    }
+}
+
+impl<D> DynDecodeSession for DecodeSession<D>
+where
+    D: DecoderBackend + 'static,
+{
+    fn backend_kind(&self) -> BackendKind {
+        D::BACKEND_KIND
+    }
+
+    fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
+        DecodeSession::submit(self, input)
+    }
+
+    fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError> {
+        DecodeSession::try_reap(self)
+    }
+
+    fn flush(&mut self) -> Result<Vec<DecodedFrame>, BackendError> {
+        DecodeSession::flush(self)
+    }
+
+    fn summary(&self) -> DecodeSummary {
+        DecodeSession::summary(self)
+    }
+
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        DecodeSession::query_capability(self, codec)
     }
 }
 
@@ -798,6 +1074,42 @@ where
         request: SessionSwitchRequest,
     ) -> Result<(), BackendError> {
         self.encoder_inner.request_session_switch(request)
+    }
+}
+
+impl<E> DynEncodeSession for EncodeSession<E>
+where
+    E: EncoderBackend + 'static,
+{
+    fn backend_kind(&self) -> BackendKind {
+        EncodeSession::backend_kind(self)
+    }
+
+    fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
+        EncodeSession::submit(self, frame)
+    }
+
+    fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
+        EncodeSession::try_reap(self)
+    }
+
+    fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
+        EncodeSession::flush(self)
+    }
+
+    fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        EncodeSession::query_capability(self, codec)
+    }
+
+    fn request_session_switch(
+        &mut self,
+        request: SessionSwitchRequest,
+    ) -> Result<(), BackendError> {
+        EncodeSession::request_session_switch(self, request)
+    }
+
+    fn requires_periodic_fragment_flush(&self) -> bool {
+        true
     }
 }
 

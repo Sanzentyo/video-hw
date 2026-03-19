@@ -31,27 +31,9 @@ use shiguredo_mp4::{
 use shiguredo_video_device::{
     PixelFormat, VideoCapture, VideoCaptureConfig, VideoDeviceList, VideoFrame, VideoFrameOwned,
 };
-use video_hw::BackendError;
-#[cfg(all(
-    feature = "backend-intel",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::IntelEncoderAdapter;
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::NvEncoderAdapter;
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
-use video_hw::VtEncoderAdapter;
-#[cfg(all(
-    feature = "backend-vulkan",
-    any(target_os = "linux", target_os = "windows")
-))]
-use video_hw::VulkanEncoderAdapter;
 use video_hw::{
-    Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodedChunk,
-    EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
+    AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
+    EncodedChunk, EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Debug, Parser)]
@@ -135,7 +117,6 @@ struct UiFrame {
 #[derive(Debug)]
 struct CapturedFrame {
     frame: VideoFrameOwned,
-    captured_at: Instant,
 }
 
 #[derive(Debug)]
@@ -335,7 +316,7 @@ fn run_recorder_file_writer(
 }
 
 struct RecorderState {
-    encoder: BackendEncoderSession,
+    encoder: AnyEncodeSession,
     muxer: Fmp4SegmentMuxer,
     writer: RecorderFileWriter,
     output_path: PathBuf,
@@ -433,7 +414,7 @@ impl RecorderState {
             .context("failed to compute default frame duration")?;
 
         Ok(Self {
-            encoder: BackendEncoderSession::new(resolved_backend, config)?,
+            encoder: AnyEncodeSession::with_backend_kind(resolved_backend, config)?,
             muxer: Fmp4SegmentMuxer::with_options(SegmentMuxerOptions { creation_timestamp })
                 .context("failed to create fMP4 muxer")?,
             writer,
@@ -1001,6 +982,7 @@ struct CameraRecordApp {
     fragment_frames: usize,
     pending_fragment_frames: usize,
     recording_seq: u64,
+    recording_submitted_frames: u64,
     recording: Option<RecorderWorker>,
     recording_queue_depth: usize,
     controls_collapsed: bool,
@@ -1052,6 +1034,7 @@ impl CameraRecordApp {
             pending_fragment_frames: init.fragment_frames.max(1),
             recording_settings: init.recording_settings,
             recording_seq: 0,
+            recording_submitted_frames: 0,
             recording: None,
             recording_queue_depth: 0,
             controls_collapsed: false,
@@ -1079,7 +1062,7 @@ impl CameraRecordApp {
             return;
         }
         let mut statuses = Vec::new();
-        for backend in selectable_backends() {
+        for backend in Backend::supported() {
             let mut settings = self.current_recording_settings();
             settings.backend = backend;
             let status =
@@ -1113,10 +1096,18 @@ impl CameraRecordApp {
         self.total_received = self.total_received.saturating_add(1);
 
         if let Some(recorder) = self.recording.as_mut() {
-            let started_at = *self.started_at.get_or_insert(captured.captured_at);
-            let pts_90k = instant_elapsed_to_90k(started_at, captured.captured_at);
+            let started_at = self.started_at.get_or_insert_with(Instant::now);
+            // Recording PTS is fixed-FPS based on submit order. Using capture wallclock here made
+            // playback duration drift and, combined with fragmented MP4 metadata, confused players.
+            let pts_90k = i64::try_from(
+                self.recording_submitted_frames
+                    .saturating_mul(fps_frame_duration_90k(self.fps)),
+            )
+            .unwrap_or(i64::MAX);
             recorder.submit_frame(ui_frame.rgba.clone(), pts_90k)?;
+            self.recording_submitted_frames = self.recording_submitted_frames.saturating_add(1);
             self.recording_queue_depth = self.recording_queue_depth.saturating_add(1);
+            let _ = started_at;
         }
 
         self.latest = Some(ui_frame);
@@ -1130,10 +1121,7 @@ impl CameraRecordApp {
         if self.displayed_timestamp_us == Some(frame.timestamp_us) {
             return;
         }
-        let expected_rgba_len = frame
-            .width
-            .saturating_mul(frame.height)
-            .saturating_mul(4);
+        let expected_rgba_len = frame.width.saturating_mul(frame.height).saturating_mul(4);
         if frame.rgba.len() != expected_rgba_len {
             self.status_message = format!(
                 "preview frame dropped: rgba size mismatch (expected {}, got {})",
@@ -1265,6 +1253,7 @@ impl CameraRecordApp {
         ) {
             Ok(worker) => {
                 self.started_at = None;
+                self.recording_submitted_frames = 0;
                 self.recording_queue_depth = 0;
                 self.status_message = "recording ON: worker started".to_string();
                 self.recording = Some(worker);
@@ -1278,6 +1267,7 @@ impl CameraRecordApp {
     fn stop_recording(&mut self) {
         if let Some(mut recorder) = self.recording.take() {
             self.recording_queue_depth = 0;
+            self.recording_submitted_frames = 0;
             match recorder.finish() {
                 Ok(summary) => {
                     self.status_message = format!(
@@ -1300,6 +1290,7 @@ impl CameraRecordApp {
 
     fn handle_recording_worker_error(&mut self, message: String) {
         self.recording_queue_depth = 0;
+        self.recording_submitted_frames = 0;
         let join_result = if let Some(mut recorder) = self.recording.take() {
             let result = recorder.join_only();
             self.refresh_backend_probe_statuses();
@@ -1395,7 +1386,7 @@ impl CameraRecordApp {
                 egui::ComboBox::from_id_salt("record-backend")
                     .selected_text(self.selected_backend.to_string())
                     .show_ui(ui, |ui| {
-                        for backend in selectable_backends() {
+                        for backend in Backend::supported() {
                             ui.selectable_value(
                                 &mut self.selected_backend,
                                 backend,
@@ -1595,7 +1586,6 @@ fn main() -> Result<()> {
                     move |frame: VideoFrame<'_>| {
                         let _ = frame_tx.send(CapturedFrame {
                             frame: frame.to_owned(),
-                            captured_at: Instant::now(),
                         });
                     },
                 )
@@ -1733,7 +1723,7 @@ fn parse_args() -> Result<Args> {
         }
     } else {
         RecordingSettings {
-            backend: parse_backend(&cli.backend)?,
+            backend: cli.backend.parse()?,
             codec: parse_codec(&cli.codec)?,
             require_hardware: cli.require_hardware,
             intel_force_software: cli.intel_force_software,
@@ -1779,56 +1769,6 @@ fn parse_codec(raw: &str) -> Result<Codec> {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
         other => anyhow::bail!("unsupported codec: {other}"),
-    }
-}
-
-fn selectable_backends() -> Vec<Backend> {
-    [
-        Some(Backend::Auto),
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        Some(Backend::VideoToolbox),
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        Some(Backend::Nvidia),
-        #[cfg(all(
-            feature = "backend-intel",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        Some(Backend::Intel),
-        #[cfg(all(
-            feature = "backend-vulkan",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        Some(Backend::Vulkan),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-fn parse_backend(raw: &str) -> Result<Backend> {
-    match raw.to_ascii_lowercase().as_str() {
-        "auto" => Ok(Backend::Auto),
-        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        "vt" | "videotoolbox" => Ok(Backend::VideoToolbox),
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "nvidia" | "nv" => Ok(Backend::Nvidia),
-        #[cfg(all(
-            feature = "backend-intel",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "intel" | "qsv" => Ok(Backend::Intel),
-        #[cfg(all(
-            feature = "backend-vulkan",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        "vulkan" | "vk" => Ok(Backend::Vulkan),
-        other => anyhow::bail!("unsupported backend: {other}"),
     }
 }
 
@@ -2152,14 +2092,8 @@ fn hevc_nal_type(nalu: &[u8]) -> u8 {
     (nalu[0] >> 1) & 0x3f
 }
 
-fn timestamp_us_to_90k(timestamp_us: i64) -> i64 {
-    timestamp_us.saturating_mul(90).div_euclid(1000)
-}
-
-fn instant_elapsed_to_90k(started_at: Instant, now: Instant) -> i64 {
-    let micros = now.duration_since(started_at).as_micros();
-    let micros = i64::try_from(micros).unwrap_or(i64::MAX);
-    timestamp_us_to_90k(micros)
+fn fps_frame_duration_90k(fps: i32) -> u64 {
+    90_000 / u64::try_from(fps.max(1)).unwrap_or(1)
 }
 
 fn duration_90k_to_seconds(duration_90k: u64) -> f64 {
@@ -2204,21 +2138,17 @@ fn patch_fmp4_init_segment_timing(
     );
     moov_box.mvhd_box.creation_time = creation_time;
     moov_box.mvhd_box.modification_time = creation_time;
-    moov_box.mvhd_box.duration = movie_duration;
+    // For fragmented MP4, QuickTime/Finder showed about double duration if both the header boxes
+    // and `mehd` carried the finalized length. Keep the real duration only in `mehd`.
+    moov_box.mvhd_box.duration = 0;
 
     for trak in &mut moov_box.trak_boxes {
         trak.tkhd_box.creation_time = creation_time;
         trak.tkhd_box.modification_time = creation_time;
-        trak.tkhd_box.duration = movie_duration;
-
-        let media_duration = convert_duration_timescale(
-            duration_in_input_timescale,
-            input_timescale,
-            trak.mdia_box.mdhd_box.timescale,
-        );
+        trak.tkhd_box.duration = 0;
         trak.mdia_box.mdhd_box.creation_time = creation_time;
         trak.mdia_box.mdhd_box.modification_time = creation_time;
-        trak.mdia_box.mdhd_box.duration = media_duration;
+        trak.mdia_box.mdhd_box.duration = 0;
     }
 
     if let Some(mvex_box) = moov_box.mvex_box.as_mut()
@@ -2393,189 +2323,6 @@ fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
-enum BackendEncoderSession {
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    Nvidia(Box<video_hw::EncodeSession<NvEncoderAdapter>>),
-    #[cfg(all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    Intel(Box<video_hw::EncodeSession<IntelEncoderAdapter>>),
-    #[cfg(all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    Vulkan(Box<video_hw::EncodeSession<VulkanEncoderAdapter>>),
-    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    VideoToolbox(Box<video_hw::EncodeSession<VtEncoderAdapter>>),
-}
-
-#[cfg(any(
-    all(feature = "backend-vt", target_os = "macos"),
-    all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ),
-    all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ),
-    all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    )
-))]
-impl BackendEncoderSession {
-    fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
-        let session = match backend {
-            #[cfg(all(
-                feature = "backend-nvidia",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            BackendKind::Nvidia => Self::Nvidia(Box::new(video_hw::EncodeSession::<
-                NvEncoderAdapter,
-            >::new(config))),
-            #[cfg(all(
-                feature = "backend-intel",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            BackendKind::Intel => Self::Intel(Box::new(video_hw::EncodeSession::<
-                IntelEncoderAdapter,
-            >::new(config))),
-            #[cfg(all(
-                feature = "backend-vulkan",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            BackendKind::Vulkan => Self::Vulkan(Box::new(video_hw::EncodeSession::<
-                VulkanEncoderAdapter,
-            >::new(config))),
-            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            BackendKind::VideoToolbox => Self::VideoToolbox(Box::new(video_hw::EncodeSession::<
-                VtEncoderAdapter,
-            >::new(config))),
-        };
-        Ok(session)
-    }
-
-    fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
-        match self {
-            #[cfg(all(
-                feature = "backend-nvidia",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Nvidia(session) => session.submit(frame),
-            #[cfg(all(
-                feature = "backend-intel",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Intel(session) => session.submit(frame),
-            #[cfg(all(
-                feature = "backend-vulkan",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Vulkan(session) => session.submit(frame),
-            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            Self::VideoToolbox(session) => session.submit(frame),
-        }
-    }
-
-    fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
-        match self {
-            #[cfg(all(
-                feature = "backend-nvidia",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Nvidia(session) => session.try_reap(),
-            #[cfg(all(
-                feature = "backend-intel",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Intel(session) => session.try_reap(),
-            #[cfg(all(
-                feature = "backend-vulkan",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Vulkan(session) => session.try_reap(),
-            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            Self::VideoToolbox(session) => session.try_reap(),
-        }
-    }
-
-    fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
-        match self {
-            #[cfg(all(
-                feature = "backend-nvidia",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Nvidia(session) => session.flush(),
-            #[cfg(all(
-                feature = "backend-intel",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Intel(session) => session.flush(),
-            #[cfg(all(
-                feature = "backend-vulkan",
-                any(target_os = "linux", target_os = "windows")
-            ))]
-            Self::Vulkan(session) => session.flush(),
-            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-            Self::VideoToolbox(session) => session.flush(),
-        }
-    }
-
-    fn requires_periodic_fragment_flush(&self) -> bool {
-        true
-    }
-}
-
-#[cfg(not(any(
-    all(feature = "backend-vt", target_os = "macos"),
-    all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ),
-    all(
-        feature = "backend-intel",
-        any(target_os = "linux", target_os = "windows")
-    ),
-    all(
-        feature = "backend-vulkan",
-        any(target_os = "linux", target_os = "windows")
-    )
-)))]
-impl BackendEncoderSession {
-    fn new(_backend: BackendKind, _config: EncoderConfig) -> Result<Self> {
-        anyhow::bail!(
-            "no encoder backend compiled; enable one of backend-nvidia/backend-intel/backend-vulkan/backend-vt"
-        )
-    }
-
-    fn submit(&mut self, _frame: EncodeFrame) -> Result<(), BackendError> {
-        Err(BackendError::UnsupportedConfig(
-            "no encoder backend compiled for this target".to_string(),
-        ))
-    }
-
-    fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
-        Err(BackendError::UnsupportedConfig(
-            "no encoder backend compiled for this target".to_string(),
-        ))
-    }
-
-    fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
-        Err(BackendError::UnsupportedConfig(
-            "no encoder backend compiled for this target".to_string(),
-        ))
-    }
-
-    fn requires_periodic_fragment_flush(&self) -> bool {
-        false
-    }
-}
-
 #[cfg(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
@@ -2696,11 +2443,12 @@ mod tests {
 
         assert_eq!(moov.mvhd_box.creation_time.as_secs(), expected_creation);
         assert_eq!(moov.mvhd_box.modification_time.as_secs(), expected_creation);
-        assert!(moov.mvhd_box.duration > 0);
+        assert_eq!(moov.mvhd_box.duration, 0);
 
         for trak in &moov.trak_boxes {
             assert_eq!(trak.tkhd_box.creation_time.as_secs(), expected_creation);
             assert_eq!(trak.tkhd_box.modification_time.as_secs(), expected_creation);
+            assert_eq!(trak.tkhd_box.duration, 0);
             assert_eq!(
                 trak.mdia_box.mdhd_box.creation_time.as_secs(),
                 expected_creation
@@ -2709,7 +2457,7 @@ mod tests {
                 trak.mdia_box.mdhd_box.modification_time.as_secs(),
                 expected_creation
             );
-            assert_eq!(trak.mdia_box.mdhd_box.duration, 6_000);
+            assert_eq!(trak.mdia_box.mdhd_box.duration, 0);
         }
 
         let mehd_duration = moov
@@ -2717,6 +2465,13 @@ mod tests {
             .and_then(|mvex| mvex.mehd_box)
             .map(|mehd| mehd.fragment_duration)
             .expect("mehd should exist");
-        assert_eq!(mehd_duration, moov.mvhd_box.duration);
+        assert_eq!(
+            mehd_duration,
+            convert_duration_timescale(
+                6_000,
+                NonZeroU32::new(90_000).expect("constant timescale is non-zero"),
+                moov.mvhd_box.timescale,
+            )
+        );
     }
 }

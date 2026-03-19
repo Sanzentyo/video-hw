@@ -1,0 +1,30 @@
+[package]
+name = "video-hw-fmp4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+async-session = ["dep:tokio"]
+unstable-raw-inputs = ["video-hw/unstable-raw-inputs"]
+backend-vt = ["video-hw/backend-vt"]
+backend-nvidia = ["video-hw/backend-nvidia"]
+backend-intel = ["video-hw/backend-intel"]
+backend-vulkan = ["video-hw/backend-vulkan"]
+
+[dependencies]
+anyhow = "1.0.101"
+shiguredo_mp4 = "2026.2.0"
+video-hw = { path = "../video-hw", default-features = false }
+tokio = { version = "1.50.0", features = ["rt", "sync"], optional = true }
+
+[dev-dependencies]
+clap = { version = "4.5.59", features = ["derive"] }
+eframe = "0.33.3"
+shiguredo_video_device = "2026.1.0-canary.3"
+
+[[example]]
+name = "camera_record_fmp4_gui"
+required-features = ["async-session"]

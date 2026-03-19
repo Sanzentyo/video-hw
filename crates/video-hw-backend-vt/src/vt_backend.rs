@@ -32,8 +32,7 @@ use core_media::{
         kCMVideoCodecType_HEVC,
     },
     sample_buffer::{
-        CMSampleBuffer, CMSampleBufferGetFormatDescription, CMSampleBufferRef,
-        CMSampleTimingInfo,
+        CMSampleBuffer, CMSampleBufferGetFormatDescription, CMSampleBufferRef, CMSampleTimingInfo,
     },
     time::{CMTime, kCMTimeInvalid},
 };
