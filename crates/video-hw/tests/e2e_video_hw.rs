@@ -623,6 +623,54 @@ fn e2e_vulkan_decode_hevc_smoke() {
     }
 }
 
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
+fn e2e_vulkan_decode_hevc_sequential_non_metadata_modes() {
+    let data = fs::read(sample_path("sample-10s.h265")).expect("sample bitstream should exist");
+
+    for mode in [DecodeOutputMode::Rgb24, DecodeOutputMode::Nv12] {
+        let mut decoder = DecodeSession::<VulkanDecoderAdapter>::new(DecoderConfig {
+            codec: Codec::Hevc,
+            fps: 30,
+            require_hardware: true,
+            output_mode: mode,
+            backend_options: BackendDecoderOptions::Default,
+        });
+        let mut total = 0usize;
+        for chunk in data.chunks(4096) {
+            if let Err(err) = decoder.submit(BitstreamInput::AnnexBChunk {
+                chunk: chunk.to_vec(),
+                pts_90k: None,
+            }) {
+                if vulkan_runtime_unsupported(&err) {
+                    eprintln!("skip: Vulkan HEVC decode unavailable for mode={mode}: {err}");
+                    return;
+                }
+                panic!("unexpected Vulkan HEVC submit error for mode={mode}: {err:?}");
+            }
+            while let Some(_frame) = decoder.try_reap().expect("try_reap should succeed") {
+                total += 1;
+            }
+        }
+        match decoder.flush() {
+            Ok(frames) => {
+                total += frames.len();
+                assert_eq!(total, 303, "expected 303 decoded frames for mode={mode}");
+            }
+            Err(err) if vulkan_runtime_unsupported(&err) => {
+                eprintln!("skip: Vulkan HEVC decode unavailable for mode={mode}: {err}");
+                return;
+            }
+            Err(err) => {
+                panic!("unexpected Vulkan HEVC flush error for mode={mode}: {err:?}");
+            }
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_decode_metadata_includes_pts_and_decode_flags() {

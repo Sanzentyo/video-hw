@@ -157,6 +157,7 @@ pub fn argb_to_nv12(
 }
 
 mod vulkan_hevc_decode;
+mod vulkan_hevc_encode;
 
 mod vulkan_backend;
 

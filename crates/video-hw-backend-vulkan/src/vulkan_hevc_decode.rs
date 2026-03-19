@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::ffi::CStr;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use ash::vk;
@@ -201,6 +204,14 @@ struct ParsedHevcSliceHeader {
 const MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS: usize = 16;
 const HEVC_REF_PIC_SET_LIST_SIZE: usize = 8;
 const HEVC_NO_REFERENCE_PICTURE: u8 = u8::MAX;
+const HEVC_DECODE_BOOTSTRAP_CACHE_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HevcDecodeBootstrapCacheKey {
+    bitstream_hash: u64,
+    bitstream_len: usize,
+    submit_probe_access_unit_limit: Option<usize>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcExperimentalDpbMode {
@@ -249,7 +260,7 @@ struct HevcSubmitProbeBitstreamPayload {
 }
 
 #[derive(Debug, Clone)]
-struct HevcStdParameterSetStorage {
+pub(crate) struct HevcStdParameterSetStorage {
     vps: [StdVideoH265VideoParameterSet; 1],
     sps: [StdVideoH265SequenceParameterSet; 1],
     pps: [StdVideoH265PictureParameterSet; 1],
@@ -265,6 +276,39 @@ impl HevcStdParameterSetStorage {
             .std_vp_ss(&self.vps)
             .std_sp_ss(&self.sps)
             .std_pp_ss(&self.pps)
+    }
+
+    pub(crate) fn encode_add_info_with_filter(
+        &self,
+        include_vps: bool,
+        include_sps: bool,
+        include_pps: bool,
+    ) -> vk::VideoEncodeH265SessionParametersAddInfoKHR<'_> {
+        let vps: &[StdVideoH265VideoParameterSet] = if include_vps { &self.vps } else { &[] };
+        let sps: &[StdVideoH265SequenceParameterSet] = if include_sps { &self.sps } else { &[] };
+        let pps: &[StdVideoH265PictureParameterSet] = if include_pps { &self.pps } else { &[] };
+        vk::VideoEncodeH265SessionParametersAddInfoKHR::default()
+            .std_vp_ss(vps)
+            .std_sp_ss(sps)
+            .std_pp_ss(pps)
+    }
+
+    pub(crate) fn encode_parameter_set_ids(&self) -> (u8, u8, u8) {
+        (
+            self.vps[0].vps_video_parameter_set_id,
+            self.sps[0].sps_seq_parameter_set_id,
+            self.pps[0].pps_pic_parameter_set_id,
+        )
+    }
+
+    pub(crate) fn encode_pps_init_qp_minus26(&self) -> i8 {
+        self.pps[0].init_qp_minus26
+    }
+
+    pub(crate) fn override_encode_sps_vui_parameters_present_flag(&mut self, present: bool) {
+        self.sps[0]
+            .flags
+            .set_vui_parameters_present_flag(bool_to_u32(present));
     }
 }
 
@@ -509,6 +553,11 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
     bitstream: &[u8],
     submit_probe_access_unit_limit: Option<usize>,
 ) -> Result<HevcDecodeSessionBootstrap, String> {
+    let cache_key = hevc_decode_bootstrap_cache_key(bitstream, submit_probe_access_unit_limit);
+    if let Some(cached) = lookup_hevc_decode_bootstrap_cache(cache_key) {
+        return Ok(cached);
+    }
+
     let machine = HevcSessionBootstrapMachine::<AwaitingCapabilityProbe>::parse(bitstream)?;
     let submit_probe_access_unit_limit = submit_probe_access_unit_limit
         .unwrap_or(MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS)
@@ -548,7 +597,53 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
         instance.destroy_instance(None);
     }
 
+    if let Ok(bootstrap) = bootstrap_result.as_ref() {
+        store_hevc_decode_bootstrap_cache(cache_key, bootstrap.clone());
+    }
+
     bootstrap_result
+}
+
+fn hevc_decode_bootstrap_cache_key(
+    bitstream: &[u8],
+    submit_probe_access_unit_limit: Option<usize>,
+) -> HevcDecodeBootstrapCacheKey {
+    let mut hasher = DefaultHasher::new();
+    bitstream.hash(&mut hasher);
+    HevcDecodeBootstrapCacheKey {
+        bitstream_hash: hasher.finish(),
+        bitstream_len: bitstream.len(),
+        submit_probe_access_unit_limit,
+    }
+}
+
+fn hevc_decode_bootstrap_cache()
+-> &'static Mutex<HashMap<HevcDecodeBootstrapCacheKey, HevcDecodeSessionBootstrap>> {
+    static CACHE: OnceLock<
+        Mutex<HashMap<HevcDecodeBootstrapCacheKey, HevcDecodeSessionBootstrap>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lookup_hevc_decode_bootstrap_cache(
+    key: HevcDecodeBootstrapCacheKey,
+) -> Option<HevcDecodeSessionBootstrap> {
+    hevc_decode_bootstrap_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+}
+
+fn store_hevc_decode_bootstrap_cache(
+    key: HevcDecodeBootstrapCacheKey,
+    bootstrap: HevcDecodeSessionBootstrap,
+) {
+    if let Ok(mut cache) = hevc_decode_bootstrap_cache().lock() {
+        if cache.len() >= HEVC_DECODE_BOOTSTRAP_CACHE_CAPACITY && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, bootstrap);
+    }
 }
 
 impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
@@ -2345,7 +2440,7 @@ fn build_decode_readback_regions(
     Ok((next_offset, regions))
 }
 
-fn build_hevc_std_parameter_set_storage(
+pub(crate) fn build_hevc_std_parameter_set_storage(
     parameter_sets: &HevcParameterSets,
 ) -> Result<HevcStdParameterSetStorage, String> {
     let parsed_vps = parse_hevc_vps(&parameter_sets.vps)?;
@@ -4413,5 +4508,54 @@ mod tests {
                 || err.contains("missing SPS")
                 || err.contains("missing PPS")
         );
+    }
+
+    #[test]
+    fn hevc_decode_bootstrap_cache_keys_on_access_unit_limit() {
+        let bitstream = [0_u8, 0, 0, 1, 0x26, 0x01];
+        let uncapped_key = hevc_decode_bootstrap_cache_key(&bitstream, None);
+        let capped_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303));
+        assert_ne!(uncapped_key, capped_key);
+
+        let bootstrap = HevcDecodeSessionBootstrap {
+            coded_width: 1920,
+            coded_height: 1080,
+            min_coded_width: 64,
+            min_coded_height: 64,
+            max_coded_width: 8192,
+            max_coded_height: 8192,
+            max_dpb_slots: 8,
+            max_active_reference_pictures: 4,
+            max_level_idc: 120,
+            decode_output_formats: vec![vk::Format::G8_B8R8_2PLANE_420_UNORM],
+            video_session_create_probe: HevcVideoSessionCreateProbe::Created,
+            video_session_parameters_create_probe: HevcVideoSessionParametersCreateProbe::Created,
+            decode_submit_skeleton_probe: HevcDecodeSubmitSkeletonProbe::Skipped(
+                "test-only".to_string(),
+            ),
+            decode_submit_execution_probe: HevcDecodeSubmitExecutionProbe::Ready {
+                queue_family_index: 0,
+                output_format: vk::Format::G8_B8R8_2PLANE_420_UNORM,
+                coded_width: 1920,
+                coded_height: 1080,
+                readback_non_zero: true,
+                readback_bytes: 16,
+                readback_planes: 2,
+                readback_sample_stride: 16,
+                readback_sample_count: 1,
+                readback_sample: vec![1, 2, 3, 4],
+                submitted_access_units: 1,
+                experimental_dpb_enabled: false,
+                experimental_dpb_mode: "off",
+                experimental_dpb_status: "test-only".to_string(),
+            },
+        };
+        store_hevc_decode_bootstrap_cache(capped_key, bootstrap);
+
+        let cached =
+            lookup_hevc_decode_bootstrap_cache(capped_key).expect("bootstrap should be cached");
+        assert_eq!(cached.coded_width, 1920);
+        assert_eq!(cached.coded_height, 1080);
+        assert!(lookup_hevc_decode_bootstrap_cache(uncapped_key).is_none());
     }
 }

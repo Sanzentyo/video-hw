@@ -196,6 +196,10 @@ cargo test --workspace --features backend-intel -- --nocapture
 - `require_hardware=false` でも direct Vulkan backend に software fallback はありません（`Vulkan*Options::allow_software_fallback` は現時点では実質未対応）。
 - Vulkan loader/driver が `VK_KHR_video_queue` + H.264 decode/encode 拡張を提供している必要があります。
 - HEVC 直対応は調査中です。現在採用している `vk-video 0.2.1` が H.264 API のみ公開しているため、HEVC 実装には `VK_KHR_video_decode_h265` / `VK_KHR_video_encode_h265` を使う ash レベルの新規パスが必要です。
+- HEVC encode submit probe の session parameters は既定で `sample-videos/sample-10s.h265` の VPS/SPS/PPS を使用します。切り分け時は `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH=<Annex-B .h265>` で差し替え可能です（存在しない path は明示エラー、silent fallback なし）。なお encode probe の parameter-set は現状 Main profile（`profile_idc=1`）のみ受理し、非Main（例: `Rext`）は明示エラーで拒否します。さらに safety として、override sample が VUI を含み `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE=sample` の場合は実効 mode を `sample-sps-vui-flag-off` へ自動切替して access violation を回避します（従来挙動の再現が必要な場合は `sample-sps-no-vui-flag-on` を明示指定）。
+- HEVC encode probe の切り分け mode（`VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE`）は `sample-sps-no-vui` / `sample-sps-vui-flag-off` / `sample-sps-no-vui-flag-on` / `sample-sps-level` / `sample-sps-sub-layer-ordering` / `sample-sps-level-ordering` などを利用可能です。
+- 追加知見（NVENC Main override sample で確認）: `vui_parameters_present_flag` が crash/non-crash を強く分岐します。`sample`（実効 `sample-sps-vui-flag-off`）や `sample-sps-no-vui` は `vkEndCommandBuffer failed` 側で停止し、`sample-sps-no-vui-flag-on` は `0xc0000005 (STATUS_ACCESS_VIOLATION)` を再現します。
+- 再現時は `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH=output\\ffmpeg-hevc-nvenc-main-640x384.h265` を併用し、`encode_synthetic --backend vulkan --codec hevc --require-hardware` の blocker message に出る `parameter_mode=...` で実効 mode を確認してください。
 - HEVC decode 着手として、unsafe な Vulkan FFI 呼び出しを `vulkan_hevc_decode` モジュールに隔離し、上位 API からは安全な probe 結果（enum）だけを扱う境界にしています。
 - 上記 probe は拡張有無だけでなく、`VIDEO_DECODE_KHR` queue family と最小 logical-device 初期化まで検証し、失敗理由を `UnsupportedConfig` へ反映します。
 - HEVC Annex-B の VPS/SPS/PPS 抽出と SPS 由来の解像度解析は `scuffle-h265` で実装済みで、decode 未実装時の診断メッセージにパラメータセット状態を反映します。
@@ -204,6 +208,8 @@ cargo test --workspace --features backend-intel -- --nocapture
 - 現時点では PPS の `pps_scaling_list_data_present_flag=1` と `pps_extension_present_flag=1` を未対応として明示エラーにし、失敗理由が診断メッセージで分かるようにしています。
 - 上記 probe が成功した場合は decode submit/reap の次段実装向けに DPB slot / reference slot の計画骨組み（decode submit skeleton）も生成し、先頭 VCL slice header（NAL type / PPS id / POC LSB）解析結果と合わせて blocker message に `decode_submit_skeleton=...` として出力します。
 - さらに submit 実行前提として、`vkGetVideoSessionMemoryRequirementsKHR` / `vkBindVideoSessionMemoryKHR` / decode source buffer 準備 / `vkCmdBeginVideoCodingKHR`→`vkCmdDecodeVideoKHR`→`vkCmdEndVideoCodingKHR` の録画・submit・fence wait に加え、decode 出力 image を `vkCmdCopyImageToBuffer` で readback buffer へコピーし `vkMapMemory` で回収確認する probe を追加し、`decode_submit_execution=...` で可否を診断します。
+- 同一 bitstream に対する HEVC bootstrap 結果は `submit_probe_access_unit_limit` と組み合わせてキャッシュされるため、`Metadata` → `Rgb24` → `Nv12` のような連続実行で Vulkan device/session を毎回再初期化せず、`Initialization of an object has failed` 系の再現を避けます。
+- 回帰テストとして `e2e_vulkan_decode_hevc_sequential_non_metadata_modes` を追加し、非 metadata モードを連続実行して 303 frame 返ることを確認しています。
 - 実験的 DPB 経路は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB`（`off`/`auto`/`on`）で制御され、`auto` では `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` 残留時に安全側へ自動抑止します。blocker message の `decode_submit_execution=ready(...)` には `experimental_dpb_mode` / `experimental_dpb_status` に加えて `readback_bytes` / `readback_planes` / `readback_sample_stride` / `readback_sample_count` も含め、DPB 判定理由と readback handoff 状態を追跡できるようにしています。
 - 非 metadata の HEVC 出力では submit probe の access-unit 上限を stream 長へ拡張して full coverage を要求します。`decode_submit_execution=ready(...)` の `submitted_access_units` が足りない場合は `UnsupportedConfig` を返します。残課題は DPB/reference-slot を有効化した広範囲ストリームでの安定化です。
 

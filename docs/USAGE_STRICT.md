@@ -86,6 +86,9 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - `require_hardware=false` でも direct Vulkan backend に software fallback はない（`allow_software_fallback` は現時点では実質未対応）
 - Vulkan loader/driver が `VK_KHR_video_queue` + H.264 decode/encode 拡張を提供していること
 - HEVC 直対応は着手中。`vk-video 0.2.1` が H.264 API のみのため、`VK_KHR_video_decode_h265` / `VK_KHR_video_encode_h265` を使う ash レベル実装が必要
+- HEVC encode submit probe の session parameters は既定で `sample-videos/sample-10s.h265` の VPS/SPS/PPS を使う。切り分け時は `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH=<Annex-B .h265>` で差し替え可能（missing path は明示エラーで停止、silent fallback しない）。ただし encode probe の parameter-set は Main profile（`profile_idc=1`）のみ受理し、非Main（例: `Rext`）は明示エラーで拒否する。加えて override sample + `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE=sample` では安全側として `sample-sps-vui-flag-off` に自動切替する（クラッシュ再現が必要な場合のみ `sample-sps-no-vui-flag-on` を明示指定）
+- HEVC encode の切り分け mode は `sample-sps-no-vui` / `sample-sps-vui-flag-off` / `sample-sps-no-vui-flag-on` / `sample-sps-level` / `sample-sps-sub-layer-ordering` / `sample-sps-level-ordering` を利用可能。NVENC Main override sample では `sample-sps-no-vui` と `sample-sps-vui-flag-off` が `vkEndCommandBuffer failed`、`sample-sps-no-vui-flag-on` が `0xc0000005` を再現するため、VUI-present flag の影響を切り分けられる
+- HEVC decode は `submit_probe_access_unit_limit` を含む bootstrap 結果を bitstream ごとにキャッシュしており、`Metadata` / `Rgb24` / `Nv12` を連続実行しても Vulkan device/session を毎回再初期化しない。これにより `Initialization of an object has failed` 系の再現を避ける
 - unsafe 呼び出しは `vulkan_hevc_decode` モジュールへ閉じ込め、上位の `video-hw` API は safe な probe 結果だけを受け取る責務分割にしている
 - HEVC decode probe は拡張列挙だけでなく `VIDEO_DECODE_KHR` queue family と最小 logical-device 初期化まで確認し、失敗理由を診断メッセージへ反映する
 - HEVC Annex-B の VPS/SPS/PPS 抽出と SPS 解像度解析は `scuffle-h265` で実装済みで、decode 未実装時の診断メッセージに抽出結果を付与する
