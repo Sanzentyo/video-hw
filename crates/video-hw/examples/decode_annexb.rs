@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to read input stream: {}", input_path.display()))?;
     let step = args.chunk_bytes.max(1);
 
-    let (total_decoded, summary) = match resolved_backend {
+    let (total_decoded, summary): (usize, video_hw::DecodeSummary) = match resolved_backend {
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
@@ -97,6 +97,7 @@ fn main() -> Result<()> {
         BackendKind::VideoToolbox => {
             decode_with_vt(config, &data, step).context("decode failed")?
         }
+        _ => anyhow::bail!("resolved backend is not enabled in this build: {resolved_backend}"),
     };
 
     println!(

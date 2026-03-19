@@ -175,7 +175,7 @@ enum BackendEncoderSession {
 
 impl BackendEncoderSession {
     fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
-        let session = match backend {
+        match backend {
             #[cfg(all(
                 feature = "backend-nvidia",
                 any(target_os = "linux", target_os = "windows")
@@ -201,8 +201,8 @@ impl BackendEncoderSession {
             BackendKind::VideoToolbox => {
                 Self::VideoToolbox(Box::new(EncodeSession::<VtEncoderAdapter>::new(config)))
             }
-        };
-        Ok(session)
+            _ => anyhow::bail!("resolved backend is not enabled in this build: {backend}"),
+        }
     }
 
     fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
@@ -224,6 +224,7 @@ impl BackendEncoderSession {
             Self::Vulkan(session) => session.submit(frame),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Self::VideoToolbox(session) => session.submit(frame),
+            _ => unreachable!("no encoder backend variants are enabled in this build"),
         }
     }
 
@@ -246,6 +247,7 @@ impl BackendEncoderSession {
             Self::Vulkan(session) => session.try_reap(),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Self::VideoToolbox(session) => session.try_reap(),
+            _ => unreachable!("no encoder backend variants are enabled in this build"),
         }
     }
 
@@ -268,6 +270,7 @@ impl BackendEncoderSession {
             Self::Vulkan(session) => session.flush(),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Self::VideoToolbox(session) => session.flush(),
+            _ => unreachable!("no encoder backend variants are enabled in this build"),
         }
     }
 }

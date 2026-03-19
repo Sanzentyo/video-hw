@@ -1151,17 +1151,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     } = frame;
     let width = dims.width.get() as usize;
     let height = dims.height.get() as usize;
-    #[cfg(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[cfg(feature = "unstable-raw-inputs")]
     let (argb, nv12) = match buffer {
         RawFrameBuffer::Argb8888(data) => (Some(data), None),
@@ -1174,17 +1164,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             ));
         }
     };
-    #[cfg(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[cfg(not(feature = "unstable-raw-inputs"))]
     let argb = match buffer {
         RawFrameBuffer::Argb8888(data) => Some(data),
@@ -1204,17 +1184,7 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             ));
         }
     };
-    #[cfg(not(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     #[cfg(feature = "unstable-raw-inputs")]
     match buffer {
         RawFrameBuffer::Nv12 { .. } => {
@@ -1231,32 +1201,12 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         }
         RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
     }
-    #[cfg(not(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     #[cfg(not(feature = "unstable-raw-inputs"))]
     match buffer {
         RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
     }
-    #[cfg(not(any(
-        all(target_os = "macos", feature = "backend-vt"),
-        all(
-            any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            ),
-            any(target_os = "linux", target_os = "windows")
-        )
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = force_keyframe;
     Ok(Frame {
         width,
@@ -1267,44 +1217,14 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         color_primaries: None,
         transfer_function: None,
         ycbcr_matrix: None,
-        #[cfg(any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         argb,
         #[cfg(all(
             feature = "unstable-raw-inputs",
-            any(
-                all(target_os = "macos", feature = "backend-vt"),
-                all(
-                    any(
-                        feature = "backend-nvidia",
-                        feature = "backend-intel",
-                        feature = "backend-vulkan"
-                    ),
-                    any(target_os = "linux", target_os = "windows")
-                )
-            )
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
         ))]
         nv12,
-        #[cfg(any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         force_keyframe,
     })
 }
@@ -1564,44 +1484,14 @@ mod tests {
             color_primaries: None,
             transfer_function: None,
             ycbcr_matrix: None,
-            #[cfg(any(
-                all(target_os = "macos", feature = "backend-vt"),
-                all(
-                    any(
-                        feature = "backend-nvidia",
-                        feature = "backend-intel",
-                        feature = "backend-vulkan"
-                    ),
-                    any(target_os = "linux", target_os = "windows")
-                )
-            ))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             argb: None,
             #[cfg(all(
                 feature = "unstable-raw-inputs",
-                any(
-                    all(target_os = "macos", feature = "backend-vt"),
-                    all(
-                        any(
-                            feature = "backend-nvidia",
-                            feature = "backend-intel",
-                            feature = "backend-vulkan"
-                        ),
-                        any(target_os = "linux", target_os = "windows")
-                    )
-                )
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
             ))]
             nv12: None,
-            #[cfg(any(
-                all(target_os = "macos", feature = "backend-vt"),
-                all(
-                    any(
-                        feature = "backend-nvidia",
-                        feature = "backend-intel",
-                        feature = "backend-vulkan"
-                    ),
-                    any(target_os = "linux", target_os = "windows")
-                )
-            ))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             force_keyframe: false,
         };
 
