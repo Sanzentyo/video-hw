@@ -23,7 +23,7 @@ use eframe::egui::{self, ColorImage};
 use shiguredo_mp4::{
     Decode, Encode, Mp4FileTime, TrackKind, Uint,
     boxes::{
-        Avc1Box, AvccBox, FtypBox, Hev1Box, HvccBox, HvccNalUintArray, MoovBox, SampleEntry,
+        Avc1Box, AvccBox, FtypBox, Hvc1Box, HvccBox, HvccNalUintArray, MoovBox, SampleEntry,
         VisualSampleEntryFields,
     },
     mux::{Fmp4SegmentMuxer, Sample, SegmentMuxerOptions},
@@ -79,7 +79,7 @@ struct CliArgs {
     intel_force_software: bool,
     #[arg(long, default_value_t = 30)]
     fragment_frames: u32,
-    #[arg(long, default_value = "output\\camera-fmp4")]
+    #[arg(long, default_value = "output/camera-fmp4")]
     output_dir: PathBuf,
 }
 
@@ -130,6 +130,12 @@ struct UiFrame {
     height: usize,
     timestamp_us: i64,
     rgba: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct CapturedFrame {
+    frame: VideoFrameOwned,
+    captured_at: Instant,
 }
 
 #[derive(Debug)]
@@ -340,6 +346,8 @@ struct RecorderState {
     codec: Codec,
     timescale: NonZeroU32,
     default_duration: u32,
+    first_input_pts_90k: Option<i64>,
+    last_submitted_pts_90k: Option<i64>,
     next_fallback_pts_90k: i64,
     last_written_pts_90k: Option<i64>,
     pending_submitted_pts_90k: VecDeque<i64>,
@@ -386,30 +394,9 @@ fn probe_recording_backend_path(
     height: i32,
     fps: i32,
 ) -> Result<BackendKind> {
-    let (resolved_backend, config) = resolve_recording_backend_and_config(settings, fps)?;
-    let mut session = BackendEncoderSession::new(resolved_backend, config).with_context(|| {
-        format!("failed to initialize encoder session (backend={resolved_backend})")
-    })?;
-    let probe_dims = dims(
-        u32::try_from(width).context("probe width must be >= 0")?,
-        u32::try_from(height).context("probe height must be >= 0")?,
-    )?;
-    let pixel_count = usize::try_from(probe_dims.width.get())
-        .context("probe width overflow")?
-        .saturating_mul(usize::try_from(probe_dims.height.get()).context("probe height overflow")?);
-    let frame_argb = vec![0_u8; pixel_count.saturating_mul(4)];
-    session
-        .submit(EncodeFrame {
-            dims: probe_dims,
-            pts_90k: Some(Timestamp90k(0)),
-            buffer: RawFrameBuffer::Argb8888(frame_argb),
-            force_keyframe: true,
-        })
-        .context("encoder probe submit failed")?;
-    let _ = session
-        .try_reap()
-        .context("encoder probe try_reap failed")?;
-    let _ = session.flush().context("encoder probe flush failed")?;
+    let _ = width;
+    let _ = height;
+    let (resolved_backend, _config) = resolve_recording_backend_and_config(settings, fps)?;
     Ok(resolved_backend)
 }
 
@@ -458,6 +445,8 @@ impl RecorderState {
             codec: settings.codec,
             timescale: NonZeroU32::new(90_000).expect("90_000 is non-zero"),
             default_duration,
+            first_input_pts_90k: None,
+            last_submitted_pts_90k: None,
             next_fallback_pts_90k: 0,
             last_written_pts_90k: None,
             pending_submitted_pts_90k: VecDeque::new(),
@@ -488,15 +477,23 @@ impl RecorderState {
         let fragment_interval = self.fragment_frames.max(1) as u64;
         let force_keyframe =
             self.pending_force_keyframe || self.submitted_frames.is_multiple_of(fragment_interval);
+        let origin = *self.first_input_pts_90k.get_or_insert(pts_90k);
+        let mut normalized_pts_90k = pts_90k.saturating_sub(origin).max(0);
+        if let Some(previous) = self.last_submitted_pts_90k
+            && normalized_pts_90k <= previous
+        {
+            normalized_pts_90k = previous.saturating_add(i64::from(self.default_duration));
+        }
+        self.last_submitted_pts_90k = Some(normalized_pts_90k);
         self.encoder
             .submit(EncodeFrame {
                 dims,
-                pts_90k: Some(Timestamp90k(pts_90k)),
+                pts_90k: Some(Timestamp90k(normalized_pts_90k)),
                 buffer: RawFrameBuffer::Argb8888(frame_argb),
                 force_keyframe,
             })
             .context("encoder submit failed")?;
-        self.pending_submitted_pts_90k.push_back(pts_90k);
+        self.pending_submitted_pts_90k.push_back(normalized_pts_90k);
         self.pending_force_keyframe = false;
         self.submitted_frames = self.submitted_frames.saturating_add(1);
 
@@ -585,21 +582,29 @@ impl RecorderState {
                 chunk.codec
             );
         }
-        if chunk.layout != EncodedLayout::AnnexB {
-            anyhow::bail!(
-                "unsupported encoded layout for fMP4 recorder: {} (expected annexb)",
-                chunk.layout
-            );
-        }
-
-        let sample_data = match self.codec {
-            Codec::H264 => annexb_chunk_to_avcc_sample(&chunk.data, &mut self.sps, &mut self.pps)?,
-            Codec::Hevc => annexb_chunk_to_hvcc_sample(
+        let sample_data = match (self.codec, chunk.layout) {
+            (Codec::H264, EncodedLayout::AnnexB) => {
+                annexb_chunk_to_avcc_sample(&chunk.data, &mut self.sps, &mut self.pps)?
+            }
+            (Codec::H264, EncodedLayout::Avcc) => {
+                avcc_chunk_to_avcc_sample(&chunk.data, &mut self.sps, &mut self.pps)?
+            }
+            (Codec::Hevc, EncodedLayout::AnnexB) => annexb_chunk_to_hvcc_sample(
                 &chunk.data,
                 &mut self.vps,
                 &mut self.sps,
                 &mut self.pps,
             )?,
+            (Codec::Hevc, EncodedLayout::Hvcc) => {
+                hvcc_chunk_to_hvcc_sample(&chunk.data, &mut self.vps, &mut self.sps, &mut self.pps)?
+            }
+            (_, layout) => {
+                anyhow::bail!(
+                    "unsupported encoded layout for fMP4 recorder: {} (codec={})",
+                    layout,
+                    self.codec
+                );
+            }
         };
         if let Some(sample_data) = sample_data {
             let pts_90k = self.resolve_sample_pts_90k(chunk.pts_90k.map(|pts| pts.0));
@@ -899,6 +904,10 @@ impl RecorderWorker {
         Ok(summary)
     }
 
+    fn join_only(&mut self) -> Result<()> {
+        self.join()
+    }
+
     fn join(&mut self) -> Result<()> {
         if let Some(join_handle) = self.join_handle.take() {
             join_handle
@@ -969,13 +978,13 @@ struct BackendProbeStatus {
 }
 
 struct CameraRecordApp {
-    rx: mpsc::Receiver<VideoFrameOwned>,
+    rx: mpsc::Receiver<CapturedFrame>,
     capture_cmd_tx: mpsc::Sender<CaptureCommand>,
     capture_event_rx: mpsc::Receiver<CaptureEvent>,
     latest: Option<UiFrame>,
     texture: Option<egui::TextureHandle>,
     displayed_timestamp_us: Option<i64>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     duration: Option<Duration>,
     video_device_id: Option<String>,
     width: i32,
@@ -1014,7 +1023,7 @@ struct CameraAppInit {
 
 impl CameraRecordApp {
     fn new(
-        rx: mpsc::Receiver<VideoFrameOwned>,
+        rx: mpsc::Receiver<CapturedFrame>,
         capture_cmd_tx: mpsc::Sender<CaptureCommand>,
         capture_event_rx: mpsc::Receiver<CaptureEvent>,
         init: CameraAppInit,
@@ -1026,7 +1035,7 @@ impl CameraRecordApp {
             latest: None,
             texture: None,
             displayed_timestamp_us: None,
-            started_at: Instant::now(),
+            started_at: None,
             duration: init.duration,
             video_device_id: init.video_device_id,
             width: init.width,
@@ -1097,14 +1106,15 @@ impl CameraRecordApp {
             .find(|status| status.backend == self.selected_backend)
     }
 
-    fn handle_owned_frame(&mut self, owned: VideoFrameOwned) -> Result<()> {
-        let Some(ui_frame) = frame_to_rgba(&owned.as_frame()) else {
+    fn handle_owned_frame(&mut self, captured: CapturedFrame) -> Result<()> {
+        let Some(ui_frame) = frame_to_rgba(&captured.frame.as_frame()) else {
             return Ok(());
         };
         self.total_received = self.total_received.saturating_add(1);
 
         if let Some(recorder) = self.recording.as_mut() {
-            let pts_90k = timestamp_us_to_90k(ui_frame.timestamp_us);
+            let started_at = *self.started_at.get_or_insert(captured.captured_at);
+            let pts_90k = instant_elapsed_to_90k(started_at, captured.captured_at);
             recorder.submit_frame(ui_frame.rgba.clone(), pts_90k)?;
             self.recording_queue_depth = self.recording_queue_depth.saturating_add(1);
         }
@@ -1118,6 +1128,19 @@ impl CameraRecordApp {
             return;
         };
         if self.displayed_timestamp_us == Some(frame.timestamp_us) {
+            return;
+        }
+        let expected_rgba_len = frame
+            .width
+            .saturating_mul(frame.height)
+            .saturating_mul(4);
+        if frame.rgba.len() != expected_rgba_len {
+            self.status_message = format!(
+                "preview frame dropped: rgba size mismatch (expected {}, got {})",
+                expected_rgba_len,
+                frame.rgba.len()
+            );
+            self.displayed_timestamp_us = Some(frame.timestamp_us);
             return;
         }
         let image = ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
@@ -1241,7 +1264,7 @@ impl CameraRecordApp {
             output_path.clone(),
         ) {
             Ok(worker) => {
-                self.started_at = Instant::now();
+                self.started_at = None;
                 self.recording_queue_depth = 0;
                 self.status_message = "recording ON: worker started".to_string();
                 self.recording = Some(worker);
@@ -1275,6 +1298,21 @@ impl CameraRecordApp {
         }
     }
 
+    fn handle_recording_worker_error(&mut self, message: String) {
+        self.recording_queue_depth = 0;
+        let join_result = if let Some(mut recorder) = self.recording.take() {
+            let result = recorder.join_only();
+            self.refresh_backend_probe_statuses();
+            result
+        } else {
+            Ok(())
+        };
+        self.status_message = match join_result {
+            Ok(()) => format!("recording worker error: {message}"),
+            Err(err) => format!("recording worker error: {message}; join failed: {err:#}"),
+        };
+    }
+
     fn poll_recording_events(&mut self) {
         let mut worker_error = None::<String>;
         if let Some(recorder) = self.recording.as_mut() {
@@ -1295,8 +1333,7 @@ impl CameraRecordApp {
         }
 
         if let Some(message) = worker_error {
-            self.status_message = format!("recording worker error: {message}");
-            self.stop_recording();
+            self.handle_recording_worker_error(message);
         }
     }
 
@@ -1446,8 +1483,9 @@ impl eframe::App for CameraRecordApp {
         self.poll_recording_events();
 
         if let Some(duration) = self.duration
+            && let Some(started_at) = self.started_at
             && self.recording.is_some()
-            && self.started_at.elapsed() >= duration
+            && started_at.elapsed() >= duration
         {
             self.stop_recording();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1456,10 +1494,10 @@ impl eframe::App for CameraRecordApp {
 
         const MAX_FRAMES_PER_TICK: usize = 8;
         for _ in 0..MAX_FRAMES_PER_TICK {
-            let Ok(owned) = self.rx.try_recv() else {
+            let Ok(captured) = self.rx.try_recv() else {
                 break;
             };
-            if let Err(err) = self.handle_owned_frame(owned) {
+            if let Err(err) = self.handle_owned_frame(captured) {
                 self.status_message = format!("recording error: {err:#}");
                 self.stop_recording();
                 break;
@@ -1467,8 +1505,9 @@ impl eframe::App for CameraRecordApp {
         }
 
         if let Some(duration) = self.duration
+            && let Some(started_at) = self.started_at
             && self.recording.is_some()
-            && self.started_at.elapsed() >= duration
+            && started_at.elapsed() >= duration
         {
             self.stop_recording();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1529,7 +1568,7 @@ fn main() -> Result<()> {
             .context("auto-start preflight failed")?;
     }
 
-    let (tx, rx) = mpsc::channel::<VideoFrameOwned>();
+    let (tx, rx) = mpsc::channel::<CapturedFrame>();
     let (capture_cmd_tx, capture_cmd_rx) = mpsc::channel::<CaptureCommand>();
     let (capture_event_tx, capture_event_rx) = mpsc::channel::<CaptureEvent>();
     let (capture_ready_tx, capture_ready_rx) = mpsc::channel::<Result<()>>();
@@ -1554,7 +1593,10 @@ fn main() -> Result<()> {
                         pixel_format: None,
                     },
                     move |frame: VideoFrame<'_>| {
-                        let _ = frame_tx.send(frame.to_owned());
+                        let _ = frame_tx.send(CapturedFrame {
+                            frame: frame.to_owned(),
+                            captured_at: Instant::now(),
+                        });
                     },
                 )
                 .map_err(|err| anyhow::anyhow!("failed to create video capture: {err}"))?;
@@ -1887,7 +1929,7 @@ fn create_hevc_sample_entry(
         },
     ];
 
-    SampleEntry::Hev1(Hev1Box {
+    SampleEntry::Hvc1(Hvc1Box {
         visual: VisualSampleEntryFields {
             data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
             width,
@@ -1983,6 +2025,56 @@ fn annexb_chunk_to_hvcc_sample(
     Ok(Some(hvcc))
 }
 
+fn avcc_chunk_to_avcc_sample(
+    avcc: &[u8],
+    sps_out: &mut Option<Vec<u8>>,
+    pps_out: &mut Option<Vec<u8>>,
+) -> Result<Option<Vec<u8>>> {
+    let mut sample_nalus: Vec<&[u8]> = Vec::new();
+    for nalu in split_length_prefixed_nalus(avcc)? {
+        if nalu.is_empty() {
+            continue;
+        }
+        match h264_nal_type(nalu) {
+            7 => *sps_out = Some(nalu.to_vec()),
+            8 => *pps_out = Some(nalu.to_vec()),
+            _ => sample_nalus.push(nalu),
+        }
+    }
+
+    if sample_nalus.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(repack_length_prefixed_nalus(&sample_nalus)?))
+}
+
+fn hvcc_chunk_to_hvcc_sample(
+    hvcc: &[u8],
+    vps_out: &mut Option<Vec<u8>>,
+    sps_out: &mut Option<Vec<u8>>,
+    pps_out: &mut Option<Vec<u8>>,
+) -> Result<Option<Vec<u8>>> {
+    let mut sample_nalus: Vec<&[u8]> = Vec::new();
+    for nalu in split_length_prefixed_nalus(hvcc)? {
+        if nalu.is_empty() {
+            continue;
+        }
+        match hevc_nal_type(nalu) {
+            32 => *vps_out = Some(nalu.to_vec()),
+            33 => *sps_out = Some(nalu.to_vec()),
+            34 => *pps_out = Some(nalu.to_vec()),
+            _ => sample_nalus.push(nalu),
+        }
+    }
+
+    if sample_nalus.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(repack_length_prefixed_nalus(&sample_nalus)?))
+}
+
 fn split_annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
     let mut nalus = Vec::new();
     let mut cursor = 0usize;
@@ -2002,6 +2094,35 @@ fn split_annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
         nalus.push(data);
     }
     nalus
+}
+
+fn split_length_prefixed_nalus(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut nalus = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < data.len() {
+        let len_bytes = data
+            .get(cursor..cursor + 4)
+            .context("length-prefixed sample is truncated before NAL length")?;
+        let nalu_len =
+            u32::from_be_bytes(len_bytes.try_into().expect("length slice size")) as usize;
+        cursor = cursor.saturating_add(4);
+        let nalu = data
+            .get(cursor..cursor + nalu_len)
+            .context("length-prefixed sample is truncated inside NAL payload")?;
+        nalus.push(nalu);
+        cursor = cursor.saturating_add(nalu_len);
+    }
+    Ok(nalus)
+}
+
+fn repack_length_prefixed_nalus(nalus: &[&[u8]]) -> Result<Vec<u8>> {
+    let mut sample = Vec::new();
+    for nalu in nalus {
+        let len = u32::try_from(nalu.len()).context("NAL too large for length-prefixed sample")?;
+        sample.extend_from_slice(&len.to_be_bytes());
+        sample.extend_from_slice(nalu);
+    }
+    Ok(sample)
 }
 
 fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
@@ -2033,6 +2154,12 @@ fn hevc_nal_type(nalu: &[u8]) -> u8 {
 
 fn timestamp_us_to_90k(timestamp_us: i64) -> i64 {
     timestamp_us.saturating_mul(90).div_euclid(1000)
+}
+
+fn instant_elapsed_to_90k(started_at: Instant, now: Instant) -> i64 {
+    let micros = now.duration_since(started_at).as_micros();
+    let micros = i64::try_from(micros).unwrap_or(i64::MAX);
+    timestamp_us_to_90k(micros)
 }
 
 fn duration_90k_to_seconds(duration_90k: u64) -> f64 {

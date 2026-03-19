@@ -77,6 +77,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to read input stream: {}", input_path.display()))?;
     let step = args.chunk_bytes.max(1);
 
+    #[allow(unreachable_patterns)]
     let (total_decoded, summary): (usize, video_hw::DecodeSummary) = match resolved_backend {
         #[cfg(all(
             feature = "backend-nvidia",

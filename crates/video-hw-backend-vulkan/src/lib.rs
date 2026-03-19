@@ -1,5 +1,6 @@
 pub use video_hw_core::*;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Debug, Clone)]
 pub struct Nv12Frame {
     pub width: usize,
@@ -9,6 +10,7 @@ pub struct Nv12Frame {
     pub data: Vec<u8>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Debug, Clone)]
 pub struct RgbFrame {
     pub width: usize,
@@ -17,6 +19,7 @@ pub struct RgbFrame {
     pub data: Vec<u8>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
     let width = frame.width;
     let height = frame.height;
@@ -77,11 +80,13 @@ pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
     })
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[inline]
 fn clip_to_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn argb_to_nv12(
     argb: &[u8],
     width: usize,
@@ -156,9 +161,13 @@ pub fn argb_to_nv12(
     Ok((pitch, out))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_decode;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_encode;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_backend;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use vulkan_backend::{VulkanDecoderAdapter, VulkanEncoderAdapter};

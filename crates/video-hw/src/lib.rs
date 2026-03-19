@@ -278,22 +278,20 @@ impl Backend {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", feature = "backend-vt"),
-    all(
-        any(
-            feature = "backend-nvidia",
-            feature = "backend-intel",
-            feature = "backend-vulkan"
-        ),
-        any(target_os = "linux", target_os = "windows")
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+fn preferred_backend_order() -> Vec<BackendKind> {
+    vec![BackendKind::VideoToolbox]
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    any(
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        feature = "backend-vulkan"
     )
 ))]
 fn preferred_backend_order() -> Vec<BackendKind> {
-    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-    {
-        return vec![BackendKind::VideoToolbox];
-    }
     vec![
         #[cfg(all(
             feature = "backend-nvidia",

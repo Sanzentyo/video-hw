@@ -26,10 +26,15 @@ use core_foundation::{
 use core_media::{
     block_buffer::CMBlockBuffer,
     format_description::{
-        CMFormatDescription, CMVideoCodecType, CMVideoFormatDescription, kCMVideoCodecType_H264,
+        CMFormatDescription, CMFormatDescriptionRef, CMVideoCodecType, CMVideoFormatDescription,
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMVideoCodecType_H264,
         kCMVideoCodecType_HEVC,
     },
-    sample_buffer::{CMSampleBuffer, CMSampleTimingInfo},
+    sample_buffer::{
+        CMSampleBuffer, CMSampleBufferGetFormatDescription, CMSampleBufferRef,
+        CMSampleTimingInfo,
+    },
     time::{CMTime, kCMTimeInvalid},
 };
 use core_video::{
@@ -415,10 +420,10 @@ impl VideoDecoder for VtDecoderAdapter {
         let access_unit_count = access_units.len();
         self.ensure_decoder(&cache)?;
 
-        if let Some(decoder) = self.decoder.as_ref() {
-            if !access_units.is_empty() {
-                decoder.decode_access_units(&access_units, self.config.fps)?;
-            }
+        if let Some(decoder) = self.decoder.as_ref()
+            && !access_units.is_empty()
+        {
+            decoder.decode_access_units(&access_units, self.config.fps)?;
         }
         if should_report_metrics() {
             eprintln!(
@@ -439,10 +444,10 @@ impl VideoDecoder for VtDecoderAdapter {
         let access_unit_count = access_units.len();
         self.ensure_decoder(&cache)?;
 
-        if let Some(decoder) = self.decoder.as_ref() {
-            if !access_units.is_empty() {
-                decoder.decode_access_units(&access_units, self.config.fps)?;
-            }
+        if let Some(decoder) = self.decoder.as_ref()
+            && !access_units.is_empty()
+        {
+            decoder.decode_access_units(&access_units, self.config.fps)?;
         }
         if should_report_metrics() {
             eprintln!(
@@ -573,7 +578,7 @@ impl VtEncoderAdapter {
         self.pending_switch.as_ref().map(|p| p.target_generation)
     }
 
-    pub fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
+    pub(crate) fn sync_pipeline_generation(&self, scheduler: &PipelineScheduler) {
         let generation = self
             .pending_switch_generation()
             .unwrap_or_else(|| self.configured_generation());
@@ -641,6 +646,18 @@ impl VtEncoderAdapter {
                 CFNumber::from(self.fps).as_CFType(),
             )
             .map_err(|status| vt_error("VTSessionSetProperty(ExpectedFrameRate)", status))?;
+        session_ref
+            .set_property(
+                CompressionPropertyKey::AllowFrameReordering.into(),
+                CFBoolean::false_value().as_CFType(),
+            )
+            .map_err(|status| vt_error("VTSessionSetProperty(AllowFrameReordering)", status))?;
+        session_ref
+            .set_property(
+                CompressionPropertyKey::MaxFrameDelayCount.into(),
+                CFNumber::from(0).as_CFType(),
+            )
+            .ok();
         session_ref
             .set_property(
                 CompressionPropertyKey::MaxKeyFrameInterval.into(),
@@ -908,6 +925,18 @@ impl VideoEncoder for VtEncoderAdapter {
                                 let is_keyframe =
                                     detect_keyframe_from_avcc_hvcc_payload(packet_codec, &bytes)
                                         .unwrap_or(packet_is_keyframe_hint);
+                                if is_keyframe
+                                    && let Some(parameter_sets) =
+                                        parameter_sets_from_sample_buffer_ref(
+                                            packet_codec,
+                                            sample_buffer_ref,
+                                        )
+                                {
+                                    prepend_length_prefixed_parameter_sets(
+                                        &mut bytes,
+                                        &parameter_sets,
+                                    );
+                                }
                                 if let Ok(mut packets) = packets_ref.lock() {
                                     packets.push(VtPendingPacket {
                                         frame_index,
@@ -1123,9 +1152,7 @@ fn make_bgra_frame(
     };
 
     let unlock_status = pixel_buffer.unlock_base_address(0);
-    if let Err(err) = write_result {
-        return Err(err);
-    }
+    write_result?;
     if unlock_status != 0 {
         return Err(cv_error(
             "CVPixelBuffer::unlock_base_address",
@@ -1255,6 +1282,134 @@ fn detect_keyframe_from_avcc_hvcc_payload(codec: Codec, payload: &[u8]) -> Optio
     }
 
     if saw_slice { Some(saw_irap) } else { None }
+}
+
+fn parameter_sets_from_sample_buffer_ref(
+    codec: Codec,
+    sample_buffer_ref: CMSampleBufferRef,
+) -> Option<Vec<Vec<u8>>> {
+    let format_description_ref = unsafe { CMSampleBufferGetFormatDescription(sample_buffer_ref) };
+    if format_description_ref.is_null() {
+        return None;
+    }
+
+    match codec {
+        Codec::H264 => h264_parameter_sets(format_description_ref),
+        Codec::Hevc => hevc_parameter_sets(format_description_ref),
+    }
+}
+
+fn h264_parameter_sets(format_description_ref: CMFormatDescriptionRef) -> Option<Vec<Vec<u8>>> {
+    let mut parameter_set_pointer = std::ptr::null();
+    let mut parameter_set_size = 0usize;
+    let mut parameter_set_count = 0usize;
+    let mut nal_unit_header_length = 0i32;
+    let status = unsafe {
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            format_description_ref,
+            0,
+            &mut parameter_set_pointer,
+            &mut parameter_set_size,
+            &mut parameter_set_count,
+            &mut nal_unit_header_length,
+        )
+    };
+    if status != 0 || parameter_set_pointer.is_null() {
+        return None;
+    }
+    let mut sets = Vec::with_capacity(parameter_set_count);
+    sets.push(
+        unsafe { std::slice::from_raw_parts(parameter_set_pointer, parameter_set_size) }.to_vec(),
+    );
+    for index in 1..parameter_set_count {
+        let mut parameter_set_pointer = std::ptr::null();
+        let mut parameter_set_size = 0usize;
+        let status = unsafe {
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                format_description_ref,
+                index,
+                &mut parameter_set_pointer,
+                &mut parameter_set_size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 || parameter_set_pointer.is_null() {
+            return None;
+        }
+        sets.push(
+            unsafe { std::slice::from_raw_parts(parameter_set_pointer, parameter_set_size) }
+                .to_vec(),
+        );
+    }
+    Some(sets)
+}
+
+fn hevc_parameter_sets(format_description_ref: CMFormatDescriptionRef) -> Option<Vec<Vec<u8>>> {
+    let mut parameter_set_pointer = std::ptr::null();
+    let mut parameter_set_size = 0usize;
+    let mut parameter_set_count = 0usize;
+    let mut nal_unit_header_length = 0i32;
+    let status = unsafe {
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            format_description_ref,
+            0,
+            &mut parameter_set_pointer,
+            &mut parameter_set_size,
+            &mut parameter_set_count,
+            &mut nal_unit_header_length,
+        )
+    };
+    if status != 0 || parameter_set_pointer.is_null() {
+        return None;
+    }
+    let mut sets = Vec::with_capacity(parameter_set_count);
+    sets.push(
+        unsafe { std::slice::from_raw_parts(parameter_set_pointer, parameter_set_size) }.to_vec(),
+    );
+    for index in 1..parameter_set_count {
+        let mut parameter_set_pointer = std::ptr::null();
+        let mut parameter_set_size = 0usize;
+        let status = unsafe {
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                format_description_ref,
+                index,
+                &mut parameter_set_pointer,
+                &mut parameter_set_size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 || parameter_set_pointer.is_null() {
+            return None;
+        }
+        sets.push(
+            unsafe { std::slice::from_raw_parts(parameter_set_pointer, parameter_set_size) }
+                .to_vec(),
+        );
+    }
+    Some(sets)
+}
+
+fn prepend_length_prefixed_parameter_sets(sample: &mut Vec<u8>, parameter_sets: &[Vec<u8>]) {
+    if parameter_sets.is_empty() {
+        return;
+    }
+
+    let mut prefixed = Vec::with_capacity(
+        parameter_sets
+            .iter()
+            .map(|set| set.len().saturating_add(4))
+            .sum::<usize>()
+            .saturating_add(sample.len()),
+    );
+    for parameter_set in parameter_sets {
+        let len = (parameter_set.len() as u32).to_be_bytes();
+        prefixed.extend_from_slice(&len);
+        prefixed.extend_from_slice(parameter_set);
+    }
+    prefixed.extend_from_slice(sample);
+    *sample = prefixed;
 }
 
 fn vt_error(context: &str, status: i32) -> BackendError {

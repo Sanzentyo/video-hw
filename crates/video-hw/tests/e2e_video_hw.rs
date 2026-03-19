@@ -691,9 +691,8 @@ fn e2e_vt_decode_metadata_includes_pts_and_decode_flags() {
                 pts_90k: None,
             })
             .expect("decode chunk should succeed");
-        while let Some(frame) = decoder.try_reap().expect("try_reap should succeed") {
+        if let Some(frame) = decoder.try_reap().expect("try_reap should succeed") {
             first = Some(frame);
-            break;
         }
         if first.is_some() {
             break;

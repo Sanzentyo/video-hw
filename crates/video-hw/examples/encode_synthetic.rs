@@ -175,6 +175,7 @@ enum BackendEncoderSession {
 
 impl BackendEncoderSession {
     fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
+        #[allow(unreachable_patterns)]
         let session = match backend {
             #[cfg(all(
                 feature = "backend-nvidia",
@@ -207,6 +208,7 @@ impl BackendEncoderSession {
     }
 
     fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(all(
                 feature = "backend-nvidia",
@@ -230,6 +232,7 @@ impl BackendEncoderSession {
     }
 
     fn try_reap(&mut self) -> Result<Option<EncodedChunk>, BackendError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(all(
                 feature = "backend-nvidia",
@@ -253,6 +256,7 @@ impl BackendEncoderSession {
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedChunk>, BackendError> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(all(
                 feature = "backend-nvidia",
