@@ -169,22 +169,14 @@ pub struct Frame {
     pub color_primaries: Option<i32>,
     pub transfer_function: Option<i32>,
     pub ycbcr_matrix: Option<i32>,
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub argb: Option<Vec<u8>>,
     #[cfg(all(
         feature = "unstable-raw-inputs",
         any(target_os = "macos", target_os = "linux", target_os = "windows")
     ))]
     pub nv12: Option<Nv12FramePayload>,
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub force_keyframe: bool,
 }
 

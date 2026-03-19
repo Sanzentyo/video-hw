@@ -215,7 +215,7 @@ enum BackendEncoderSession {
 
 impl BackendEncoderSession {
     fn new(backend: BackendKind, config: EncoderConfig) -> Result<Self> {
-        match backend {
+        let session = match backend {
             #[cfg(all(
                 feature = "backend-nvidia",
                 any(target_os = "linux", target_os = "windows")
@@ -242,7 +242,8 @@ impl BackendEncoderSession {
                 Self::VideoToolbox(Box::new(EncodeSession::<VtEncoderAdapter>::new(config)))
             }
             _ => anyhow::bail!("resolved backend is not enabled in this build: {backend}"),
-        }
+        };
+        Ok(session)
     }
 
     fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
