@@ -1,0 +1,7 @@
+# Workspace-level Cargo configuration
+
+[env]
+# cudarc 0.19.x supports up to CUDA 13.1; override so the build script
+# accepts the installed CUDA 13.2 toolkit (ABI-compatible with 13.1 for
+# dynamic-loading mode which is the only variant this project uses).
+CUDARC_CUDA_VERSION = "13010"

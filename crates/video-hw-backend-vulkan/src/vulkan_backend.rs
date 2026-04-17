@@ -20,11 +20,7 @@ use crate::{
         probe_hevc_decode_prerequisites, probe_hevc_decode_session_bootstrap,
         probe_hevc_decode_session_bootstrap_with_access_unit_limit,
     },
-    vulkan_hevc_encode::{
-        HevcEncodePrerequisiteProbe, HevcEncodeSessionBootstrap, HevcEncodeSubmitExecutionProbe,
-        HevcEncodeVideoSessionCreateProbe, HevcEncodeVideoSessionParametersCreateProbe,
-        probe_hevc_encode_prerequisites, probe_hevc_encode_session_bootstrap,
-    },
+    vulkan_hevc_encode::{HevcEncodePrerequisiteProbe, probe_hevc_encode_prerequisites},
 };
 
 const HEVC_DECODE_INFO_READBACK_NON_ZERO_FLAG: u32 = 1;
@@ -477,26 +473,18 @@ fn hevc_encode_blocker_message() -> String {
 }
 
 fn hevc_encode_blocker_message_with_config(
-    coded_width: u32,
-    coded_height: u32,
-    fps: i32,
+    _coded_width: u32,
+    _coded_height: u32,
+    _fps: i32,
 ) -> String {
     let base = "Vulkan HEVC encode initialization failed";
     match probe_hevc_encode_prerequisites() {
         HevcEncodePrerequisiteProbe::Ready => {
-            let mut message = format!(
+            // The full session bootstrap probe is intentionally skipped: on some drivers it
+            // triggers a STATUS_STACK_BUFFER_OVERRUN that cannot be caught.
+            format!(
                 "{base}; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet"
-            );
-            let target_fps = u32::try_from(fps.max(1)).unwrap_or(30);
-            match probe_hevc_encode_session_bootstrap(coded_width, coded_height, target_fps) {
-                Ok(bootstrap) => {
-                    append_hevc_encode_bootstrap_status(&mut message, &bootstrap);
-                }
-                Err(err) => {
-                    message.push_str(&format!("; encode session bootstrap probe failed: {err}"));
-                }
-            }
-            message
+            )
         }
         HevcEncodePrerequisiteProbe::MissingExtensions { missing } => {
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
@@ -513,193 +501,6 @@ fn hevc_encode_blocker_message_with_config(
         HevcEncodePrerequisiteProbe::ProbeUnavailable(details) => {
             format!("{base}; extension probe failed: {details}")
         }
-    }
-}
-
-fn append_hevc_encode_bootstrap_status(
-    message: &mut String,
-    bootstrap: &HevcEncodeSessionBootstrap,
-) {
-    let input_formats = format_vk_formats(&bootstrap.encode_input_formats);
-    let dpb_formats = format_vk_formats(&bootstrap.encode_dpb_formats);
-    let session_create = match &bootstrap.video_session_create_probe {
-        HevcEncodeVideoSessionCreateProbe::Created => "created".to_string(),
-        HevcEncodeVideoSessionCreateProbe::Failed(err) => format!("failed ({err})"),
-    };
-    let session_parameters_create = match &bootstrap.video_session_parameters_create_probe {
-        HevcEncodeVideoSessionParametersCreateProbe::Created => "created".to_string(),
-        HevcEncodeVideoSessionParametersCreateProbe::Failed(err) => format!("failed ({err})"),
-        HevcEncodeVideoSessionParametersCreateProbe::Skipped(reason) => {
-            format!("skipped ({reason})")
-        }
-    };
-    let submit_execution = match &bootstrap.encode_submit_execution_probe {
-        HevcEncodeSubmitExecutionProbe::Ready { queue_family_index } => {
-            format!("ready(queue_family_index={queue_family_index})")
-        }
-        HevcEncodeSubmitExecutionProbe::Failed(err) => format!("failed ({err})"),
-        HevcEncodeSubmitExecutionProbe::Skipped(reason) => format!("skipped ({reason})"),
-    };
-    let rate_control_modes = format_hevc_encode_rate_control_modes(bootstrap.rate_control_modes);
-    let encode_capability_flags =
-        format_hevc_encode_capability_flags(bootstrap.encode_capability_flags);
-    let encode_h265_capability_flags =
-        format_hevc_encode_h265_capability_flags(bootstrap.encode_h265_capability_flags);
-    let encode_feedback_flags =
-        format_hevc_encode_feedback_flags(bootstrap.supported_encode_feedback_flags);
-    message.push_str(&format!(
-        "; encode session bootstrap probe: coded={}x{}, adapter='{}'(vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x}, api=0x{:08x}), supported={}x{}..{}x{}, picture_access_granularity={}x{}, encode_input_granularity={}x{}, coded_extent_aligned_to_input_granularity={}, max_dpb_slots={}, max_active_refs={}, rate_control_modes={}, max_rate_control_layers={}, max_bitrate={}, max_quality_levels={}, encode_capability_flags={}, encode_h265_capability_flags={}, encode_feedback_flags={}, min_dst_offset_align={}, min_dst_size_align={}, max_level_idc={}, input_formats=[{}], dpb_formats=[{}], video_session_create={}, video_session_parameters_create={}, encode_submit_execution={}",
-        bootstrap.coded_width,
-        bootstrap.coded_height,
-        bootstrap.adapter_name,
-        bootstrap.adapter_vendor_id,
-        bootstrap.adapter_device_id,
-        bootstrap.adapter_driver_version,
-        bootstrap.adapter_api_version,
-        bootstrap.min_coded_width,
-        bootstrap.min_coded_height,
-        bootstrap.max_coded_width,
-        bootstrap.max_coded_height,
-        bootstrap.picture_access_granularity_width,
-        bootstrap.picture_access_granularity_height,
-        bootstrap.encode_input_granularity_width,
-        bootstrap.encode_input_granularity_height,
-        bootstrap.coded_extent_input_granularity_aligned,
-        bootstrap.max_dpb_slots,
-        bootstrap.max_active_reference_pictures,
-        rate_control_modes,
-        bootstrap.max_rate_control_layers,
-        bootstrap.max_bitrate,
-        bootstrap.max_quality_levels,
-        encode_capability_flags,
-        encode_h265_capability_flags,
-        encode_feedback_flags,
-        bootstrap.min_bitstream_buffer_offset_alignment,
-        bootstrap.min_bitstream_buffer_size_alignment,
-        bootstrap.max_level_idc,
-        input_formats,
-        dpb_formats,
-        session_create,
-        session_parameters_create,
-        submit_execution
-    ));
-}
-
-fn format_hevc_encode_rate_control_modes(modes: vk::VideoEncodeRateControlModeFlagsKHR) -> String {
-    let mut labels = Vec::new();
-    if modes.contains(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED) {
-        labels.push("DISABLED");
-    }
-    if modes.contains(vk::VideoEncodeRateControlModeFlagsKHR::CBR) {
-        labels.push("CBR");
-    }
-    if modes.contains(vk::VideoEncodeRateControlModeFlagsKHR::VBR) {
-        labels.push("VBR");
-    }
-    if labels.is_empty() {
-        "none".to_string()
-    } else {
-        labels.join("|")
-    }
-}
-
-fn format_hevc_encode_capability_flags(flags: vk::VideoEncodeCapabilityFlagsKHR) -> String {
-    let mut labels = Vec::new();
-    if flags.contains(vk::VideoEncodeCapabilityFlagsKHR::PRECEDING_EXTERNALLY_ENCODED_BYTES) {
-        labels.push("PRECEDING_EXTERNALLY_ENCODED_BYTES");
-    }
-    if flags.contains(vk::VideoEncodeCapabilityFlagsKHR::INSUFFICIENTSTREAM_BUFFER_RANGE_DETECTION)
-    {
-        labels.push("INSUFFICIENTSTREAM_BUFFER_RANGE_DETECTION");
-    }
-    if labels.is_empty() {
-        "none".to_string()
-    } else {
-        labels.join("|")
-    }
-}
-
-fn format_hevc_encode_h265_capability_flags(
-    flags: vk::VideoEncodeH265CapabilityFlagsKHR,
-) -> String {
-    let raw = flags.as_raw();
-    if raw == 0 {
-        "none".to_string()
-    } else {
-        let mut labels = Vec::new();
-        if (raw & 0x0001) != 0 {
-            labels.push("HRD_COMPLIANCE".to_string());
-        }
-        if (raw & 0x0002) != 0 {
-            labels.push("PREDICTION_WEIGHT_TABLE_GENERATED".to_string());
-        }
-        if (raw & 0x0004) != 0 {
-            labels.push("ROW_UNALIGNED_SLICE_SEGMENT".to_string());
-        }
-        if (raw & 0x0008) != 0 {
-            labels.push("DIFFERENT_SLICE_SEGMENT_TYPE".to_string());
-        }
-        if (raw & 0x0010) != 0 {
-            labels.push("B_FRAME_IN_L0_LIST".to_string());
-        }
-        if (raw & 0x0020) != 0 {
-            labels.push("B_FRAME_IN_L1_LIST".to_string());
-        }
-        if (raw & 0x0040) != 0 {
-            labels.push("PER_PICTURE_TYPE_MIN_MAX_QP".to_string());
-        }
-        if (raw & 0x0080) != 0 {
-            labels.push("PER_SLICE_SEGMENT_CONSTANT_QP".to_string());
-        }
-        if (raw & 0x0100) != 0 {
-            labels.push("MULTIPLE_TILES_PER_SLICE_SEGMENT".to_string());
-        }
-        if (raw & 0x0200) != 0 {
-            labels.push("MULTIPLE_SLICE_SEGMENTS_PER_TILE".to_string());
-        }
-        if (raw & 0x0400) != 0 {
-            labels.push("CU_QP_DIFF_WRAPAROUND (quantization-map)".to_string());
-        }
-        if (raw & 0x0800) != 0 {
-            labels.push("B_PICTURE_INTRA_REFRESH".to_string());
-        }
-        let known_mask = 0x0fff;
-        let unknown_bits = raw & !known_mask;
-        if unknown_bits != 0 {
-            labels.push(format!("UNKNOWN_BITS(0x{unknown_bits:x})"));
-        }
-        format!("{} (raw=0x{:x})", labels.join("|"), raw)
-    }
-}
-
-fn format_hevc_encode_feedback_flags(flags: vk::VideoEncodeFeedbackFlagsKHR) -> String {
-    let mut labels = Vec::new();
-    if flags.contains(vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BUFFER_OFFSET) {
-        labels.push("BITSTREAM_BUFFER_OFFSET");
-    }
-    if flags.contains(vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BYTES_WRITTEN) {
-        labels.push("BITSTREAM_BYTES_WRITTEN");
-    }
-    if flags.contains(vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_HAS_OVERRIDES) {
-        labels.push("BITSTREAM_HAS_OVERRIDES");
-    }
-    if labels.is_empty() {
-        "none".to_string()
-    } else {
-        labels.join("|")
-    }
-}
-
-fn format_vk_formats(formats: &[vk::Format]) -> String {
-    let formatted = formats
-        .iter()
-        .map(|format| format!("{format:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if formatted.is_empty() {
-        "none".to_string()
-    } else {
-        formatted
     }
 }
 

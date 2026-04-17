@@ -1358,6 +1358,29 @@ fn write_nv12_to_surface(
 }
 
 #[cfg(feature = "unstable-raw-inputs")]
+/// Returns a mutable slice over the full interleaved NV12 UV plane
+/// (`(height / 2) * pitch` bytes).
+///
+/// # Safety
+///
+/// For system-memory NV12 surfaces, `Data.U` is the start of a contiguous
+/// interleaved UV plane of `(crop_height / 2) * pitch` bytes, where `V = U + 1`.
+/// The onevpl `u()` accessor exposes only `(crop_height / 2) * (pitch / 2)` bytes
+/// (half the plane) because the library models U and V as planar with half-pitch.
+/// Extending the slice to `(height / 2) * pitch` is valid as long as `height <=
+/// crop_height` (verified by the caller) and the surface is mapped for writing.
+unsafe fn nv12_uv_plane_full_mut<'a>(
+    surface: &'a mut onevpl::FrameSurface<'_>,
+    height: usize,
+    pitch: usize,
+) -> &'a mut [u8] {
+    let u_plane = surface.u();
+    let full_len = (height / 2) * pitch;
+    // SAFETY: see function-level doc. Caller guarantees height <= crop_height
+    // and surface is mapped WRITE. The u_plane pointer is valid for full_len bytes.
+    unsafe { std::slice::from_raw_parts_mut(u_plane.as_mut_ptr(), full_len) }
+}
+
 fn copy_nv12_to_surface(
     surface: &mut onevpl::FrameSurface<'_>,
     nv12: &[u8],
@@ -1391,33 +1414,29 @@ fn copy_nv12_to_surface(
         }
 
         let y_plane = surface.y();
-        let u_plane = surface.u();
-        let v_plane = surface.v();
         y_plane.fill(16);
-        u_plane.fill(128);
-        v_plane.fill(128);
-
         for row in 0..height {
             let src_start = row * source_pitch;
-            let src_end = src_start + width;
             let dst_start = row * pitch;
-            y_plane[dst_start..(dst_start + width)].copy_from_slice(&nv12[src_start..src_end]);
+            y_plane[dst_start..(dst_start + width)]
+                .copy_from_slice(&nv12[src_start..(src_start + width)]);
         }
 
         let src_uv_base = source_pitch
             .checked_mul(height)
             .ok_or_else(|| BackendError::InvalidInput("nv12 Y size overflow".to_string()))?;
-        let dst_uv_pitch = pitch / 2;
         let uv_width = width / 2;
+        // SAFETY: height <= crop_height, surface mapped WRITE.
+        let uv_plane = unsafe { nv12_uv_plane_full_mut(surface, height, pitch) };
+        uv_plane.fill(0x80);
         for row in 0..(height / 2) {
             let src_row = &nv12
                 [(src_uv_base + row * source_pitch)..(src_uv_base + row * source_pitch + width)];
-            let dst_u = &mut u_plane[(row * dst_uv_pitch)..(row * dst_uv_pitch + uv_width)];
-            let dst_v = &mut v_plane[(row * dst_uv_pitch)..(row * dst_uv_pitch + uv_width)];
+            let dst_row = &mut uv_plane[(row * pitch)..(row * pitch + width)];
             for col in 0..uv_width {
-                let src_col = col * 2;
-                dst_u[col] = src_row[src_col];
-                dst_v[col] = src_row[src_col + 1];
+                let base = col * 2;
+                dst_row[base] = src_row[base]; // U
+                dst_row[base + 1] = src_row[base + 1]; // V
             }
         }
 
@@ -1538,24 +1557,21 @@ fn write_argb_to_nv12_surface(
             )));
         }
 
-        let y_plane = surface.y();
-        let u_plane = surface.u();
-        let v_plane = surface.v();
-        y_plane.fill(16);
-        u_plane.fill(128);
-        v_plane.fill(128);
-
         let tables = argb_to_yuv_tables();
-        let uv_pitch = pitch / 2;
+        let y_plane = surface.y();
+        y_plane.fill(16);
+        // SAFETY: height <= crop_height (checked above), surface is mapped WRITE.
+        let uv_plane = unsafe { nv12_uv_plane_full_mut(surface, height, pitch) };
+        uv_plane.fill(0x80);
+
         if width.is_multiple_of(2) && height.is_multiple_of(2) {
             let y_rows_len = pitch * height;
-            let uv_rows_len = uv_pitch * (height / 2);
+            let uv_rows_len = pitch * (height / 2);
             y_plane[..y_rows_len]
                 .par_chunks_mut(pitch * 2)
-                .zip(u_plane[..uv_rows_len].par_chunks_mut(uv_pitch))
-                .zip(v_plane[..uv_rows_len].par_chunks_mut(uv_pitch))
+                .zip(uv_plane[..uv_rows_len].par_chunks_mut(pitch))
                 .enumerate()
-                .for_each(|(row_pair, ((y_rows, u_row), v_row))| {
+                .for_each(|(row_pair, (y_rows, uv_row))| {
                     let (y_row0, y_row1) = y_rows.split_at_mut(pitch);
                     let src_row0 = row_pair * width * 8;
                     let src_row1 = src_row0 + width * 4;
@@ -1596,13 +1612,13 @@ fn write_argb_to_nv12_surface(
                         y_row1[x + 1] = y11;
 
                         let uv_col = x / 2;
-                        u_row[uv_col] = clip_to_u8((u00 + u01 + u10 + u11) / 4);
-                        v_row[uv_col] = clip_to_u8((v00 + v01 + v10 + v11) / 4);
+                        uv_row[2 * uv_col] = clip_to_u8((u00 + u01 + u10 + u11) / 4);
+                        uv_row[2 * uv_col + 1] = clip_to_u8((v00 + v01 + v10 + v11) / 4);
                     }
                 });
         } else {
             for y in (0..height).step_by(2) {
-                let uv_row = (y / 2) * uv_pitch;
+                let uv_row_base = (y / 2) * pitch;
                 for x in (0..width).step_by(2) {
                     let mut u_acc = 0_i32;
                     let mut v_acc = 0_i32;
@@ -1635,8 +1651,8 @@ fn write_argb_to_nv12_surface(
 
                     let uv_col = x / 2;
                     let denom = sample_count.max(1);
-                    u_plane[uv_row + uv_col] = clip_to_u8(u_acc / denom);
-                    v_plane[uv_row + uv_col] = clip_to_u8(v_acc / denom);
+                    uv_plane[uv_row_base + 2 * uv_col] = clip_to_u8(u_acc / denom);
+                    uv_plane[uv_row_base + 2 * uv_col + 1] = clip_to_u8(v_acc / denom);
                 }
             }
         }

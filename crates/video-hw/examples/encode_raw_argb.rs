@@ -182,7 +182,7 @@ enum InputPixelFormat {
 
 fn parse_input_pix_fmt(raw: &str) -> Result<InputPixelFormat> {
     match raw.to_ascii_lowercase().as_str() {
-        "argb" | "bgra" => Ok(InputPixelFormat::Argb),
+        "argb" => Ok(InputPixelFormat::Argb),
         "nv12" => Ok(InputPixelFormat::Nv12),
         other => anyhow::bail!("unsupported input_pix_fmt: {other}"),
     }

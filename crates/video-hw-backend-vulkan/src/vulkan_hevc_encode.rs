@@ -1,3 +1,7 @@
+// Experimental Vulkan HEVC encode probe module. The encode submit path is not yet wired up;
+// this code exists for capability investigation and diagnostics.
+#![allow(dead_code)]
+
 use std::ffi::{CStr, c_void};
 use std::sync::{Mutex, OnceLock};
 

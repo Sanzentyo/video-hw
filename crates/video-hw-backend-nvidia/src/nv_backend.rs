@@ -795,9 +795,10 @@ impl VideoEncoder for NvEncoderAdapter {
                 copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
                 {
                     let upload_start = Instant::now();
+                    let nvenc_buf = argb_to_nvenc_format(&argb);
                     let mut lock = pair.input.lock().map_err(map_encode_error)?;
                     unsafe {
-                        lock.write(&argb);
+                        lock.write_pitched(&nvenc_buf, width * 4, height);
                     }
                     timing.upload += upload_start.elapsed();
                 }
@@ -1053,9 +1054,10 @@ impl NvEncoderAdapter {
 
             let upload_start = Instant::now();
             {
+                let nvenc_buf = argb_to_nvenc_format(&argb);
                 let mut lock = pair.input.lock().map_err(map_encode_error)?;
                 unsafe {
-                    lock.write(&argb);
+                    lock.write_pitched(&nvenc_buf, width * 4, height);
                 }
             }
             timing.upload += upload_start.elapsed();
@@ -1502,6 +1504,18 @@ fn make_synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u
         }
     }
     buffer
+}
+
+/// Convert internal TRUE-ARGB bytes `[A, R, G, B]` (as stored in [`RawFrameBuffer::Argb8888`])
+/// to the byte layout required by `NV_ENC_BUFFER_FORMAT_ARGB`.
+///
+/// NVENC's "A8R8G8B8" format is word-ordered in little-endian:
+/// the 32-bit integer `0xAARRGGBB` is stored as bytes `[B, G, R, A]` in memory.
+/// Our internal format stores bytes as `[A, R, G, B]`, so a full 4-byte reversal is needed.
+fn argb_to_nvenc_format(argb: &[u8]) -> Vec<u8> {
+    argb.chunks_exact(4)
+        .flat_map(|px| [px[3], px[2], px[1], px[0]])
+        .collect()
 }
 
 #[cfg(test)]
