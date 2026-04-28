@@ -458,7 +458,9 @@ fn hevc_decode_blocker_message() -> String {
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
         }
         HevcDecodePrerequisiteProbe::MissingDecodeQueueFamily => {
-            format!("{base}; no queue family advertises VIDEO_DECODE_KHR")
+            format!(
+                "{base}; no queue family advertises VIDEO_DECODE_KHR with H.265 decode operation"
+            )
         }
         HevcDecodePrerequisiteProbe::DeviceInitializationFailed(details) => {
             format!("{base}; device bootstrap for HEVC decode failed: {details}")
@@ -485,7 +487,7 @@ fn hevc_encode_blocker_message_with_config(
     match probe_hevc_encode_prerequisites() {
         HevcEncodePrerequisiteProbe::Ready => {
             let mut message = format!(
-                "{base}; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet"
+                "{base}; runtime prerequisites are present, but HEVC encode submit execution probe failed"
             );
             let target_fps = u32::try_from(fps.max(1)).unwrap_or(30);
             match probe_hevc_encode_session_bootstrap(coded_width, coded_height, target_fps) {
@@ -502,7 +504,9 @@ fn hevc_encode_blocker_message_with_config(
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
         }
         HevcEncodePrerequisiteProbe::MissingEncodeQueueFamily => {
-            format!("{base}; no queue family advertises VIDEO_ENCODE_KHR")
+            format!(
+                "{base}; no queue family advertises VIDEO_ENCODE_KHR with H.265 encode operation"
+            )
         }
         HevcEncodePrerequisiteProbe::DeviceInitializationFailed(details) => {
             format!("{base}; device bootstrap for HEVC encode failed: {details}")
@@ -548,7 +552,7 @@ fn append_hevc_encode_bootstrap_status(
     let encode_feedback_flags =
         format_hevc_encode_feedback_flags(bootstrap.supported_encode_feedback_flags);
     message.push_str(&format!(
-        "; encode session bootstrap probe: coded={}x{}, adapter='{}'(vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x}, api=0x{:08x}), supported={}x{}..{}x{}, picture_access_granularity={}x{}, encode_input_granularity={}x{}, coded_extent_aligned_to_input_granularity={}, max_dpb_slots={}, max_active_refs={}, rate_control_modes={}, max_rate_control_layers={}, max_bitrate={}, max_quality_levels={}, encode_capability_flags={}, encode_h265_capability_flags={}, encode_feedback_flags={}, min_dst_offset_align={}, min_dst_size_align={}, max_level_idc={}, input_formats=[{}], dpb_formats=[{}], video_session_create={}, video_session_parameters_create={}, encode_submit_execution={}",
+        "; encode session bootstrap probe: coded={}x{}, adapter='{}'(vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x}, api=0x{:08x}), supported={}x{}..{}x{}, picture_access_granularity={}x{}, encode_input_granularity={}x{}, coded_extent_aligned_to_input_granularity={}, max_dpb_slots={}, max_active_refs={}, rate_control_modes={}, max_rate_control_layers={}, max_bitrate={}, max_quality_levels={}, encode_capability_flags={}, encode_h265_capability_flags={}, encode_feedback_flags={}, min_dst_offset_align={}, min_dst_size_align={}, max_level_idc={}, maintenance1_mode={}, maintenance1_extension_available={}, maintenance1_feature_supported={}, maintenance1_feature_enabled={}, input_formats=[{}], dpb_formats=[{}], video_session_create={}, video_session_parameters_create={}, encode_submit_execution={}",
         bootstrap.coded_width,
         bootstrap.coded_height,
         bootstrap.adapter_name,
@@ -577,6 +581,10 @@ fn append_hevc_encode_bootstrap_status(
         bootstrap.min_bitstream_buffer_offset_alignment,
         bootstrap.min_bitstream_buffer_size_alignment,
         bootstrap.max_level_idc,
+        bootstrap.video_maintenance1_mode,
+        bootstrap.video_maintenance1_extension_available,
+        bootstrap.video_maintenance1_feature_supported,
+        bootstrap.video_maintenance1_feature_enabled,
         input_formats,
         dpb_formats,
         session_create,

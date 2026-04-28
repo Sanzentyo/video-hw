@@ -95,6 +95,32 @@ cargo run -p video-hw-fmp4 --example write_synthetic_fmp4 --features backend-vt
 cargo run -p video-hw-fmp4 --example read_fmp4_file --features backend-vt -- output/synthetic-fmp4.mp4
 ```
 
+- slider GUI read (seek/playback + decoded preview + backend select)
+
+```bash
+cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nvidia backend-intel backend-vulkan' -- output/camera-fmp4/camera-recording-xxxxx.mp4 --backend auto --require-hardware
+```
+
+補足:
+- preview decode は UI thread ではなく worker thread 側で実行します（UI の引っかかり軽減）。
+- decode 結果は sample ごとにキャッシュし、次 sample は先読みします。
+- 既定では backend fallback 有効で decode し、選択 backend で pixel 出力できないときは他 backend へフォールバックして preview 継続を試みます。
+- `--strict-backend` を付けると選択 backend 固定で decode します。
+- status は tracing で出力します。既定ログレベルは `warn`（warn/error のみ）で、`RUST_LOG=info` などを指定すると詳細ログを確認できます。
+- 通常 MP4（non-fragmented）も読めます（例: `sample-videos/sample-10s.mp4`）。
+
+ライトな確認だけ行う場合:
+
+```bash
+cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nvidia backend-intel backend-vulkan' -- output/camera-fmp4/camera-recording-xxxxx.mp4 --smoke-test
+```
+
+通常 MP4 の例:
+
+```bash
+cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nvidia backend-intel backend-vulkan' -- sample-videos/sample-10s.mp4 --backend nvidia --smoke-test
+```
+
 - headless camera record
 
 ```bash

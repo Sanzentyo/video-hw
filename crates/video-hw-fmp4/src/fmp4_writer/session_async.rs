@@ -1,12 +1,10 @@
 use super::config::Fmp4WriterStatus;
 
-#[cfg(feature = "async-session")]
 use super::{
     config::{Fmp4WriterConfig, Fmp4WriterSummary, FragmentFrames, Pts90k},
     core::WriterCore,
     video_frame::{ArgbFrame, RgbaFrame},
 };
-#[cfg(feature = "async-session")]
 use anyhow::{Context, Result, anyhow};
 
 #[derive(Debug, Clone)]
@@ -16,7 +14,6 @@ pub enum AsyncWriterEvent {
     Error(String),
 }
 
-#[cfg(feature = "async-session")]
 enum AsyncWriterCommand {
     WriteRgba {
         frame: RgbaFrame,
@@ -37,13 +34,11 @@ enum AsyncWriterCommand {
     },
 }
 
-#[cfg(feature = "async-session")]
 pub(crate) struct AsyncWriterHandle {
     command_tx: tokio::sync::mpsc::UnboundedSender<AsyncWriterCommand>,
     event_rx: tokio::sync::mpsc::UnboundedReceiver<AsyncWriterEvent>,
 }
 
-#[cfg(feature = "async-session")]
 impl AsyncWriterHandle {
     pub(crate) fn spawn(config: Fmp4WriterConfig) -> Result<Self> {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
