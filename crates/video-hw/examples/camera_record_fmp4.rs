@@ -363,6 +363,11 @@ fn resolve_recording_backend_and_config(
     if backend_is_intel(resolved_backend) {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
             force_software: settings.intel_force_software,
+            hevc_use_vpp: if settings.codec == Codec::Hevc {
+                Some(true)
+            } else {
+                None
+            },
             ..Default::default()
         });
     }
@@ -375,9 +380,59 @@ fn probe_recording_backend_path(
     height: i32,
     fps: i32,
 ) -> Result<BackendKind> {
-    let _ = width;
-    let _ = height;
-    let (resolved_backend, _config) = resolve_recording_backend_and_config(settings, fps)?;
+    let width_u32 = u32::try_from(width).context("width must be >= 0")?;
+    let height_u32 = u32::try_from(height).context("height must be >= 0")?;
+    let dims = dims(width_u32, height_u32)?;
+    let (resolved_backend, config) = resolve_recording_backend_and_config(settings, fps)?;
+    let mut session =
+        AnyEncodeSession::with_backend_kind(resolved_backend, config).with_context(|| {
+            format!("failed to create encoder session (resolved_backend={resolved_backend})")
+        })?;
+    let pixel_count = usize::try_from(width_u32)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(height_u32)
+                .ok()
+                .and_then(|h| w.checked_mul(h))
+        })
+        .context("failed to compute preflight frame pixel count")?;
+    let frame_len = pixel_count
+        .checked_mul(4)
+        .context("failed to compute preflight argb frame size")?;
+    let preflight_frame = vec![0_u8; frame_len];
+    let mut preflight_produced_chunk = false;
+    let preflight_pts_step = i64::from((90_000 / fps.max(1)).max(1));
+    let preflight_frame_count: i64 =
+        if settings.codec == Codec::Hevc && backend_is_intel(resolved_backend) {
+            30
+        } else {
+            6
+        };
+    for frame_index in 0..preflight_frame_count {
+        session
+            .submit(EncodeFrame {
+                dims,
+                pts_90k: Some(Timestamp90k(preflight_pts_step.saturating_mul(frame_index))),
+                buffer: RawFrameBuffer::Argb8888(preflight_frame.clone()),
+                force_keyframe: frame_index == 0,
+            })
+            .with_context(|| format!("encoder preflight submit failed at frame={frame_index}"))?;
+        while let Some(_chunk) = session
+            .try_reap()
+            .context("encoder preflight try_reap failed")?
+        {
+            preflight_produced_chunk = true;
+        }
+    }
+    for _chunk in session.flush().context("encoder preflight flush failed")? {
+        preflight_produced_chunk = true;
+    }
+    if !preflight_produced_chunk {
+        anyhow::bail!(
+            "encoder preflight produced no chunks (backend={resolved_backend}, codec={}, frames={preflight_frame_count})",
+            settings.codec,
+        );
+    }
     Ok(resolved_backend)
 }
 
@@ -874,14 +929,24 @@ impl RecorderWorker {
 
     fn finish(&mut self) -> Result<RecorderSummary> {
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.command_tx
+        if let Err(send_err) = self
+            .command_tx
             .send(RecorderWorkerCommand::Finish { reply_tx })
-            .context("failed to send recorder worker finish command")?;
-        let summary = reply_rx
-            .recv()
-            .context("failed to receive recorder worker finish result")?
-            .map_err(anyhow::Error::msg)?;
-        self.join()?;
+        {
+            return Err(self.finish_channel_error(format!(
+                "failed to send recorder worker finish command: {send_err}"
+            )));
+        }
+        let summary = match reply_rx.recv() {
+            Ok(summary) => summary.map_err(anyhow::Error::msg)?,
+            Err(recv_err) => {
+                return Err(self.finish_channel_error(format!(
+                    "failed to receive recorder worker finish result: {recv_err}"
+                )));
+            }
+        };
+        self.join()
+            .context("failed to join recorder worker after finish")?;
         Ok(summary)
     }
 
@@ -896,6 +961,31 @@ impl RecorderWorker {
                 .map_err(|_| anyhow::anyhow!("recorder worker thread panicked"))?;
         }
         Ok(())
+    }
+
+    fn finish_channel_error(&mut self, prefix: String) -> anyhow::Error {
+        let worker_error = self.take_terminal_worker_error();
+        let join_error = self.join().err();
+        let mut detail = prefix;
+        if let Some(worker_error) = worker_error {
+            detail.push_str("; worker already terminated with error: ");
+            detail.push_str(&worker_error);
+        }
+        if let Some(join_error) = join_error {
+            detail.push_str("; failed to join recorder worker: ");
+            detail.push_str(&format!("{join_error:#}"));
+        }
+        anyhow::anyhow!(detail)
+    }
+
+    fn take_terminal_worker_error(&mut self) -> Option<String> {
+        let mut terminal_error = None;
+        while let Ok(event) = self.event_rx.try_recv() {
+            if let RecorderWorkerEvent::Error(message) = event {
+                terminal_error = Some(message);
+            }
+        }
+        terminal_error
     }
 }
 
@@ -983,6 +1073,7 @@ struct CameraRecordApp {
     pending_fragment_frames: usize,
     recording_seq: u64,
     recording_submitted_frames: u64,
+    recording_first_frame_timestamp_us: Option<i64>,
     recording: Option<RecorderWorker>,
     recording_queue_depth: usize,
     controls_collapsed: bool,
@@ -1035,6 +1126,7 @@ impl CameraRecordApp {
             recording_settings: init.recording_settings,
             recording_seq: 0,
             recording_submitted_frames: 0,
+            recording_first_frame_timestamp_us: None,
             recording: None,
             recording_queue_depth: 0,
             controls_collapsed: false,
@@ -1095,23 +1187,54 @@ impl CameraRecordApp {
         };
         self.total_received = self.total_received.saturating_add(1);
 
+        let duration_limit_90k = self.duration_limit_90k();
         if let Some(recorder) = self.recording.as_mut() {
             let started_at = self.started_at.get_or_insert_with(Instant::now);
-            // Recording PTS is fixed-FPS based on submit order. Using capture wallclock here made
-            // playback duration drift and, combined with fragmented MP4 metadata, confused players.
+            // Derive PTS from capture timestamps so fMP4 duration matches observed capture timing
+            // even when the UI update cadence or backend throughput fluctuates.
+            let first_timestamp = *self
+                .recording_first_frame_timestamp_us
+                .get_or_insert(ui_frame.timestamp_us);
+            let elapsed_us = ui_frame.timestamp_us.saturating_sub(first_timestamp).max(0);
             let pts_90k = i64::try_from(
-                self.recording_submitted_frames
-                    .saturating_mul(fps_frame_duration_90k(self.fps)),
+                i128::from(elapsed_us)
+                    .saturating_mul(90_000)
+                    .saturating_div(1_000_000),
             )
             .unwrap_or(i64::MAX);
-            recorder.submit_frame(ui_frame.rgba.clone(), pts_90k)?;
-            self.recording_submitted_frames = self.recording_submitted_frames.saturating_add(1);
-            self.recording_queue_depth = self.recording_queue_depth.saturating_add(1);
+            if !(matches!(duration_limit_90k, Some(limit_90k) if pts_90k > limit_90k)) {
+                recorder.submit_frame(ui_frame.rgba.clone(), pts_90k)?;
+                self.recording_submitted_frames = self.recording_submitted_frames.saturating_add(1);
+                self.recording_queue_depth = self.recording_queue_depth.saturating_add(1);
+            }
             let _ = started_at;
         }
 
         self.latest = Some(ui_frame);
         Ok(())
+    }
+
+    fn drain_pending_capture_frames_for_recording(&mut self) -> Result<()> {
+        const MAX_DRAIN_FRAMES_ON_STOP: usize = 512;
+        for _ in 0..MAX_DRAIN_FRAMES_ON_STOP {
+            let Ok(captured) = self.rx.try_recv() else {
+                break;
+            };
+            self.handle_owned_frame(captured)?;
+        }
+        Ok(())
+    }
+
+    fn clear_capture_backlog_before_recording(&mut self) -> usize {
+        const MAX_BACKLOG_CLEAR_FRAMES: usize = 60_000;
+        let mut dropped = 0usize;
+        while dropped < MAX_BACKLOG_CLEAR_FRAMES {
+            match self.rx.try_recv() {
+                Ok(_) => dropped = dropped.saturating_add(1),
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        dropped
     }
 
     fn update_texture_if_needed(&mut self, ui: &egui::Ui) {
@@ -1233,6 +1356,8 @@ impl CameraRecordApp {
             return;
         }
 
+        let dropped_stale_frames = self.clear_capture_backlog_before_recording();
+
         self.recording_seq = self.recording_seq.saturating_add(1);
         let output_path = match next_recording_path(&self.output_dir, self.recording_seq) {
             Ok(path) => path,
@@ -1254,8 +1379,15 @@ impl CameraRecordApp {
             Ok(worker) => {
                 self.started_at = None;
                 self.recording_submitted_frames = 0;
+                self.recording_first_frame_timestamp_us = None;
                 self.recording_queue_depth = 0;
-                self.status_message = "recording ON: worker started".to_string();
+                self.status_message = if dropped_stale_frames == 0 {
+                    "recording ON: worker started".to_string()
+                } else {
+                    format!(
+                        "recording ON: worker started (dropped_stale_frames={dropped_stale_frames})"
+                    )
+                };
                 self.recording = Some(worker);
             }
             Err(err) => {
@@ -1265,9 +1397,16 @@ impl CameraRecordApp {
     }
 
     fn stop_recording(&mut self) {
+        self.poll_recording_events();
+        if self.recording.is_some()
+            && let Err(err) = self.drain_pending_capture_frames_for_recording()
+        {
+            self.status_message = format!("record stop drain failed: {err:#}");
+        }
         if let Some(mut recorder) = self.recording.take() {
             self.recording_queue_depth = 0;
             self.recording_submitted_frames = 0;
+            self.recording_first_frame_timestamp_us = None;
             match recorder.finish() {
                 Ok(summary) => {
                     self.status_message = format!(
@@ -1279,9 +1418,11 @@ impl CameraRecordApp {
                         summary.bytes_written,
                         duration_90k_to_seconds(summary.duration_90k)
                     );
+                    println!("{}", self.status_message);
                 }
                 Err(err) => {
                     self.status_message = format!("record stop failed: {err:#}");
+                    eprintln!("{}", self.status_message);
                 }
             }
             self.refresh_backend_probe_statuses();
@@ -1291,6 +1432,7 @@ impl CameraRecordApp {
     fn handle_recording_worker_error(&mut self, message: String) {
         self.recording_queue_depth = 0;
         self.recording_submitted_frames = 0;
+        self.recording_first_frame_timestamp_us = None;
         let join_result = if let Some(mut recorder) = self.recording.take() {
             let result = recorder.join_only();
             self.refresh_backend_probe_statuses();
@@ -1302,6 +1444,7 @@ impl CameraRecordApp {
             Ok(()) => format!("recording worker error: {message}"),
             Err(err) => format!("recording worker error: {message}; join failed: {err:#}"),
         };
+        eprintln!("{}", self.status_message);
     }
 
     fn poll_recording_events(&mut self) {
@@ -1326,6 +1469,15 @@ impl CameraRecordApp {
         if let Some(message) = worker_error {
             self.handle_recording_worker_error(message);
         }
+    }
+
+    fn duration_limit_90k(&self) -> Option<i64> {
+        let duration = self.duration?;
+        let ticks = (duration.as_secs_f64() * 90_000.0).round();
+        if !ticks.is_finite() || ticks <= 0.0 {
+            return None;
+        }
+        Some(ticks.min(i64::MAX as f64) as i64)
     }
 
     fn show_recording_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -1472,7 +1624,6 @@ impl eframe::App for CameraRecordApp {
         ctx.request_repaint_after(Duration::from_millis(16));
         self.poll_capture_events();
         self.poll_recording_events();
-
         if let Some(duration) = self.duration
             && let Some(started_at) = self.started_at
             && self.recording.is_some()
@@ -1484,7 +1635,8 @@ impl eframe::App for CameraRecordApp {
         }
 
         const MAX_FRAMES_PER_TICK: usize = 8;
-        for _ in 0..MAX_FRAMES_PER_TICK {
+        let frame_budget = MAX_FRAMES_PER_TICK;
+        for _ in 0..frame_budget {
             let Ok(captured) = self.rx.try_recv() else {
                 break;
             };
@@ -2090,10 +2242,6 @@ fn h264_nal_type(nalu: &[u8]) -> u8 {
 
 fn hevc_nal_type(nalu: &[u8]) -> u8 {
     (nalu[0] >> 1) & 0x3f
-}
-
-fn fps_frame_duration_90k(fps: i32) -> u64 {
-    90_000 / u64::try_from(fps.max(1)).unwrap_or(1)
 }
 
 fn duration_90k_to_seconds(duration_90k: u64) -> f64 {

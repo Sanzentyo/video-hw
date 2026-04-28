@@ -291,6 +291,7 @@ pub struct IntelEncoderOptions {
     pub target_kbps: Option<u16>,
     pub gop_length: Option<u16>,
     pub force_software: bool,
+    pub hevc_use_vpp: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]

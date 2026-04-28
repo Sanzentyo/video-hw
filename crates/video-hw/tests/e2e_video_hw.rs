@@ -1064,6 +1064,7 @@ fn e2e_intel_encode_force_software_h264() {
     let mut config = EncoderConfig::new(Codec::H264, 30, false);
     config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
         force_software: true,
+        hevc_use_vpp: None,
         ..Default::default()
     });
     let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(config);
@@ -1117,6 +1118,7 @@ fn e2e_intel_force_software_conflicts_with_require_hardware() {
     let mut config = EncoderConfig::new(Codec::H264, 30, true);
     config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
         force_software: true,
+        hevc_use_vpp: None,
         ..Default::default()
     });
     let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(config);

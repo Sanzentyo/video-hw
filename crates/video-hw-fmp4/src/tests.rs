@@ -1,21 +1,16 @@
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use anyhow::Result;
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use video_hw::{Backend, Codec};
 
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use crate::{
     Fmp4Reader, Fmp4ReaderConfig, Fmp4Writer, Fmp4WriterConfig, FragmentFrames, FrameRate,
     FrameSize, Pts90k, Ready, RgbaFrame,
 };
 
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn sync_writer_and_reader_roundtrip_h264() -> Result<()> {
     let frame_size = FrameSize::new(
@@ -73,7 +68,6 @@ fn sync_writer_and_reader_roundtrip_h264() -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn sync_writer_and_reader_roundtrip_hevc() -> Result<()> {
     let frame_size = FrameSize::new(
@@ -131,7 +125,6 @@ fn sync_writer_and_reader_roundtrip_hevc() -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 fn make_rgba(size: FrameSize, seed: u8) -> Vec<u8> {
     let width = size.width().get() as usize;
     let height = size.height().get() as usize;

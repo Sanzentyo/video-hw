@@ -709,6 +709,7 @@ fn resolve_recording_backend_and_config(
     if backend_is_intel(resolved_backend) {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
             force_software: settings.intel_force_software,
+            hevc_use_vpp: None,
             ..Default::default()
         });
     }

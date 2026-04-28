@@ -3853,24 +3853,102 @@ fn query_adapter_decode_support(
         flags.has_video_maintenance1 |= name == vk::KHR_VIDEO_MAINTENANCE1_NAME;
     }
 
-    // SAFETY: We only query immutable queue-family properties for a valid physical device.
-    let queue_family_properties =
-        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-    let decode_queue_family_index =
-        queue_family_properties
-            .iter()
-            .enumerate()
-            .find_map(|(index, queue)| {
-                (queue.queue_count > 0
-                    && queue.queue_flags.contains(vk::QueueFlags::VIDEO_DECODE_KHR))
-                .then(|| u32::try_from(index).ok().map(DecodeQueueFamilyIndex))
-                .flatten()
-            });
+    let decode_queue_family_index = query_video_codec_queue_family_index(
+        instance,
+        physical_device,
+        vk::QueueFlags::VIDEO_DECODE_KHR,
+        vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+    )
+    .map(DecodeQueueFamilyIndex);
 
     Ok(AdapterDecodeSupport {
         extensions: flags,
         decode_queue_family_index,
     })
+}
+
+fn query_video_codec_queue_family_index(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    required_queue_flag: vk::QueueFlags,
+    required_codec_operation: vk::VideoCodecOperationFlagsKHR,
+) -> Option<u32> {
+    // SAFETY: We only query immutable queue-family metadata for a valid physical device.
+    let queue_count =
+        unsafe { instance.get_physical_device_queue_family_properties2_len(physical_device) };
+    if queue_count == 0 {
+        return None;
+    }
+
+    let mut queue_properties2 = vec![vk::QueueFamilyProperties2::default(); queue_count];
+    let mut video_properties = vec![vk::QueueFamilyVideoPropertiesKHR::default(); queue_count];
+    for (queue_property, video_property) in queue_properties2
+        .iter_mut()
+        .zip(video_properties.iter_mut())
+    {
+        *queue_property = queue_property.push_next(video_property);
+    }
+
+    // SAFETY: `queue_properties2` and chained `video_properties` live for the duration of the call.
+    unsafe {
+        instance
+            .get_physical_device_queue_family_properties2(physical_device, &mut queue_properties2)
+    };
+
+    let queue_family_properties = queue_properties2
+        .iter()
+        .map(|property| property.queue_family_properties)
+        .collect::<Vec<_>>();
+    let codec_operations = video_properties
+        .iter()
+        .map(|property| property.video_codec_operations)
+        .collect::<Vec<_>>();
+    find_video_codec_queue_family_index(
+        &queue_family_properties,
+        &codec_operations,
+        required_queue_flag,
+        required_codec_operation,
+    )
+}
+
+fn find_video_codec_queue_family_index(
+    queue_family_properties: &[vk::QueueFamilyProperties],
+    codec_operations: &[vk::VideoCodecOperationFlagsKHR],
+    required_queue_flag: vk::QueueFlags,
+    required_codec_operation: vk::VideoCodecOperationFlagsKHR,
+) -> Option<u32> {
+    let has_codec_operation_metadata = queue_family_properties
+        .iter()
+        .zip(codec_operations.iter())
+        .any(|(queue_family, codec_operation)| {
+            queue_family.queue_count > 0
+                && queue_family.queue_flags.contains(required_queue_flag)
+                && !codec_operation.is_empty()
+        });
+
+    let strict_match = queue_family_properties
+        .iter()
+        .zip(codec_operations.iter())
+        .enumerate()
+        .find_map(|(index, (queue_family, codec_operation))| {
+            (queue_family.queue_count > 0
+                && queue_family.queue_flags.contains(required_queue_flag)
+                && codec_operation.contains(required_codec_operation))
+            .then(|| u32::try_from(index).ok())
+            .flatten()
+        });
+    if strict_match.is_some() || has_codec_operation_metadata {
+        return strict_match;
+    }
+
+    queue_family_properties
+        .iter()
+        .enumerate()
+        .find_map(|(index, queue_family)| {
+            (queue_family.queue_count > 0 && queue_family.queue_flags.contains(required_queue_flag))
+                .then(|| u32::try_from(index).ok())
+                .flatten()
+        })
 }
 
 fn try_initialize_hevc_decode_device(
@@ -3929,6 +4007,42 @@ mod tests {
         assert!(!flags.supports_hevc_decode());
         flags.has_video_decode_h265 = true;
         assert!(flags.supports_hevc_decode());
+    }
+
+    #[test]
+    fn find_video_codec_queue_family_index_requires_h265_decode_operation() {
+        let mut queue_family_properties = vec![vk::QueueFamilyProperties::default(); 2];
+        queue_family_properties[0].queue_count = 1;
+        queue_family_properties[0].queue_flags = vk::QueueFlags::VIDEO_DECODE_KHR;
+        queue_family_properties[1].queue_count = 1;
+        queue_family_properties[1].queue_flags = vk::QueueFlags::VIDEO_DECODE_KHR;
+
+        let codec_operations = vec![
+            vk::VideoCodecOperationFlagsKHR::ENCODE_H265,
+            vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+        ];
+        let queue_family_index = find_video_codec_queue_family_index(
+            &queue_family_properties,
+            &codec_operations,
+            vk::QueueFlags::VIDEO_DECODE_KHR,
+            vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+        );
+        assert_eq!(queue_family_index, Some(1));
+    }
+
+    #[test]
+    fn find_video_codec_queue_family_index_falls_back_when_codec_metadata_absent() {
+        let mut queue_family_properties = vec![vk::QueueFamilyProperties::default(); 1];
+        queue_family_properties[0].queue_count = 1;
+        queue_family_properties[0].queue_flags = vk::QueueFlags::VIDEO_DECODE_KHR;
+        let codec_operations = vec![vk::VideoCodecOperationFlagsKHR::empty()];
+        let queue_family_index = find_video_codec_queue_family_index(
+            &queue_family_properties,
+            &codec_operations,
+            vk::QueueFlags::VIDEO_DECODE_KHR,
+            vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+        );
+        assert_eq!(queue_family_index, Some(0));
     }
 
     #[test]

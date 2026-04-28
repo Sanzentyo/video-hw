@@ -860,8 +860,10 @@ async fn encode_with_onevpl(
     if use_hardware {
         let hevc_direct_rgb4 =
             codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_DIRECT_RGB4").unwrap_or(false);
-        let hevc_force_vpp =
-            codec == Codec::Hevc && env_bool("VIDEO_HW_INTEL_HEVC_USE_VPP").unwrap_or(false);
+        let hevc_force_vpp = codec == Codec::Hevc
+            && options
+                .hevc_use_vpp
+                .unwrap_or_else(|| env_bool("VIDEO_HW_INTEL_HEVC_USE_VPP").unwrap_or(false));
         if use_nv12_input || (codec == Codec::Hevc && !hevc_direct_rgb4 && !hevc_force_vpp) {
             encode_params.set_fourcc(FourCC::NV12);
             encode_params.set_io_pattern(IoPattern::IN_SYSTEM_MEMORY);

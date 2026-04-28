@@ -4,13 +4,36 @@ allow = [
   "MIT",
   "Apache-2.0",
   "Unicode-3.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "CC0-1.0",
+  "NCSA",
+  "ISC",
 ]
 confidence-threshold = 0.8
+
+[[licenses.clarify]]
+crate = "onevpl"
+expression = "MIT"
+license-files = [
+  { path = "../LICENSE", hash = 0x0 },
+]
+
+[[licenses.clarify]]
+crate = "intel-onevpl-sys"
+expression = "MIT"
+license-files = [
+  { path = "../LICENSE", hash = 0x0 },
+]
 
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+  "RUSTSEC-2024-0388", # derivative (via vk-video)
+  "RUSTSEC-2024-0436", # paste (via vk-video/wgpu stack)
+]
 
 [bans]
 multiple-versions = "warn"

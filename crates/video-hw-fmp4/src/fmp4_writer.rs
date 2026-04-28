@@ -1,5 +1,6 @@
 mod config;
 mod core;
+#[cfg(feature = "async-session")]
 mod session_async;
 mod state;
 mod video_frame;
@@ -8,6 +9,7 @@ pub use config::{
     Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary, FragmentFrames, FrameRate, FrameSize,
     Pts90k,
 };
+#[cfg(feature = "async-session")]
 pub use session_async::AsyncWriterEvent;
 #[cfg(feature = "async-session")]
 pub use state::AsyncRecording;

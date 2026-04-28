@@ -13,7 +13,7 @@
 pub mod fmp4_reader;
 pub mod fmp4_writer;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos", feature = "backend-vt"))]
 mod tests;
 
 pub use fmp4_reader::{

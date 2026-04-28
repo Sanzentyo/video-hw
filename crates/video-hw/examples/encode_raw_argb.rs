@@ -107,6 +107,7 @@ fn main() -> Result<()> {
     } else if backend_is_intel(resolved_backend) {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
             force_software: args.intel_force_software,
+            hevc_use_vpp: None,
             ..Default::default()
         });
     }

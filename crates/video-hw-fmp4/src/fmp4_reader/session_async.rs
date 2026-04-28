@@ -1,11 +1,9 @@
 use super::config::Fmp4ReaderStatus;
 
-#[cfg(feature = "async-session")]
 use super::{
     config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4Track},
     core::ReaderCore,
 };
-#[cfg(feature = "async-session")]
 use anyhow::{Context, Result, anyhow};
 
 #[derive(Debug, Clone)]
@@ -14,7 +12,6 @@ pub enum AsyncReaderEvent {
     Error(String),
 }
 
-#[cfg(feature = "async-session")]
 enum AsyncReaderCommand {
     NextSample {
         reply: tokio::sync::oneshot::Sender<Result<Option<Fmp4ReadSample>>>,
@@ -24,13 +21,11 @@ enum AsyncReaderCommand {
     },
 }
 
-#[cfg(feature = "async-session")]
 pub(crate) struct AsyncReaderHandle {
     command_tx: tokio::sync::mpsc::UnboundedSender<AsyncReaderCommand>,
     event_rx: tokio::sync::mpsc::UnboundedReceiver<AsyncReaderEvent>,
 }
 
-#[cfg(feature = "async-session")]
 impl AsyncReaderHandle {
     pub(crate) fn spawn(config: Fmp4ReaderConfig) -> Result<(Self, Vec<Fmp4Track>)> {
         let core = ReaderCore::open(&config)?;

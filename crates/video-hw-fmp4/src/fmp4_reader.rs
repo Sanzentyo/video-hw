@@ -1,9 +1,11 @@
 mod config;
 mod core;
+#[cfg(feature = "async-session")]
 mod session_async;
 mod state;
 
 pub use config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track};
+#[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
 #[cfg(feature = "async-session")]
 pub use state::AsyncReading;

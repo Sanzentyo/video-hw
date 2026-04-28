@@ -454,7 +454,9 @@ fn hevc_decode_blocker_message() -> String {
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
         }
         HevcDecodePrerequisiteProbe::MissingDecodeQueueFamily => {
-            format!("{base}; no queue family advertises VIDEO_DECODE_KHR")
+            format!(
+                "{base}; no queue family advertises VIDEO_DECODE_KHR with H.265 decode operation"
+            )
         }
         HevcDecodePrerequisiteProbe::DeviceInitializationFailed(details) => {
             format!("{base}; device bootstrap for HEVC decode failed: {details}")
@@ -490,7 +492,9 @@ fn hevc_encode_blocker_message_with_config(
             format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
         }
         HevcEncodePrerequisiteProbe::MissingEncodeQueueFamily => {
-            format!("{base}; no queue family advertises VIDEO_ENCODE_KHR")
+            format!(
+                "{base}; no queue family advertises VIDEO_ENCODE_KHR with H.265 encode operation"
+            )
         }
         HevcEncodePrerequisiteProbe::DeviceInitializationFailed(details) => {
             format!("{base}; device bootstrap for HEVC encode failed: {details}")

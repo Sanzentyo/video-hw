@@ -1,14 +1,53 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use shiguredo_mp4::demux::{DemuxError, Fmp4FileDemuxer, Input};
+use shiguredo_mp4::demux::{
+    DemuxError, Fmp4FileDemuxer, Input, Mp4FileDemuxer, Mp4FileKind, Mp4FileKindDetector,
+    RequiredInput, Sample, TrackInfo,
+};
 
 use super::config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track};
 
 #[derive(Debug)]
+enum ReaderDemuxer {
+    Fragmented(Fmp4FileDemuxer),
+    Mp4(Mp4FileDemuxer),
+}
+
+impl ReaderDemuxer {
+    fn required_input(&self) -> Option<RequiredInput> {
+        match self {
+            Self::Fragmented(demuxer) => demuxer.required_input(),
+            Self::Mp4(demuxer) => demuxer.required_input(),
+        }
+    }
+
+    fn handle_input(&mut self, input: Input<'_>) {
+        match self {
+            Self::Fragmented(demuxer) => demuxer.handle_input(input),
+            Self::Mp4(demuxer) => demuxer.handle_input(input),
+        }
+    }
+
+    fn tracks(&mut self) -> std::result::Result<&[TrackInfo], DemuxError> {
+        match self {
+            Self::Fragmented(demuxer) => demuxer.tracks(),
+            Self::Mp4(demuxer) => demuxer.tracks(),
+        }
+    }
+
+    fn next_sample(&mut self) -> std::result::Result<Option<Sample<'_>>, DemuxError> {
+        match self {
+            Self::Fragmented(demuxer) => demuxer.next_sample(),
+            Self::Mp4(demuxer) => demuxer.next_sample(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct ReaderCore {
     bytes: Vec<u8>,
-    demuxer: Fmp4FileDemuxer,
+    demuxer: ReaderDemuxer,
     tracks: Vec<Fmp4Track>,
     status: Fmp4ReaderStatus,
 }
@@ -17,23 +56,17 @@ impl ReaderCore {
     pub(crate) fn open(config: &Fmp4ReaderConfig) -> Result<Self> {
         let bytes = fs::read(&config.input_path)
             .with_context(|| format!("failed to read {}", config.input_path.display()))?;
-        let mut demuxer = Fmp4FileDemuxer::new();
+        let file_kind = detect_mp4_file_kind(&bytes)?;
+        let mut demuxer = match file_kind {
+            Mp4FileKind::FragmentedMp4 => ReaderDemuxer::Fragmented(Fmp4FileDemuxer::new()),
+            Mp4FileKind::Mp4 => ReaderDemuxer::Mp4(Mp4FileDemuxer::new()),
+        };
         while let Some(required) = demuxer.required_input() {
-            let start = usize::try_from(required.position)
-                .context("required input offset exceeds usize")?;
-            let end = match required.size {
-                Some(size) => start.saturating_add(size),
-                None => bytes.len(),
-            }
-            .min(bytes.len());
-            demuxer.handle_input(Input {
-                position: required.position,
-                data: bytes.get(start..end).unwrap_or(&[]),
-            });
+            demuxer.handle_input(required_input_as_input(&bytes, required)?);
         }
         let tracks = demuxer
             .tracks()
-            .context("failed to initialize fMP4 demuxer")?
+            .context("failed to initialize MP4 demuxer")?
             .iter()
             .map(|track| Fmp4Track {
                 track_id: track.track_id,
@@ -106,17 +139,71 @@ impl ReaderCore {
         let Some(required) = self.demuxer.required_input() else {
             return Ok(());
         };
-        let start =
-            usize::try_from(required.position).context("required input offset exceeds usize")?;
-        let end = match required.size {
-            Some(size) => start.saturating_add(size),
-            None => self.bytes.len(),
-        }
-        .min(self.bytes.len());
-        self.demuxer.handle_input(Input {
-            position: required.position,
-            data: self.bytes.get(start..end).unwrap_or(&[]),
-        });
+        self.demuxer
+            .handle_input(required_input_as_input(&self.bytes, required)?);
         Ok(())
+    }
+}
+
+fn required_input_as_input<'a>(bytes: &'a [u8], required: RequiredInput) -> Result<Input<'a>> {
+    let start =
+        usize::try_from(required.position).context("required input offset exceeds usize")?;
+    let end = match required.size {
+        Some(size) => start.saturating_add(size),
+        None => bytes.len(),
+    }
+    .min(bytes.len());
+    Ok(Input {
+        position: required.position,
+        data: bytes.get(start..end).unwrap_or(&[]),
+    })
+}
+
+fn detect_mp4_file_kind(bytes: &[u8]) -> Result<Mp4FileKind> {
+    let mut detector = Mp4FileKindDetector::new();
+    while let Some(required) = detector.required_input() {
+        detector.handle_input(required_input_as_input(bytes, required)?);
+        if let Some(kind) = detector
+            .file_kind()
+            .context("failed to detect MP4 file kind")?
+        {
+            return Ok(kind);
+        }
+    }
+    detector
+        .file_kind()
+        .context("failed to detect MP4 file kind")?
+        .context("failed to detect MP4 file kind before EOF")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn open_regular_mp4_sample_from_workspace() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.mp4");
+        let mut core = ReaderCore::open(&Fmp4ReaderConfig {
+            input_path: input_path.clone(),
+        })
+        .unwrap_or_else(|err| {
+            panic!("failed to open {}: {err:#}", input_path.display());
+        });
+        assert!(!core.tracks().is_empty(), "no tracks in sample-10s.mp4");
+        let mut sample_count = 0_u64;
+        while let Some(sample) = core.next_sample().expect("failed to read sample") {
+            assert!(!sample.data.is_empty(), "sample payload must not be empty");
+            sample_count = sample_count.saturating_add(1);
+            if sample_count > 600 {
+                break;
+            }
+        }
+        assert!(sample_count > 0, "no samples read from sample-10s.mp4");
     }
 }
