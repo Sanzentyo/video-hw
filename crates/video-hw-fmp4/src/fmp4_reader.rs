@@ -7,7 +7,7 @@ mod state;
 
 pub use config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    RangeCacheConfig, SampleId, SampleMeta, SampleRange, TrackId,
+    RangeCacheConfig, RangeCacheStats, SampleId, SampleMeta, SampleRange, TrackId,
 };
 pub use core::EncodedSampleIter;
 pub use decode::{
@@ -119,6 +119,10 @@ impl Fmp4Reader<SyncReading> {
 
     pub fn status(&self) -> Fmp4ReaderStatus {
         self.state.core.status()
+    }
+
+    pub fn cache_stats(&self) -> RangeCacheStats {
+        self.state.core.cache_stats()
     }
 
     pub fn finish(self) -> Fmp4Reader<Finished> {

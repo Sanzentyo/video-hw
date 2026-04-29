@@ -191,6 +191,14 @@ impl EncodedSample {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RangeCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub resident_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Fmp4ReaderStatus {
     pub samples_indexed: u64,
     pub samples_read: u64,

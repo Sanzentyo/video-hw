@@ -15,7 +15,7 @@ use shiguredo_mp4::{
 
 use super::config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    RangeCacheConfig, SampleId, SampleMeta, TrackId,
+    RangeCacheConfig, RangeCacheStats, SampleId, SampleMeta, TrackId,
 };
 
 #[derive(Debug)]
@@ -52,13 +52,6 @@ impl ReaderDemuxer {
             Self::Mp4(demuxer) => demuxer.next_sample(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct RangeCacheStats {
-    hits: u64,
-    misses: u64,
-    evictions: u64,
 }
 
 #[derive(Debug)]
@@ -205,13 +198,13 @@ impl SampleStore {
             .read_range(&mut self.file, self.file_len, offset, size)
     }
 
-    fn status_fields(&self) -> (u64, u64, u64, usize) {
-        (
-            self.cache.stats.hits,
-            self.cache.stats.misses,
-            self.cache.stats.evictions,
-            self.cache.resident_bytes,
-        )
+    fn cache_stats(&self) -> RangeCacheStats {
+        RangeCacheStats {
+            hits: self.cache.stats.hits,
+            misses: self.cache.stats.misses,
+            evictions: self.cache.stats.evictions,
+            resident_bytes: self.cache.resident_bytes,
+        }
     }
 }
 
@@ -333,6 +326,10 @@ impl ReaderCore {
         let mut status = self.status.clone();
         apply_cache_status(&mut status, &self.store);
         status
+    }
+
+    pub(crate) fn cache_stats(&self) -> RangeCacheStats {
+        self.store.cache_stats()
     }
 
     pub(crate) fn samples(&self, track: TrackId) -> Result<&[SampleMeta]> {
@@ -583,11 +580,11 @@ fn detect_mp4_file_kind(store: &mut SampleStore) -> Result<Mp4FileKind> {
 }
 
 fn apply_cache_status(status: &mut Fmp4ReaderStatus, store: &SampleStore) {
-    let (hits, misses, evictions, resident_bytes) = store.status_fields();
-    status.cache_hits = hits;
-    status.cache_misses = misses;
-    status.cache_evictions = evictions;
-    status.cache_resident_bytes = resident_bytes;
+    let cache = store.cache_stats();
+    status.cache_hits = cache.hits;
+    status.cache_misses = cache.misses;
+    status.cache_evictions = cache.evictions;
+    status.cache_resident_bytes = cache.resident_bytes;
 }
 
 #[cfg(test)]
@@ -791,5 +788,31 @@ mod tests {
         assert_eq!(cache.resident_bytes, 8);
 
         let _ = std::fs::remove_file(input_path);
+    }
+
+    #[test]
+    fn reader_exposes_range_cache_stats() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.mp4");
+        let mut core =
+            ReaderCore::open(&Fmp4ReaderConfig::new(input_path)).expect("sample should open");
+        let video_track = core
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let first_sample = core.samples(video_track).expect("video samples")[0].sample_id;
+
+        let before = core.cache_stats();
+        core.read_sample(first_sample)
+            .expect("on-demand sample read should succeed");
+        let after = core.cache_stats();
+
+        assert!(after.misses >= before.misses);
+        assert!(after.resident_bytes >= before.resident_bytes);
     }
 }
