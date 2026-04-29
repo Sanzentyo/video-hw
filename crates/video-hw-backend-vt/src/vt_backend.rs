@@ -12,9 +12,9 @@ use crate::backend_transform_adapter::{DecodedUnit, VtTransformAdapter};
 use crate::bitstream::{AccessUnit, ParameterSetCache, StatefulBitstreamAssembler};
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
-    BackendError, CapabilityReport, Codec, ColorRequest, DecodeSummary, DecoderConfig,
-    EncodedPacket, Frame, SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
-    VtSessionConfig,
+    BackendError, CapabilityReport, Codec, ColorRequest, DecodeOutputMode, DecodeSummary,
+    DecoderConfig, EncodedPacket, Frame, SessionSwitchMode, SessionSwitchRequest, VideoDecoder,
+    VideoEncoder, VtSessionConfig,
 };
 use core_foundation::{
     base::{CFAllocator, CFType, TCFType, kCFAllocatorSystemDefault},
@@ -403,6 +403,11 @@ impl VideoDecoder for VtDecoderAdapter {
             decode_supported: true,
             encode_supported: true,
             hardware_acceleration: VTDecompressionSession::is_hardware_decode_supported(cm_codec),
+            decode_output_modes: vec![
+                DecodeOutputMode::Metadata,
+                DecodeOutputMode::Nv12,
+                DecodeOutputMode::Rgb24,
+            ],
         })
     }
 
@@ -794,6 +799,11 @@ impl VideoEncoder for VtEncoderAdapter {
             decode_supported: true,
             encode_supported: true,
             hardware_acceleration: true,
+            decode_output_modes: vec![
+                DecodeOutputMode::Metadata,
+                DecodeOutputMode::Nv12,
+                DecodeOutputMode::Rgb24,
+            ],
         })
     }
 
@@ -1459,7 +1469,6 @@ extern "C" fn vt_decode_output_callback(
             transfer_function: color.transfer_function,
             ycbcr_matrix: color.ycbcr_matrix,
             argb,
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         };
@@ -1634,7 +1643,6 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         });
@@ -1665,7 +1673,6 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         });

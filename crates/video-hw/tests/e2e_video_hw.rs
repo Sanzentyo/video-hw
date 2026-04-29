@@ -1265,6 +1265,82 @@ fn e2e_nv_backend_hevc_decode_sample() {
     any(target_os = "linux", target_os = "windows")
 ))]
 #[test]
+fn e2e_nv_backend_decode_returns_pixel_payloads() {
+    for (codec, sample) in [
+        (Codec::H264, "sample-10s.h264"),
+        (Codec::Hevc, "sample-10s.h265"),
+    ] {
+        for mode in [DecodeOutputMode::Nv12, DecodeOutputMode::Rgb24] {
+            let mut decoder = DecodeSession::<NvDecoderAdapter>::new(DecoderConfig {
+                codec,
+                fps: 30,
+                require_hardware: true,
+                output_mode: mode,
+                backend_options: BackendDecoderOptions::Default,
+            });
+            let data = fs::read(sample_path(sample)).expect("sample bitstream should exist");
+            let mut frames = Vec::new();
+            for chunk in data.chunks(4096) {
+                match decoder.submit(BitstreamInput::AnnexBChunk {
+                    chunk: chunk.to_vec(),
+                    pts_90k: None,
+                }) {
+                    Ok(()) => {
+                        while let Some(frame) = decoder.try_reap().expect("try_reap should succeed")
+                        {
+                            frames.push(frame);
+                        }
+                    }
+                    Err(err) if nv_runtime_unsupported(&err) => {
+                        eprintln!("skip: NVIDIA pixel decode unavailable: {err}");
+                        return;
+                    }
+                    Err(err) => panic!("unexpected decode error: {err:?}"),
+                }
+            }
+            match decoder.flush() {
+                Ok(flushed) => frames.extend(flushed),
+                Err(err) if nv_runtime_unsupported(&err) => {
+                    eprintln!("skip: NVIDIA pixel decode unavailable: {err}");
+                    return;
+                }
+                Err(err) => panic!("unexpected decode flush error: {err:?}"),
+            }
+            assert!(
+                !frames.is_empty(),
+                "NVIDIA {codec:?} {mode:?} decode should produce frames"
+            );
+            for frame in frames {
+                match (mode, frame) {
+                    (
+                        DecodeOutputMode::Nv12,
+                        video_hw::DecodedFrame::Nv12 {
+                            dims, pitch, data, ..
+                        },
+                    ) => {
+                        let width = dims.width.get() as usize;
+                        let height = dims.height.get() as usize;
+                        assert!(pitch >= width);
+                        assert!(data.len() >= pitch * height + (pitch * height / 2));
+                    }
+                    (DecodeOutputMode::Rgb24, video_hw::DecodedFrame::Rgb24 { dims, data, .. }) => {
+                        assert_eq!(
+                            data.len(),
+                            dims.width.get() as usize * dims.height.get() as usize * 3
+                        );
+                    }
+                    (_, other) => panic!("unexpected decoded frame for {mode:?}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
 fn e2e_nv_backend_encode_accepts_backend_specific_options() {
     let mut config = EncoderConfig::new(Codec::H264, 30, true);
     config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {

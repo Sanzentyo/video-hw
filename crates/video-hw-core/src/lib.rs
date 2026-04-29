@@ -152,7 +152,6 @@ pub struct ColorMetadata {
     pub ycbcr_matrix: Option<i32>,
 }
 
-#[cfg(feature = "unstable-raw-inputs")]
 #[derive(Debug, Clone)]
 pub struct Nv12FramePayload {
     pub pitch: usize,
@@ -171,10 +170,6 @@ pub struct Frame {
     pub ycbcr_matrix: Option<i32>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub argb: Option<Vec<u8>>,
-    #[cfg(all(
-        feature = "unstable-raw-inputs",
-        any(target_os = "macos", target_os = "linux", target_os = "windows")
-    ))]
     pub nv12: Option<Nv12FramePayload>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub force_keyframe: bool,
@@ -448,14 +443,26 @@ pub struct CapabilityReport {
     pub decode_supported: bool,
     pub encode_supported: bool,
     pub hardware_acceleration: bool,
+    pub decode_output_modes: Vec<DecodeOutputMode>,
+}
+
+impl CapabilityReport {
+    #[must_use]
+    pub fn supports_decode_output_mode(&self, mode: DecodeOutputMode) -> bool {
+        self.decode_output_modes.contains(&mode)
+    }
 }
 
 impl Display for CapabilityReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "CapabilityReport(codec={}, decode_supported={}, encode_supported={}, hardware_acceleration={})",
-            self.codec, self.decode_supported, self.encode_supported, self.hardware_acceleration
+            "CapabilityReport(codec={}, decode_supported={}, encode_supported={}, hardware_acceleration={}, decode_output_modes={:?})",
+            self.codec,
+            self.decode_supported,
+            self.encode_supported,
+            self.hardware_acceleration,
+            self.decode_output_modes
         )
     }
 }

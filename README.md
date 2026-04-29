@@ -55,6 +55,8 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 ## 現行APIの重要制約
 
 - decode 出力型は `DecodedFrame::{Metadata,Nv12,Rgb24}` を持つ
+  - NVIDIA decode は NVDEC の mapped surface を CPU NV12 payload として readback し、`Nv12` と `Rgb24` を返せる
+  - backend ごとの decode 出力可否は `CapabilityReport::decode_output_modes` で確認する
   - ただし標準 decode 経路の出力は `Metadata` 中心
 - encode 入力型は `RawFrameBuffer::{Argb8888,Argb8888Shared,Nv12,Rgb24}` を持つ
   - ただし現行 encode が受理するのは `Argb8888` / `Argb8888Shared` のみ

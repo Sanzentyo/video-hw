@@ -15,8 +15,8 @@ use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    ColorRequest, DecodeSummary, DecoderConfig, EncodedPacket, Frame, NvidiaSessionConfig,
-    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
+    ColorRequest, DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
+    NvidiaSessionConfig, SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Default)]
@@ -182,7 +182,11 @@ impl NvDecoderAdapter {
         let cuda_ctx = CudaContext::new(0).map_err(|err| {
             BackendError::UnsupportedConfig(format!("failed to initialize CUDA context: {err}"))
         })?;
-        let decoder = NvMetaDecoder::new(cuda_ctx, to_decode_codec(self.config.codec))?;
+        let decoder = NvMetaDecoder::new(
+            cuda_ctx,
+            to_decode_codec(self.config.codec),
+            self.config.output_mode,
+        )?;
 
         self.decoder = Some(decoder);
         Ok(())
@@ -302,17 +306,28 @@ impl NvDecoderAdapter {
         if let Some(last) = decoded.last() {
             self.last_summary.width = Some(last.width);
             self.last_summary.height = Some(last.height);
+            self.last_summary.pixel_format = last.pixel_format;
         }
     }
 }
 
 impl VideoDecoder for NvDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
         Ok(CapabilityReport {
             codec,
-            decode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            decode_supported,
             encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
             hardware_acceleration: true,
+            decode_output_modes: if decode_supported {
+                vec![
+                    DecodeOutputMode::Metadata,
+                    DecodeOutputMode::Nv12,
+                    DecodeOutputMode::Rgb24,
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -632,11 +647,21 @@ impl NvEncoderAdapter {
 
 impl VideoEncoder for NvEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
         Ok(CapabilityReport {
             codec,
-            decode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            decode_supported,
             encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
             hardware_acceleration: true,
+            decode_output_modes: if decode_supported {
+                vec![
+                    DecodeOutputMode::Metadata,
+                    DecodeOutputMode::Nv12,
+                    DecodeOutputMode::Rgb24,
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -1538,7 +1563,6 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: None,
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         });
@@ -1616,7 +1640,6 @@ mod tests {
                 transfer_function: None,
                 ycbcr_matrix: None,
                 argb: None,
-                #[cfg(feature = "unstable-raw-inputs")]
                 nv12: None,
                 force_keyframe: false,
             })

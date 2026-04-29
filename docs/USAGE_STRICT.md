@@ -82,7 +82,8 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 - `backend-vulkan` は `vk-video` + `ash` を通して Vulkan Video API を Rust から直接利用する
 - Vulkan HEVC decode は probe ベースで、`VK_KHR_video_queue` / `VK_KHR_video_decode_queue` / `VK_KHR_video_decode_h265` と `VIDEO_DECODE_KHR` 対応 queue family を前提にする
-- `DecodeOutputMode::Metadata` が基本。`DecodeOutputMode::Nv12` / `Rgb24` は bootstrap / submit / readback probe が通る場合のみ返せる
+- `DecodeOutputMode::Metadata` が基本。`DecodeOutputMode::Nv12` / `Rgb24` は backend の capability が対応を返す場合に使う
+- NVIDIA decode は NVDEC mapped surface を CPU NV12 payload として readback するため、分析用途ではまず `DecodeOutputMode::Nv12` を指定する。`Rgb24` は NV12 から共通変換される
 - 非 metadata 出力は現状 `G8_B8R8_2PLANE_420_UNORM` readback と偶数の coded extent を前提にし、stream が probe で覆える access unit 数を超えると `UnsupportedConfig` になる
 - Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は DPB 参照付きの submit path を既定で使う。品質確認では FFmpeg software decode 参照に対して PSNR を確認する
 - Vulkan HEVC encode は未実装で、`UnsupportedConfig` を返す
@@ -156,8 +157,8 @@ cargo +nightly -Zscript scripts/quality_check.rs
 - `Rgb24`
 
 `DecodeOutputMode::Metadata` は常用サポートです。  
-`DecodeOutputMode::Nv12` / `Rgb24` は backend が ARGB payload を返す場合のみ変換出力できます。  
-ARGB payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。
+`DecodeOutputMode::Nv12` / `Rgb24` は backend が NV12 または ARGB payload を返す場合のみ変換出力できます。
+pixel payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。backend ごとの可否は `CapabilityReport::decode_output_modes` / `supports_decode_output_mode()` を確認してください。
 
 ## 4. Encode API
 

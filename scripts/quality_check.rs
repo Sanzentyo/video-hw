@@ -170,8 +170,9 @@ fn encode_cases() -> Vec<(&'static str, &'static str, &'static str)> {
 }
 
 fn decode_quality_cases() -> Vec<(&'static str, &'static str)> {
-    // Only Intel and Vulkan expose pixel output; NVIDIA is metadata-only
     vec![
+        ("nvidia", "h264"),
+        ("nvidia", "hevc"),
         ("intel", "h264"),
         ("intel", "hevc"),
         ("vulkan", "h264"),

@@ -117,11 +117,21 @@ impl IntelDecoderAdapter {
 
 impl VideoDecoder for IntelDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
         Ok(CapabilityReport {
             codec,
-            decode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            decode_supported,
             encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
             hardware_acceleration: true,
+            decode_output_modes: if decode_supported {
+                vec![
+                    DecodeOutputMode::Metadata,
+                    DecodeOutputMode::Nv12,
+                    DecodeOutputMode::Rgb24,
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -255,11 +265,21 @@ impl IntelEncoderAdapter {
 
 impl VideoEncoder for IntelEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
         Ok(CapabilityReport {
             codec,
-            decode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            decode_supported,
             encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
             hardware_acceleration: true,
+            decode_output_modes: if decode_supported {
+                vec![
+                    DecodeOutputMode::Metadata,
+                    DecodeOutputMode::Nv12,
+                    DecodeOutputMode::Rgb24,
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -534,7 +554,6 @@ fn metadata_frame_from_surface(
         transfer_function: None,
         ycbcr_matrix: None,
         argb: None,
-        #[cfg(feature = "unstable-raw-inputs")]
         nv12: None,
         force_keyframe: false,
     }
@@ -581,7 +600,6 @@ fn surface_to_backend_frame(
         transfer_function: None,
         ycbcr_matrix: None,
         argb,
-        #[cfg(feature = "unstable-raw-inputs")]
         nv12: None,
         force_keyframe: false,
     })
@@ -1359,7 +1377,6 @@ fn write_nv12_to_surface(
     copy_nv12_to_surface(surface, nv12.data.as_slice(), nv12.pitch, width, height)
 }
 
-#[cfg(feature = "unstable-raw-inputs")]
 /// Returns a mutable slice over the full interleaved NV12 UV plane
 /// (`(height / 2) * pitch` bytes).
 ///
@@ -1383,6 +1400,7 @@ unsafe fn nv12_uv_plane_full_mut<'a>(
     unsafe { std::slice::from_raw_parts_mut(u_plane.as_mut_ptr(), full_len) }
 }
 
+#[cfg(feature = "unstable-raw-inputs")]
 fn copy_nv12_to_surface(
     surface: &mut onevpl::FrameSurface<'_>,
     nv12: &[u8],

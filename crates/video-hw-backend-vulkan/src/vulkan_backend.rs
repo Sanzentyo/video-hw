@@ -645,6 +645,15 @@ fn vulkan_capability_report(codec: Codec) -> CapabilityReport {
         decode_supported,
         encode_supported,
         hardware_acceleration: decode_supported || encode_supported,
+        decode_output_modes: if decode_supported {
+            vec![
+                DecodeOutputMode::Metadata,
+                DecodeOutputMode::Nv12,
+                DecodeOutputMode::Rgb24,
+            ]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -687,7 +696,6 @@ fn metadata_only_frame(width: usize, height: usize, pts_90k: Option<i64>) -> Fra
         transfer_function: None,
         ycbcr_matrix: None,
         argb: None,
-        #[cfg(feature = "unstable-raw-inputs")]
         nv12: None,
         force_keyframe: false,
     }

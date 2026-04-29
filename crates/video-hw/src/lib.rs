@@ -7,7 +7,6 @@ mod contract;
 mod pipeline;
 mod transform;
 
-#[cfg(feature = "unstable-raw-inputs")]
 pub use contract::Nv12FramePayload;
 pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
@@ -512,12 +511,15 @@ pub fn select_decoder_backend(config: &DecoderConfig) -> Result<BackendKind, Bac
             Ok(capability) => {
                 if capability.decode_supported
                     && (!config.require_hardware || capability.hardware_acceleration)
+                    && capability.supports_decode_output_mode(config.output_mode)
                 {
                     return Ok(candidate);
                 }
                 diagnostics.push(format!(
-                    "{candidate:?}: decode_supported={}, hw_accel={}",
-                    capability.decode_supported, capability.hardware_acceleration
+                    "{candidate:?}: decode_supported={}, hw_accel={}, output_mode_supported={}",
+                    capability.decode_supported,
+                    capability.hardware_acceleration,
+                    capability.supports_decode_output_mode(config.output_mode)
                 ));
             }
             Err(err) => diagnostics.push(format!("{candidate:?}: {err}")),
@@ -619,6 +621,41 @@ pub trait DecoderBackend: VideoDecoder {
     }
 }
 
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn backend_supports_output_mode(kind: BackendKind, mode: DecodeOutputMode) -> bool {
+    match kind {
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        BackendKind::VideoToolbox => {
+            <vt_backend::VtDecoderAdapter as DecoderBackend>::supports_output_mode(mode)
+        }
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Nvidia => <NvDecoderAdapter as DecoderBackend>::supports_output_mode(mode),
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Intel => <IntelDecoderAdapter as DecoderBackend>::supports_output_mode(mode),
+        #[cfg(all(
+            feature = "backend-vulkan",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        BackendKind::Vulkan => <VulkanDecoderAdapter as DecoderBackend>::supports_output_mode(mode),
+    }
+}
+
 pub trait EncoderBackend: VideoEncoder {
     const BACKEND_KIND: BackendKind;
 
@@ -661,7 +698,12 @@ impl AnyDecodeSession {
         kind: BackendKind,
         config: DecoderConfig,
     ) -> Result<Self, BackendError> {
-        let _ = &config;
+        if !backend_supports_output_mode(kind, config.output_mode) {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "{kind:?} decoder does not support DecodeOutputMode::{}",
+                config.output_mode
+            )));
+        }
         match kind {
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             BackendKind::VideoToolbox => Ok(Self {
@@ -1144,6 +1186,13 @@ impl DecoderBackend for NvDecoderAdapter {
     fn from_decoder_config(config: DecoderConfig) -> Self {
         Self::new(config)
     }
+
+    fn supports_output_mode(mode: DecodeOutputMode) -> bool {
+        matches!(
+            mode,
+            DecodeOutputMode::Metadata | DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
+        )
+    }
 }
 
 #[cfg(all(
@@ -1179,6 +1228,13 @@ impl DecoderBackend for IntelDecoderAdapter {
     fn from_decoder_config(config: DecoderConfig) -> Self {
         Self::new(config)
     }
+
+    fn supports_output_mode(mode: DecodeOutputMode) -> bool {
+        matches!(
+            mode,
+            DecodeOutputMode::Metadata | DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
+        )
+    }
 }
 
 #[cfg(all(
@@ -1207,6 +1263,13 @@ impl DecoderBackend for VulkanDecoderAdapter {
 
     fn from_decoder_config(config: DecoderConfig) -> Self {
         Self::new(config)
+    }
+
+    fn supports_output_mode(mode: DecodeOutputMode) -> bool {
+        matches!(
+            mode,
+            DecodeOutputMode::Metadata | DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
+        )
     }
 }
 
@@ -1273,9 +1336,18 @@ fn backend_frame_to_decoded_frame(
                             .to_string(),
                     )
                 })?;
+            if let Some(nv12) = frame.nv12 {
+                validate_nv12_payload(&nv12, frame.width, frame.height)?;
+                return Ok(DecodedFrame::Nv12 {
+                    dims,
+                    pitch: nv12.pitch,
+                    pts_90k: frame.pts_90k.map(Timestamp90k),
+                    data: nv12.data,
+                });
+            }
             let argb = frame_argb_payload(&frame).ok_or_else(|| {
                 BackendError::UnsupportedConfig(
-                    "DecodeOutputMode::Nv12 requires backend ARGB payload".to_string(),
+                    "DecodeOutputMode::Nv12 requires backend NV12 or ARGB payload".to_string(),
                 )
             })?;
             let (pitch, data) = argb_to_nv12(argb, frame.width, frame.height)?;
@@ -1294,12 +1366,23 @@ fn backend_frame_to_decoded_frame(
                             .to_string(),
                     )
                 })?;
-            let argb = frame_argb_payload(&frame).ok_or_else(|| {
-                BackendError::UnsupportedConfig(
-                    "DecodeOutputMode::Rgb24 requires backend ARGB payload".to_string(),
-                )
-            })?;
-            let data = argb_to_rgb24(argb, frame.width, frame.height)?;
+            let data = if let Some(argb) = frame_argb_payload(&frame) {
+                argb_to_rgb24(argb, frame.width, frame.height)?
+            } else if let Some(nv12) = frame.nv12 {
+                validate_nv12_payload(&nv12, frame.width, frame.height)?;
+                nv12_to_rgb24(&Nv12Frame {
+                    width: frame.width,
+                    height: frame.height,
+                    pitch: nv12.pitch,
+                    pts_90k: frame.pts_90k,
+                    data: nv12.data,
+                })?
+                .data
+            } else {
+                return Err(BackendError::UnsupportedConfig(
+                    "DecodeOutputMode::Rgb24 requires backend NV12 or ARGB payload".to_string(),
+                ));
+            };
             return Ok(DecodedFrame::Rgb24 {
                 dims,
                 pts_90k: frame.pts_90k.map(Timestamp90k),
@@ -1357,6 +1440,38 @@ fn frame_argb_payload(frame: &Frame) -> Option<&[u8]> {
 )))]
 fn frame_argb_payload(_frame: &Frame) -> Option<&[u8]> {
     None
+}
+
+fn validate_nv12_payload(
+    nv12: &Nv12FramePayload,
+    width: usize,
+    height: usize,
+) -> Result<(), BackendError> {
+    if width == 0 || height == 0 {
+        return Err(BackendError::InvalidInput(
+            "nv12 frame dimensions must be positive".to_string(),
+        ));
+    }
+    if nv12.pitch < width {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 pitch is smaller than width: pitch={}, width={width}",
+            nv12.pitch
+        )));
+    }
+    let luma_size = nv12
+        .pitch
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
+    let expected = luma_size
+        .checked_add(luma_size / 2)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 total size overflow".to_string()))?;
+    if nv12.data.len() < expected {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 payload size mismatch: expected at least {expected}, got {}",
+            nv12.data.len()
+        )));
+    }
+    Ok(())
 }
 
 fn argb_to_rgb24(argb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, BackendError> {
@@ -1476,24 +1591,27 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     };
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[cfg(not(feature = "unstable-raw-inputs"))]
-    let argb = match buffer {
-        RawFrameBuffer::Argb8888(data) => Some(data),
-        RawFrameBuffer::Argb8888Shared(data) => Some(data.to_vec()),
-        #[cfg(feature = "unstable-raw-inputs")]
-        RawFrameBuffer::Nv12 { .. } => {
-            return Err(BackendError::InvalidInput(
-                "RawFrameBuffer::Nv12 is not supported by Encoder::push_encode_frame yet"
-                    .to_string(),
-            ));
-        }
-        #[cfg(feature = "unstable-raw-inputs")]
-        RawFrameBuffer::Rgb24(_) => {
-            return Err(BackendError::InvalidInput(
-                "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
-                    .to_string(),
-            ));
-        }
-    };
+    let (argb, nv12) = (
+        match buffer {
+            RawFrameBuffer::Argb8888(data) => Some(data),
+            RawFrameBuffer::Argb8888Shared(data) => Some(data.to_vec()),
+            #[cfg(feature = "unstable-raw-inputs")]
+            RawFrameBuffer::Nv12 { .. } => {
+                return Err(BackendError::InvalidInput(
+                    "RawFrameBuffer::Nv12 is not supported by Encoder::push_encode_frame yet"
+                        .to_string(),
+                ));
+            }
+            #[cfg(feature = "unstable-raw-inputs")]
+            RawFrameBuffer::Rgb24(_) => {
+                return Err(BackendError::InvalidInput(
+                    "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
+                        .to_string(),
+                ));
+            }
+        },
+        None,
+    );
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     #[cfg(feature = "unstable-raw-inputs")]
     match buffer {
@@ -1529,10 +1647,6 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         ycbcr_matrix: None,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         argb,
-        #[cfg(all(
-            feature = "unstable-raw-inputs",
-            any(target_os = "macos", target_os = "linux", target_os = "windows")
-        ))]
         nv12,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         force_keyframe,
@@ -1784,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_non_metadata_mode_is_currently_unsupported() {
+    fn decode_nv12_mode_rejects_missing_pixel_payload() {
         let frame = Frame {
             width: 640,
             height: 360,
@@ -1796,10 +1910,6 @@ mod tests {
             ycbcr_matrix: None,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             argb: None,
-            #[cfg(all(
-                feature = "unstable-raw-inputs",
-                any(target_os = "macos", target_os = "linux", target_os = "windows")
-            ))]
             nv12: None,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             force_keyframe: false,
@@ -1807,6 +1917,92 @@ mod tests {
 
         let err = backend_frame_to_decoded_frame(frame, DecodeOutputMode::Nv12).unwrap_err();
         assert!(matches!(err, BackendError::UnsupportedConfig(_)));
+    }
+
+    #[test]
+    fn decode_rgb24_mode_rejects_missing_pixel_payload() {
+        let frame = Frame {
+            width: 640,
+            height: 360,
+            pixel_format: None,
+            pts_90k: Some(0),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            argb: None,
+            nv12: None,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            force_keyframe: false,
+        };
+
+        let err = backend_frame_to_decoded_frame(frame, DecodeOutputMode::Rgb24).unwrap_err();
+        assert!(matches!(err, BackendError::UnsupportedConfig(_)));
+    }
+
+    #[test]
+    fn decode_nv12_mode_uses_native_nv12_payload() {
+        let data = vec![16, 32, 48, 64, 128, 128];
+        let frame = Frame {
+            width: 2,
+            height: 2,
+            pixel_format: Some(u32::from_le_bytes(*b"NV12")),
+            pts_90k: Some(9000),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            argb: None,
+            nv12: Some(Nv12FramePayload {
+                pitch: 2,
+                data: data.clone(),
+            }),
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            force_keyframe: false,
+        };
+
+        let out = backend_frame_to_decoded_frame(frame, DecodeOutputMode::Nv12).unwrap();
+        match out {
+            DecodedFrame::Nv12 {
+                pitch,
+                data: out_data,
+                ..
+            } => {
+                assert_eq!(pitch, 2);
+                assert_eq!(out_data, data);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_rgb24_mode_converts_native_nv12_payload() {
+        let frame = Frame {
+            width: 2,
+            height: 2,
+            pixel_format: Some(u32::from_le_bytes(*b"NV12")),
+            pts_90k: Some(9000),
+            decode_info_flags: None,
+            color_primaries: None,
+            transfer_function: None,
+            ycbcr_matrix: None,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            argb: None,
+            nv12: Some(Nv12FramePayload {
+                pitch: 2,
+                data: vec![128; 6],
+            }),
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            force_keyframe: false,
+        };
+
+        let out = backend_frame_to_decoded_frame(frame, DecodeOutputMode::Rgb24).unwrap();
+        match out {
+            DecodedFrame::Rgb24 { data, .. } => assert_eq!(data.len(), 2 * 2 * 3),
+            other => panic!("unexpected frame: {other:?}"),
+        }
     }
 
     #[cfg(any(
@@ -1832,7 +2028,6 @@ mod tests {
             transfer_function: None,
             ycbcr_matrix: None,
             argb: Some(vec![255, 10, 20, 30, 255, 40, 50, 60]),
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         };
@@ -1869,7 +2064,6 @@ mod tests {
             argb: Some(vec![
                 255, 10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120,
             ]),
-            #[cfg(feature = "unstable-raw-inputs")]
             nv12: None,
             force_keyframe: false,
         };

@@ -3,14 +3,15 @@ use std::ffi::{c_int, c_longlong, c_ulong, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
-use cudarc::driver::CudaContext;
 use cudarc::driver::sys::CUresult;
+use cudarc::driver::{CudaContext, result as driver_result};
 use nvidia_video_codec_sdk::DecodeCodec;
 use nvidia_video_codec_sdk::sys::cuviddec::{
-    CUVIDDECODECAPS, CUVIDDECODECREATEINFO, CUVIDPICPARAMS, CUVIDRECONFIGUREDECODERINFO,
-    CUvideodecoder, cudaVideoChromaFormat, cudaVideoCodec, cudaVideoCreateFlags,
-    cudaVideoDeinterlaceMode, cudaVideoSurfaceFormat, cuvidCreateDecoder, cuvidDecodePicture,
-    cuvidDestroyDecoder, cuvidGetDecoderCaps, cuvidReconfigureDecoder,
+    CUVIDDECODECAPS, CUVIDDECODECREATEINFO, CUVIDPICPARAMS, CUVIDPROCPARAMS,
+    CUVIDRECONFIGUREDECODERINFO, CUvideodecoder, cudaVideoChromaFormat, cudaVideoCodec,
+    cudaVideoCreateFlags, cudaVideoDeinterlaceMode, cudaVideoSurfaceFormat, cuvidCreateDecoder,
+    cuvidDecodePicture, cuvidDestroyDecoder, cuvidGetDecoderCaps, cuvidMapVideoFrame64,
+    cuvidReconfigureDecoder, cuvidUnmapVideoFrame64,
 };
 use nvidia_video_codec_sdk::sys::nvcuvid::{
     CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS, CUVIDSOURCEDATAPACKET,
@@ -18,7 +19,9 @@ use nvidia_video_codec_sdk::sys::nvcuvid::{
     cuvidParseVideoData,
 };
 
-use crate::{BackendError, Frame};
+use crate::{BackendError, DecodeOutputMode, Frame, Nv12FramePayload};
+
+const PIXEL_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 
 #[derive(Debug)]
 pub struct NvMetaDecoder {
@@ -28,12 +31,17 @@ pub struct NvMetaDecoder {
 }
 
 impl NvMetaDecoder {
-    pub fn new(ctx: Arc<CudaContext>, codec: DecodeCodec) -> Result<Self, BackendError> {
+    pub fn new(
+        ctx: Arc<CudaContext>,
+        codec: DecodeCodec,
+        output_mode: DecodeOutputMode,
+    ) -> Result<Self, BackendError> {
         ctx.bind_to_thread().map_err(map_cuda_error)?;
         check_decoder_caps(codec)?;
 
         let mut bridge = Box::new(MetaCallbackBridge {
             codec,
+            output_mode,
             state: Mutex::new(MetaDecoderState::default()),
         });
         let bridge_ptr = ptr::from_mut(bridge.as_mut()).cast::<c_void>();
@@ -136,7 +144,7 @@ impl NvMetaDecoder {
         self.ctx.bind_to_thread().map_err(map_cuda_error)?;
         let mut out = Vec::new();
         loop {
-            let (entry, width, height) = {
+            let (entry, decoder, layout) = {
                 let mut state = lock_state(&self.bridge.state);
                 if let Some(err) = &state.sticky_error {
                     return Err(BackendError::Backend(err.clone()));
@@ -144,27 +152,83 @@ impl NvMetaDecoder {
                 let Some(entry) = state.display_queue.pop_front() else {
                     break;
                 };
-                let width = state.width;
-                let height = state.height;
-                (entry, width, height)
+                let Some(decoder) = state.decoder else {
+                    return Err(BackendError::Backend(
+                        "display callback before decoder init".to_string(),
+                    ));
+                };
+                let layout = state.layout;
+                if !layout.is_valid() {
+                    return Err(BackendError::Backend(
+                        "display callback before layout init".to_string(),
+                    ));
+                }
+                (entry, decoder, layout)
+            };
+            let nv12 = if matches!(
+                self.bridge.output_mode,
+                DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
+            ) {
+                Some(self.map_frame_to_nv12(decoder, entry, layout)?)
+            } else {
+                None
             };
             out.push(Frame {
-                width: width as usize,
-                height: height as usize,
-                pixel_format: None,
+                width: layout.visible_width as usize,
+                height: layout.visible_height as usize,
+                pixel_format: nv12.as_ref().map(|_| PIXEL_FORMAT_NV12),
                 pts_90k: Some(entry.timestamp),
                 decode_info_flags: None,
                 color_primaries: None,
                 transfer_function: None,
                 ycbcr_matrix: None,
                 argb: None,
-                #[cfg(feature = "unstable-raw-inputs")]
-                nv12: None,
+                nv12,
                 force_keyframe: false,
             });
         }
         self.ensure_no_callback_error()?;
         Ok(out)
+    }
+
+    fn map_frame_to_nv12(
+        &self,
+        decoder: CUvideodecoder,
+        entry: DisplayQueueEntry,
+        layout: OutputLayout,
+    ) -> Result<Nv12FramePayload, BackendError> {
+        let mut proc_params = CUVIDPROCPARAMS {
+            progressive_frame: entry.progressive_frame,
+            top_field_first: entry.top_field_first,
+            second_field: 0,
+            unpaired_field: 0,
+            ..Default::default()
+        };
+        let mut dev_ptr = 0_u64;
+        let mut pitch = 0_u32;
+        check_nvdec(
+            unsafe {
+                cuvidMapVideoFrame64(
+                    decoder,
+                    entry.picture_index,
+                    &mut dev_ptr,
+                    &mut pitch,
+                    &mut proc_params,
+                )
+            },
+            "cuvidMapVideoFrame64",
+        )?;
+
+        let mapped = copy_mapped_nv12_to_host(dev_ptr, pitch as usize, layout);
+        let unmap = check_nvdec(
+            unsafe { cuvidUnmapVideoFrame64(decoder, dev_ptr) },
+            "cuvidUnmapVideoFrame64",
+        );
+        match (mapped, unmap) {
+            (Ok(payload), Ok(())) => Ok(payload),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
     }
 }
 
@@ -189,12 +253,28 @@ impl Drop for NvMetaDecoder {
 #[derive(Debug)]
 struct MetaCallbackBridge {
     codec: DecodeCodec,
+    output_mode: DecodeOutputMode,
     state: Mutex<MetaDecoderState>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DisplayQueueEntry {
+    picture_index: c_int,
+    progressive_frame: c_int,
+    top_field_first: c_int,
     timestamp: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct OutputLayout {
+    visible_width: u32,
+    visible_height: u32,
+}
+
+impl OutputLayout {
+    fn is_valid(self) -> bool {
+        self.visible_width > 0 && self.visible_height > 0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -202,8 +282,7 @@ struct MetaDecoderState {
     decoder: Option<CUvideodecoder>,
     sticky_error: Option<String>,
     display_queue: VecDeque<DisplayQueueEntry>,
-    width: u32,
-    height: u32,
+    layout: OutputLayout,
 }
 
 impl MetaDecoderState {
@@ -281,8 +360,10 @@ impl MetaDecoderState {
             self.decoder = Some(decoder);
         }
 
-        self.width = target_width;
-        self.height = target_height;
+        self.layout = OutputLayout {
+            visible_width: target_width,
+            visible_height: target_height,
+        };
         Ok(num_surfaces as c_int)
     }
 }
@@ -355,9 +436,36 @@ unsafe extern "C" fn display_callback(
     let info = unsafe { &*display_info };
     let mut state = lock_state(&bridge.state);
     state.display_queue.push_back(DisplayQueueEntry {
+        picture_index: info.picture_index,
+        progressive_frame: info.progressive_frame,
+        top_field_first: info.top_field_first,
         timestamp: info.timestamp,
     });
     1
+}
+
+fn copy_mapped_nv12_to_host(
+    dev_ptr: u64,
+    pitch: usize,
+    layout: OutputLayout,
+) -> Result<Nv12FramePayload, BackendError> {
+    if pitch == 0 || pitch < layout.visible_width as usize {
+        return Err(BackendError::Backend(format!(
+            "invalid mapped NV12 pitch: pitch={}, width={}",
+            pitch, layout.visible_width
+        )));
+    }
+    let height = layout.visible_height as usize;
+    let luma_size = pitch
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::Backend("mapped NV12 luma size overflow".to_string()))?;
+    let total_size = luma_size
+        .checked_add(luma_size / 2)
+        .ok_or_else(|| BackendError::Backend("mapped NV12 total size overflow".to_string()))?;
+    let mut data = vec![0_u8; total_size];
+    unsafe { driver_result::memcpy_dtoh_sync(data.as_mut_slice(), dev_ptr) }
+        .map_err(map_cuda_error)?;
+    Ok(Nv12FramePayload { pitch, data })
 }
 
 fn check_decoder_caps(codec: DecodeCodec) -> Result<(), BackendError> {
