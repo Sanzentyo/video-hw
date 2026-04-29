@@ -1,5 +1,6 @@
 mod config;
 mod core;
+mod decode;
 #[cfg(feature = "async-session")]
 mod session_async;
 mod state;
@@ -9,6 +10,7 @@ pub use config::{
     RangeCacheConfig, SampleId, SampleMeta, TrackId,
 };
 pub use core::EncodedSampleIter;
+pub use decode::{DecodedSampleFrame, FrameDecodeRequest, FrameDecodeResult, FrameDecoder};
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
 pub use shiguredo_mp4::TrackKind;

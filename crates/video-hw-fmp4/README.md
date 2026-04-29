@@ -131,6 +131,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `--strict-backend` を付けると選択 backend 固定で decode します。
 - status は tracing で出力します。既定ログレベルは `warn`（warn/error のみ）で、`RUST_LOG=info` などを指定すると詳細ログを確認できます。
 - 通常 MP4（non-fragmented）も読めます（例: `sample-videos/sample-10s.mp4`）。
+- GOP replay + decode submit/reap は crate 側の `FrameDecoder` が担当し、example 側は preview/cache 方針だけを持ちます。
 
 ライトな確認だけ行う場合:
 

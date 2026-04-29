@@ -14,11 +14,10 @@ use eframe::egui;
 use shiguredo_mp4::TrackKind;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
-use video_hw::{
-    AnyDecodeSession, Backend, BackendError, BackendKind, BitstreamInput, Codec, DecodeOutputMode,
-    DecodedFrame, DecoderConfig, Nv12Frame, Timestamp90k, nv12_to_rgb24,
+use video_hw::{Backend, BackendKind, DecodeOutputMode, DecodedFrame, Nv12Frame, nv12_to_rgb24};
+use video_hw_fmp4::{
+    Fmp4Reader, Fmp4ReaderConfig, Fmp4Track, FrameDecodeRequest, FrameDecoder, SampleMeta,
 };
-use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4Track, SampleMeta};
 
 #[derive(Debug, Parser)]
 #[command(about = "Read fMP4/MP4 with seek slider")]
@@ -40,7 +39,6 @@ struct CliArgs {
 struct LoadedVideo {
     input_path: PathBuf,
     track: Fmp4Track,
-    codec: Codec,
     samples: Vec<SampleMeta>,
     keyframe_indices: Vec<usize>,
     total_duration_ticks: u64,
@@ -801,8 +799,8 @@ fn run_smoke_test(
         video
             .samples
             .windows(2)
-            .all(|window| window[0].pts.ticks <= window[1].pts.ticks),
-        "sample PTS values are not monotonic"
+            .all(|window| window[0].dts.ticks <= window[1].dts.ticks),
+        "sample DTS values are not monotonic"
     );
 
     for &target in &checkpoints {
@@ -891,14 +889,13 @@ fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
         keyframe_indices.insert(0, 0);
     }
     let estimated_fps = estimate_fps(track.timescale, &samples);
-    let codec = track
+    track
         .codec()
         .context("failed to determine video codec from sample entry")?;
 
     Ok(LoadedVideo {
         input_path,
         track,
-        codec,
         samples,
         keyframe_indices,
         total_duration_ticks,
@@ -951,12 +948,6 @@ fn seconds_to_ticks(seconds: f64, timescale: NonZeroU32) -> u64 {
         return 0;
     }
     scaled.round() as u64
-}
-
-fn sample_timestamp_to_90k(sample: &SampleMeta, timescale: NonZeroU32) -> Option<Timestamp90k> {
-    let pts_ticks = sample.pts.ticks;
-    let scaled_90k = u128::from(pts_ticks).saturating_mul(90_000) / u128::from(timescale.get());
-    i64::try_from(scaled_90k).ok().map(Timestamp90k)
 }
 
 fn decoded_frame_to_preview(frame: DecodedFrame) -> Result<Option<DecodedPreview>> {
@@ -1042,103 +1033,56 @@ fn decode_attempt_for_mode(
     sample_index: usize,
     output_mode: DecodeOutputMode,
 ) -> Result<DecodeAttempt> {
-    let mut config = DecoderConfig::new(video.codec, video.estimated_fps.max(1), require_hardware);
-    config.output_mode = output_mode;
-    let resolved_backend = decode_backend.resolve_decoder(&config).with_context(|| {
-        format!(
-            "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
-            decode_backend, video.codec, config.fps, require_hardware
-        )
-    })?;
-    let mut session =
-        AnyDecodeSession::with_backend_kind(resolved_backend, config).with_context(|| {
-            format!("failed to create decoder session with backend {resolved_backend}")
-        })?;
     let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(video.input_path.clone()))
         .into_sync_session()
         .with_context(|| format!("failed to open {}", video.input_path.display()))?;
-    let mut frame_count = 0usize;
     let mut latest_preview = None;
+    let mut fallback_preview = None;
     let mut buffered_previews = Vec::new();
     let target_sample = video
         .samples
         .get(sample_index)
         .with_context(|| format!("sample index {sample_index} is out of range"))?;
-    let gop_samples = reader
-        .iter_gop_for_sample(target_sample.sample_id)
-        .with_context(|| {
-            format!(
-                "failed to build GOP replay for sample {}",
-                target_sample.sample_id
-            )
-        })?;
-    for sample in gop_samples {
-        let sample = sample?;
-        let index = video
-            .samples
-            .iter()
-            .position(|meta| meta.sample_id == sample.meta.sample_id)
+    let mut request = FrameDecodeRequest::new(video.track.track_id, target_sample.sample_id);
+    request.backend = decode_backend;
+    request.require_hardware = require_hardware;
+    request.output_mode = output_mode;
+    request.fps = Some(video.estimated_fps.max(1));
+
+    let mut decoder = FrameDecoder::new(&mut reader);
+    let decoded = decoder.decode_sample(request).with_context(|| {
+        format!(
+            "failed to decode GOP for sample {} (backend={decode_backend}, output_mode={output_mode})",
+            target_sample.sample_id
+        )
+    })?;
+    let resolved_backend = decoded.resolved_backend;
+    let frame_count = decoded.frames.len();
+    let target_frame_index = decoded.target_frame_index;
+    let sample_index_by_id = video
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(index, meta)| (meta.sample_id, index))
+        .collect::<HashMap<_, _>>();
+
+    for (frame_index, decoded_frame) in decoded.frames.into_iter().enumerate() {
+        let index = decoded_frame
+            .sample_id
+            .and_then(|sample_id| sample_index_by_id.get(&sample_id).copied())
             .unwrap_or(sample_index);
-        let annexb = sample
-            .to_annexb()
-            .with_context(|| format!("failed to convert sample {index} to Annex-B"))?;
-        let pts_90k = sample_timestamp_to_90k(&sample.meta, video.track.timescale);
-        loop {
-            match session.submit(BitstreamInput::AnnexBChunk {
-                chunk: annexb.clone(),
-                pts_90k,
-            }) {
-                Ok(()) => break,
-                Err(BackendError::TemporaryBackpressure(_)) => loop {
-                    match session.try_reap() {
-                        Ok(Some(frame)) => {
-                            frame_count = frame_count.saturating_add(1);
-                            if let Some(preview) = decoded_frame_to_preview(frame)? {
-                                buffered_previews.push((index, preview.clone()));
-                                latest_preview = Some(preview);
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(err) => {
-                            return Err(anyhow::Error::new(err)
-                                .context("decoder try_reap failed while resolving backpressure"));
-                        }
-                    }
-                },
-                Err(err) => {
-                    return Err(anyhow::Error::new(err).context(format!(
-                        "decoder submit failed at sample {index} (backend={resolved_backend})"
-                    )));
-                }
-            }
-        }
-        loop {
-            match session.try_reap() {
-                Ok(Some(frame)) => {
-                    frame_count = frame_count.saturating_add(1);
-                    if let Some(preview) = decoded_frame_to_preview(frame)? {
-                        buffered_previews.push((index, preview.clone()));
-                        latest_preview = Some(preview);
-                    }
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    return Err(anyhow::Error::new(err)
-                        .context(format!("failed to reap decoded frame after sample {index}")));
-                }
+        if let Some(preview) = decoded_frame_to_preview(decoded_frame.frame)? {
+            buffered_previews.push((index, preview.clone()));
+            fallback_preview = Some(preview.clone());
+            if target_frame_index == Some(frame_index) {
+                latest_preview = Some(preview);
             }
         }
     }
-    let flushed = session
-        .flush()
-        .map_err(anyhow::Error::new)
-        .context("decoder flush failed")?;
-    for frame in flushed {
-        frame_count = frame_count.saturating_add(1);
-        if let Some(preview) = decoded_frame_to_preview(frame)? {
-            latest_preview = Some(preview);
-        }
+    if latest_preview.is_none() {
+        latest_preview = fallback_preview;
     }
+
     Ok(DecodeAttempt {
         preview: latest_preview,
         frame_count,
