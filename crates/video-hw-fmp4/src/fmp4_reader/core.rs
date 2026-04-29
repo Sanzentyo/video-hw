@@ -537,9 +537,11 @@ fn feed_required_inputs(store: &mut SampleStore, demuxer: &mut ReaderDemuxer) ->
 }
 
 fn read_required_input(store: &mut SampleStore, required: RequiredInput) -> Result<Vec<u8>> {
+    let remaining = store.file_len.saturating_sub(required.position);
     let size = required
         .size
-        .unwrap_or_else(|| store.file_len.saturating_sub(required.position) as usize);
+        .map(|size| size.min(remaining as usize))
+        .unwrap_or(remaining as usize);
     store.read_range(required.position, size)
 }
 
