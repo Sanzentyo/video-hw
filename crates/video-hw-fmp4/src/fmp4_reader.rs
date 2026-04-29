@@ -11,6 +11,7 @@ pub use config::{
 pub use core::EncodedSampleIter;
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
+pub use shiguredo_mp4::TrackKind;
 #[cfg(feature = "async-session")]
 pub use state::AsyncReading;
 pub use state::{Finished, ReaderReady, SyncReading};
@@ -95,8 +96,16 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.read_sample(sample)
     }
 
+    pub fn read_gop(&mut self, sample: SampleId) -> Result<Vec<EncodedSample>> {
+        self.state.core.read_gop(sample)
+    }
+
     pub fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.core.next_sample()
+    }
+
+    pub fn iter_gop_for_sample(&mut self, sample: SampleId) -> Result<EncodedSampleIter<'_>> {
+        self.state.core.iter_gop_for_sample(sample)
     }
 
     pub fn iter_encoded(&mut self, segment: GopSegment) -> Result<EncodedSampleIter<'_>> {

@@ -1054,18 +1054,31 @@ fn decode_attempt_for_mode(
         AnyDecodeSession::with_backend_kind(resolved_backend, config).with_context(|| {
             format!("failed to create decoder session with backend {resolved_backend}")
         })?;
-    let keyframe_start = video.keyframe_start_for(sample_index);
     let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(video.input_path.clone()))
         .into_sync_session()
         .with_context(|| format!("failed to open {}", video.input_path.display()))?;
     let mut frame_count = 0usize;
     let mut latest_preview = None;
     let mut buffered_previews = Vec::new();
-    for index in keyframe_start..=sample_index {
-        let sample_meta = &video.samples[index];
-        let sample = reader
-            .read_sample(sample_meta.sample_id)
-            .with_context(|| format!("failed to read sample {}", sample_meta.sample_id))?;
+    let target_sample = video
+        .samples
+        .get(sample_index)
+        .with_context(|| format!("sample index {sample_index} is out of range"))?;
+    let gop_samples = reader
+        .iter_gop_for_sample(target_sample.sample_id)
+        .with_context(|| {
+            format!(
+                "failed to build GOP replay for sample {}",
+                target_sample.sample_id
+            )
+        })?;
+    for sample in gop_samples {
+        let sample = sample?;
+        let index = video
+            .samples
+            .iter()
+            .position(|meta| meta.sample_id == sample.meta.sample_id)
+            .unwrap_or(sample_index);
         let annexb = sample
             .to_annexb()
             .with_context(|| format!("failed to convert sample {index} to Annex-B"))?;

@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
 ```rust
 use anyhow::Result;
-use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady};
+use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady, TrackKind};
 
 fn main() -> Result<()> {
     let mut reader = Fmp4Reader::<Fmp4ReaderReady>::new(Fmp4ReaderConfig::new(
@@ -77,13 +77,22 @@ fn main() -> Result<()> {
         println!("track={} samples={}", track.track_id, reader.samples(track.track_id)?.len());
     }
 
-    while let Some(sample) = reader.next_sample()? {
+    let Some(video_track) = reader
+        .tracks()
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .map(|track| track.track_id)
+    else {
+        return Ok(());
+    };
+    let Some(target) = reader.samples(video_track)?.first().map(|sample| sample.sample_id) else {
+        return Ok(());
+    };
+
+    for sample in reader.iter_gop_for_sample(target)? {
+        let sample = sample?;
         let _annexb = sample.to_annexb()?;
-        println!(
-            "sample={} keyframe={}",
-            sample.meta.sample_id,
-            sample.meta.keyframe
-        );
+        println!("sample={} keyframe={}", sample.meta.sample_id, sample.meta.keyframe);
     }
     Ok(())
 }
@@ -101,6 +110,12 @@ cargo run -p video-hw-fmp4 --example write_synthetic_fmp4 --features backend-vt
 
 ```bash
 cargo run -p video-hw-fmp4 --example read_fmp4_file --features backend-vt -- output/synthetic-fmp4.mp4
+```
+
+任意の sample payload だけ読む場合:
+
+```bash
+cargo run -p video-hw-fmp4 --example read_fmp4_file -- sample-videos/sample-10s.mp4 --sample-id 0
 ```
 
 - slider GUI read (seek/playback + decoded preview + backend select)

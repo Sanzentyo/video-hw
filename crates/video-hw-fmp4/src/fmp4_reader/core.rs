@@ -425,6 +425,20 @@ impl ReaderCore {
         self.read_sample(sample_id).map(Some)
     }
 
+    pub(crate) fn read_gop(&mut self, sample: SampleId) -> Result<Vec<EncodedSample>> {
+        self.iter_gop_for_sample(sample)?.collect()
+    }
+
+    pub(crate) fn iter_gop_for_sample(
+        &mut self,
+        sample: SampleId,
+    ) -> Result<EncodedSampleIter<'_>> {
+        let segment = self
+            .gop_for_sample(sample)
+            .with_context(|| format!("unknown sample id {}", sample.0))?;
+        self.encoded_iter(segment)
+    }
+
     pub(crate) fn encoded_iter(&mut self, segment: GopSegment) -> Result<EncodedSampleIter<'_>> {
         let samples = self.samples(segment.track_id)?;
         let start = samples
@@ -573,6 +587,7 @@ fn apply_cache_status(status: &mut Fmp4ReaderStatus, store: &SampleStore) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::path::PathBuf;
 
     use super::*;
@@ -689,5 +704,71 @@ mod tests {
             .expect("sample read should succeed");
         assert_eq!(first.meta.sample_id, first_sample);
         assert!(first.meta.keyframe);
+
+        let mut iter = core
+            .iter_gop_for_sample(first_sample)
+            .expect("sample GOP iterator");
+        let first = iter
+            .next()
+            .expect("sample GOP iterator should produce first sample")
+            .expect("sample GOP read should succeed");
+        assert_eq!(first.meta.sample_id, first_sample);
+        assert!(first.meta.keyframe);
+        drop(iter);
+
+        let samples = core.read_gop(first_sample).expect("eager GOP read");
+        assert!(!samples.is_empty());
+        assert_eq!(samples[0].meta.sample_id, first_sample);
+        assert!(samples[0].meta.keyframe);
+    }
+
+    #[test]
+    fn range_cache_reads_boundaries_and_evicts_lru_chunks() {
+        let input_path = std::env::temp_dir().join(format!(
+            "video-hw-fmp4-range-cache-{}.bin",
+            std::process::id()
+        ));
+        {
+            let mut file = File::create(&input_path).expect("create temp range-cache file");
+            file.write_all(&(0_u8..16).collect::<Vec<_>>())
+                .expect("write temp range-cache file");
+        }
+
+        let mut file = File::open(&input_path).expect("open temp range-cache file");
+        let mut cache = RangeCache::new(RangeCacheConfig {
+            chunk_size: 4,
+            max_bytes: 8,
+            read_ahead_chunks: 0,
+        });
+
+        assert_eq!(
+            cache
+                .read_range(&mut file, 16, 2, 6)
+                .expect("cross-chunk range read"),
+            vec![2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(cache.stats.misses, 2);
+        assert_eq!(cache.stats.hits, 0);
+        assert_eq!(cache.resident_bytes, 8);
+
+        assert_eq!(
+            cache
+                .read_range(&mut file, 16, 2, 6)
+                .expect("cached cross-chunk range read"),
+            vec![2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(cache.stats.hits, 2);
+        assert_eq!(cache.stats.misses, 2);
+
+        assert_eq!(
+            cache
+                .read_range(&mut file, 16, 8, 4)
+                .expect("third chunk read"),
+            vec![8, 9, 10, 11]
+        );
+        assert_eq!(cache.stats.evictions, 1);
+        assert_eq!(cache.resident_bytes, 8);
+
+        let _ = std::fs::remove_file(input_path);
     }
 }
