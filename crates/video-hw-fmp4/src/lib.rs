@@ -17,11 +17,12 @@ pub mod fmp4_writer;
 mod tests;
 
 pub use fmp4_reader::{
-    DecodedSampleFrame, EncodedSample, Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig,
-    Fmp4ReaderStatus, Fmp4Track, FrameDecodeRangeRequest, FrameDecodeRangeResult,
-    FrameDecodeRequest, FrameDecodeResult, FrameDecoder, GopCursor, GopSegment, IndexMode,
-    MediaTime, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady, SampleId,
-    SampleMeta, SampleRange, SyncReading, TrackId, TrackKind,
+    DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, EncodedSample,
+    Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track,
+    FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult,
+    FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode, MediaTime,
+    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady, SampleId,
+    SampleLookup, SampleLookupMatch, SampleMeta, SampleRange, SyncReading, TrackId, TrackKind,
 };
 pub use fmp4_writer::{
     ArgbFrame, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,

@@ -134,6 +134,8 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - GOP replay + decode submit/reap は crate 側の `FrameDecoder` が担当し、example 側は preview/cache 方針だけを持ちます。
 - 人物検出、HISDF 解釈、bbox crop、tracking、検証 artifact 保存は `video-hw-fmp4` の責務外です。上位層は `sample_at_pts`、`GopCursor`、`decode_range`、`cache_stats` を組み合わせて必要な frame/window を取得します。
 - 既定は `IndexMode::Eager` です。`IndexMode::Lazy` は `next_sample` や `read_sample` で必要分だけ metadata index を延長し、`samples(track)` のような完全な slice を返す API では EOF まで index 化します。
+- `sample_at_pts_with_delta` は `SampleLookupMatch::{Exact,Previous,FirstAfter}` で完全一致/近傍一致を返します。長い区間は `decode_range_iter`、中心sample周辺の短窓は `decode_window` を使えます。
+- `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
 
 ライトな確認だけ行う場合:
 

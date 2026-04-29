@@ -7,12 +7,14 @@ mod state;
 
 pub use config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    RangeCacheConfig, RangeCacheStats, SampleId, SampleMeta, SampleRange, TrackId,
+    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
+    SampleMeta, SampleRange, TrackId,
 };
 pub use core::EncodedSampleIter;
 pub use decode::{
-    DecodedSampleFrame, FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest,
-    FrameDecodeResult, FrameDecoder, GopCursor,
+    DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, FrameDecodeRangeRequest,
+    FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult, FrameDecodeWindowRequest,
+    FrameDecoder, GopCursor,
 };
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
@@ -89,6 +91,14 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.sample_at_pts(track, pts)
     }
 
+    pub fn sample_at_pts_with_delta(
+        &mut self,
+        track: TrackId,
+        pts: MediaTime,
+    ) -> Option<SampleLookup> {
+        self.state.core.sample_at_pts_with_delta(track, pts)
+    }
+
     pub fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
         self.state.core.keyframe_before(sample)
     }
@@ -123,6 +133,14 @@ impl Fmp4Reader<SyncReading> {
 
     pub fn cache_stats(&self) -> RangeCacheStats {
         self.state.core.cache_stats()
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.state.core.clear_cache();
+    }
+
+    pub fn index_snapshot(&mut self) -> Result<Mp4IndexSnapshot> {
+        self.state.core.index_snapshot()
     }
 
     pub fn finish(self) -> Fmp4Reader<Finished> {

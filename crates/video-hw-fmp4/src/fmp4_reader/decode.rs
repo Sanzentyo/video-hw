@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result, anyhow};
 use video_hw::{
@@ -7,8 +7,8 @@ use video_hw::{
 };
 
 use super::{
-    EncodedSample, Fmp4Reader, GopSegment, MediaTime, SampleId, SampleMeta, SampleRange,
-    SyncReading, TrackId, config::Fmp4Track,
+    EncodedSample, EncodedSampleIter, Fmp4Reader, GopSegment, MediaTime, SampleId, SampleMeta,
+    SampleRange, SyncReading, TrackId, config::Fmp4Track,
 };
 
 #[derive(Debug, Clone)]
@@ -62,8 +62,47 @@ impl FrameDecodeRangeRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct FrameDecodeWindowRequest {
+    pub track_id: TrackId,
+    pub center_sample: SampleId,
+    pub before: u32,
+    pub after: u32,
+    pub backend: Backend,
+    pub require_hardware: bool,
+    pub output_mode: DecodeOutputMode,
+    pub fps: Option<i32>,
+}
+
+impl FrameDecodeWindowRequest {
+    pub fn new(track_id: TrackId, center_sample: SampleId) -> Self {
+        Self {
+            track_id,
+            center_sample,
+            before: 0,
+            after: 0,
+            backend: Backend::Auto,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Rgb24,
+            fps: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodeDiagnostics {
+    pub requested_backend: Backend,
+    pub resolved_backend: BackendKind,
+    pub require_hardware: bool,
+    pub output_mode: DecodeOutputMode,
+    pub fps: i32,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FrameDecodeResult {
     pub target_sample: SampleId,
+    pub diagnostics: DecodeDiagnostics,
     pub resolved_backend: BackendKind,
     pub output_mode: DecodeOutputMode,
     pub frames: Vec<DecodedSampleFrame>,
@@ -80,6 +119,7 @@ impl FrameDecodeResult {
 #[derive(Debug, Clone)]
 pub struct FrameDecodeRangeResult {
     pub range: SampleRange,
+    pub diagnostics: DecodeDiagnostics,
     pub resolved_backend: BackendKind,
     pub output_mode: DecodeOutputMode,
     pub frames: Vec<DecodedSampleFrame>,
@@ -114,6 +154,29 @@ impl GopCursor {
 
 pub struct FrameDecoder<'a> {
     reader: &'a mut Fmp4Reader<SyncReading>,
+}
+
+pub struct DecodedFrameIter<'a> {
+    range: SampleRange,
+    diagnostics: DecodeDiagnostics,
+    track: Fmp4Track,
+    session: AnyDecodeSession,
+    decode_samples: EncodedSampleIter<'a>,
+    wanted_sample_ids: HashSet<SampleId>,
+    pts_to_sample: HashMap<i64, SampleId>,
+    buffered_frames: VecDeque<DecodedSampleFrame>,
+    target_frame_index: Option<usize>,
+    finished: bool,
+}
+
+impl DecodedFrameIter<'_> {
+    pub fn diagnostics(&self) -> &DecodeDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn range(&self) -> SampleRange {
+        self.range
+    }
 }
 
 impl<'a> FrameDecoder<'a> {
@@ -159,7 +222,16 @@ impl<'a> FrameDecoder<'a> {
         let mut session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
             .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
 
-        let mut frames = Vec::new();
+        let diagnostics = DecodeDiagnostics {
+            requested_backend: request.backend,
+            resolved_backend,
+            require_hardware: request.require_hardware,
+            output_mode: request.output_mode,
+            fps,
+            fallback_used: false,
+            fallback_reason: None,
+        };
+        let mut frames = VecDeque::new();
         let mut target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
         let gop_samples = self.reader.iter_gop_for_sample(request.target_sample)?;
@@ -192,12 +264,14 @@ impl<'a> FrameDecoder<'a> {
 
         Ok(FrameDecodeResult {
             target_sample: request.target_sample,
+            diagnostics,
             resolved_backend,
             output_mode: request.output_mode,
-            frames,
+            frames: frames.into_iter().collect(),
             target_frame_index,
         })
     }
+
     pub fn decode_range(
         &mut self,
         request: FrameDecodeRangeRequest,
@@ -244,7 +318,7 @@ impl<'a> FrameDecoder<'a> {
                 .context("sample range is empty")?;
             (wanted_sample_ids, end_pts)
         };
-        let mut frames = Vec::new();
+        let mut frames = VecDeque::new();
         let mut ignored_target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
         let decode_segment = GopSegment {
@@ -285,12 +359,197 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
+        let diagnostics = DecodeDiagnostics {
+            requested_backend: request.backend,
+            resolved_backend,
+            require_hardware: request.require_hardware,
+            output_mode: request.output_mode,
+            fps,
+            fallback_used: false,
+            fallback_reason: None,
+        };
         Ok(FrameDecodeRangeResult {
             range: request.range,
+            diagnostics,
             resolved_backend,
             output_mode: request.output_mode,
-            frames,
+            frames: frames.into_iter().collect(),
         })
+    }
+
+    pub fn decode_range_iter(
+        &mut self,
+        request: FrameDecodeRangeRequest,
+    ) -> Result<DecodedFrameIter<'_>> {
+        let cursor = GopCursor::new(self.reader, request.range)?;
+        let track = self
+            .reader
+            .tracks()
+            .iter()
+            .find(|track| track.track_id == request.range.track_id)
+            .cloned()
+            .with_context(|| format!("unknown track {}", request.range.track_id))?;
+        let codec = track
+            .codec()
+            .with_context(|| format!("track {} has no supported video codec", track.track_id))?;
+        let fps = {
+            let samples = self.reader.samples(request.range.track_id)?;
+            request.fps.unwrap_or_else(|| estimate_fps(samples)).max(1)
+        };
+        let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
+        config.output_mode = request.output_mode;
+        let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
+            format!(
+                "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
+                request.backend, codec, fps, request.require_hardware
+            )
+        })?;
+        let session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
+            .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
+        let (wanted_sample_ids, end_pts) = {
+            let samples = samples_in_range(self.reader, request.range)?;
+            let wanted_sample_ids = samples
+                .iter()
+                .map(|sample| sample.sample_id)
+                .collect::<HashSet<_>>();
+            let end_pts = samples
+                .last()
+                .map(|sample| {
+                    MediaTime::new(
+                        sample.pts.ticks.saturating_add(u64::from(sample.duration)),
+                        sample.pts.timescale,
+                    )
+                })
+                .context("sample range is empty")?;
+            (wanted_sample_ids, end_pts)
+        };
+        let decode_segment = GopSegment {
+            track_id: request.range.track_id,
+            keyframe_sample: cursor.decode_start_sample,
+            end_sample_exclusive: request.range.end_sample_exclusive,
+            start_pts: self
+                .reader
+                .sample_meta(cursor.decode_start_sample)
+                .context("decode start sample disappeared")?
+                .pts,
+            end_pts,
+        };
+
+        let decode_samples = self.reader.iter_encoded(decode_segment)?;
+        Ok(DecodedFrameIter {
+            range: request.range,
+            diagnostics: DecodeDiagnostics {
+                requested_backend: request.backend,
+                resolved_backend,
+                require_hardware: request.require_hardware,
+                output_mode: request.output_mode,
+                fps,
+                fallback_used: false,
+                fallback_reason: None,
+            },
+            track,
+            session,
+            decode_samples,
+            wanted_sample_ids,
+            pts_to_sample: HashMap::new(),
+            buffered_frames: VecDeque::new(),
+            target_frame_index: None,
+            finished: false,
+        })
+    }
+
+    pub fn decode_window(
+        &mut self,
+        request: FrameDecodeWindowRequest,
+    ) -> Result<FrameDecodeRangeResult> {
+        let range = {
+            let samples = self.reader.samples(request.track_id)?;
+            let center_index = samples
+                .iter()
+                .position(|sample| sample.sample_id == request.center_sample)
+                .with_context(|| {
+                    format!(
+                        "center sample {} does not belong to track {}",
+                        request.center_sample, request.track_id
+                    )
+                })?;
+            let before =
+                usize::try_from(request.before).context("window before overflows usize")?;
+            let after = usize::try_from(request.after).context("window after overflows usize")?;
+            let start_index = center_index.saturating_sub(before);
+            let end_index = center_index
+                .saturating_add(after)
+                .saturating_add(1)
+                .min(samples.len());
+            SampleRange {
+                track_id: request.track_id,
+                start_sample: samples[start_index].sample_id,
+                end_sample_exclusive: samples
+                    .get(end_index)
+                    .map_or(SampleId(u64::MAX), |sample| sample.sample_id),
+            }
+        };
+        self.decode_range(FrameDecodeRangeRequest {
+            range,
+            backend: request.backend,
+            require_hardware: request.require_hardware,
+            output_mode: request.output_mode,
+            fps: request.fps,
+        })
+    }
+}
+
+impl Iterator for DecodedFrameIter<'_> {
+    type Item = Result<DecodedSampleFrame>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(frame) = self.buffered_frames.pop_front() {
+                return Some(Ok(frame));
+            }
+            if self.finished {
+                return None;
+            }
+            match self.decode_samples.next() {
+                Some(Ok(sample)) => {
+                    let sample_id = sample.meta.sample_id;
+                    let mut collect = DecodeCollectState {
+                        pts_to_sample: &mut self.pts_to_sample,
+                        frames: &mut self.buffered_frames,
+                        target_sample: self.range.start_sample,
+                        target_frame_index: &mut self.target_frame_index,
+                        filter_sample_ids: Some(&self.wanted_sample_ids),
+                    };
+                    if let Err(err) =
+                        submit_sample(&mut self.session, &self.track, sample, &mut collect)
+                    {
+                        return Some(Err(err.context(format!(
+                            "streaming decode failed at sample {} on track {}",
+                            sample_id, self.track.track_id
+                        ))));
+                    }
+                }
+                Some(Err(err)) => return Some(Err(err)),
+                None => {
+                    self.finished = true;
+                    match self.session.flush().map_err(anyhow::Error::new) {
+                        Ok(frames) => {
+                            for frame in frames {
+                                let mut collect = DecodeCollectState {
+                                    pts_to_sample: &mut self.pts_to_sample,
+                                    frames: &mut self.buffered_frames,
+                                    target_sample: self.range.start_sample,
+                                    target_frame_index: &mut self.target_frame_index,
+                                    filter_sample_ids: Some(&self.wanted_sample_ids),
+                                };
+                                push_decoded_frame(frame, &mut collect);
+                            }
+                        }
+                        Err(err) => return Some(Err(err.context("decoder flush failed"))),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -353,12 +612,14 @@ fn push_decoded_frame(frame: DecodedFrame, collect: &mut DecodeCollectState<'_>)
     if sample_id == Some(collect.target_sample) && collect.target_frame_index.is_none() {
         *collect.target_frame_index = Some(collect.frames.len());
     }
-    collect.frames.push(DecodedSampleFrame { sample_id, frame });
+    collect
+        .frames
+        .push_back(DecodedSampleFrame { sample_id, frame });
 }
 
 struct DecodeCollectState<'a> {
     pts_to_sample: &'a mut HashMap<i64, SampleId>,
-    frames: &'a mut Vec<DecodedSampleFrame>,
+    frames: &'a mut VecDeque<DecodedSampleFrame>,
     target_sample: SampleId,
     target_frame_index: &'a mut Option<usize>,
     filter_sample_ids: Option<&'a HashSet<SampleId>>,
@@ -441,6 +702,18 @@ mod tests {
         };
         let request = FrameDecodeRangeRequest::new(range);
         assert_eq!(request.range, range);
+        assert_eq!(request.backend, Backend::Auto);
+        assert_eq!(request.output_mode, DecodeOutputMode::Rgb24);
+        assert!(!request.require_hardware);
+    }
+
+    #[test]
+    fn frame_decode_window_request_defaults_to_auto_rgb() {
+        let request = FrameDecodeWindowRequest::new(TrackId(1), SampleId(2));
+        assert_eq!(request.track_id, TrackId(1));
+        assert_eq!(request.center_sample, SampleId(2));
+        assert_eq!(request.before, 0);
+        assert_eq!(request.after, 0);
         assert_eq!(request.backend, Backend::Auto);
         assert_eq!(request.output_mode, DecodeOutputMode::Rgb24);
         assert!(!request.require_hardware);

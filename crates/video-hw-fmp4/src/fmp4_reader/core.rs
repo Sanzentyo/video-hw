@@ -15,7 +15,8 @@ use shiguredo_mp4::{
 
 use super::config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    RangeCacheConfig, RangeCacheStats, SampleId, SampleMeta, TrackId,
+    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
+    SampleMeta, TrackId,
 };
 
 #[derive(Debug)]
@@ -169,6 +170,12 @@ impl RangeCache {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.lru.clear();
+        self.resident_bytes = 0;
+    }
 }
 
 #[derive(Debug)]
@@ -205,6 +212,14 @@ impl SampleStore {
             evictions: self.cache.stats.evictions,
             resident_bytes: self.cache.resident_bytes,
         }
+    }
+
+    fn cache_config(&self) -> RangeCacheConfig {
+        self.cache.config.clone()
+    }
+
+    fn clear_cache(&mut self) {
+        self.cache.clear();
     }
 }
 
@@ -285,6 +300,11 @@ impl ReaderCore {
         self.store.cache_stats()
     }
 
+    pub(crate) fn clear_cache(&mut self) {
+        self.store.clear_cache();
+        apply_cache_status(&mut self.status, &self.store);
+    }
+
     pub(crate) fn samples(&mut self, track: TrackId) -> Result<&[SampleMeta]> {
         self.index_to_end()?;
         self.samples_by_track
@@ -307,18 +327,41 @@ impl ReaderCore {
     }
 
     pub(crate) fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+        self.sample_at_pts_with_delta(track, pts)
+            .map(|lookup| lookup.matched_sample)
+    }
+
+    pub(crate) fn sample_at_pts_with_delta(
+        &mut self,
+        track: TrackId,
+        pts: MediaTime,
+    ) -> Option<SampleLookup> {
         self.index_to_end().ok()?;
         let ordered = self.sample_pts_order.get(&track)?;
         if ordered.is_empty() {
             return None;
         }
-        match ordered.binary_search_by_key(&pts.ticks, |sample_id| {
-            self.indexed_sample_pts(*sample_id).unwrap_or(0)
-        }) {
-            Ok(index) => Some(ordered[index]),
-            Err(0) => Some(ordered[0]),
-            Err(index) => Some(ordered[index.saturating_sub(1)]),
-        }
+        let (matched_sample, match_type) = match ordered
+            .binary_search_by_key(&pts.ticks, |sample_id| {
+                self.indexed_sample_pts(*sample_id).unwrap_or(0)
+            }) {
+            Ok(index) => (ordered[index], SampleLookupMatch::Exact),
+            Err(0) => (ordered[0], SampleLookupMatch::FirstAfter),
+            Err(index) => (
+                ordered[index.saturating_sub(1)],
+                SampleLookupMatch::Previous,
+            ),
+        };
+        let matched_meta = self.indexed_sample(matched_sample)?;
+        let delta_ticks = i128::from(matched_meta.pts.ticks) - i128::from(pts.ticks);
+        Some(SampleLookup {
+            requested_pts: pts,
+            matched_sample,
+            matched_pts: matched_meta.pts,
+            delta_ticks,
+            delta_seconds: delta_ticks as f64 / f64::from(pts.timescale.get()),
+            match_type,
+        })
     }
 
     pub(crate) fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
@@ -433,6 +476,19 @@ impl ReaderCore {
         })
     }
 
+    pub(crate) fn index_snapshot(&mut self) -> Result<Mp4IndexSnapshot> {
+        self.index_to_end()?;
+        let samples = self
+            .sample_order
+            .iter()
+            .filter_map(|sample_id| self.indexed_sample(*sample_id).cloned())
+            .collect();
+        Ok(Mp4IndexSnapshot {
+            tracks: self.tracks.clone(),
+            samples,
+        })
+    }
+
     fn index_to_end(&mut self) -> Result<()> {
         while !self.index_complete {
             if self.index_next_sample()?.is_none() {
@@ -524,11 +580,12 @@ impl ReaderCore {
     }
 
     fn indexed_sample_pts(&self, sample: SampleId) -> Option<u64> {
+        self.indexed_sample(sample).map(|sample| sample.pts.ticks)
+    }
+
+    fn indexed_sample(&self, sample: SampleId) -> Option<&SampleMeta> {
         let (track_id, index) = self.sample_lookup.get(&sample).copied()?;
-        self.samples_by_track
-            .get(&track_id)?
-            .get(index)
-            .map(|sample| sample.pts.ticks)
+        self.samples_by_track.get(&track_id)?.get(index)
     }
 
     fn rebuild_sample_pts_order(&mut self) {
@@ -675,6 +732,7 @@ fn apply_cache_status(status: &mut Fmp4ReaderStatus, store: &SampleStore) {
     status.cache_misses = cache.misses;
     status.cache_evictions = cache.evictions;
     status.cache_resident_bytes = cache.resident_bytes;
+    status.range_cache_config = store.cache_config();
 }
 
 #[cfg(test)]
@@ -788,6 +846,26 @@ mod tests {
             Some(first.sample_id),
             "sample_at_pts should find exact PTS"
         );
+        let exact_lookup = core
+            .sample_at_pts_with_delta(video_track, first.pts)
+            .expect("exact PTS lookup");
+        assert_eq!(exact_lookup.matched_sample, first.sample_id);
+        assert_eq!(exact_lookup.match_type, SampleLookupMatch::Exact);
+        assert_eq!(exact_lookup.delta_ticks, 0);
+        let first_after_lookup = core
+            .sample_at_pts_with_delta(video_track, MediaTime::new(0, first.pts.timescale))
+            .expect("pre-roll PTS lookup");
+        assert_eq!(first_after_lookup.match_type, SampleLookupMatch::FirstAfter);
+        assert!(first_after_lookup.delta_ticks > 0);
+        let previous_lookup = core
+            .sample_at_pts_with_delta(
+                video_track,
+                MediaTime::new(first.pts.ticks.saturating_add(1), first.pts.timescale),
+            )
+            .expect("inexact PTS lookup");
+        assert_eq!(previous_lookup.match_type, SampleLookupMatch::Previous);
+        assert_eq!(previous_lookup.matched_sample, first.sample_id);
+        assert_eq!(previous_lookup.delta_ticks, -1);
         assert_eq!(
             core.keyframe_before(first.sample_id),
             Some(first.sample_id),
@@ -799,6 +877,12 @@ mod tests {
             .expect("first sample should produce GOP segment");
         assert_eq!(gop.track_id, video_track);
         assert_eq!(gop.keyframe_sample, first.sample_id);
+        let snapshot = core.index_snapshot().expect("index snapshot");
+        assert_eq!(snapshot.tracks.len(), core.tracks().len());
+        assert_eq!(
+            snapshot.samples.len(),
+            core.status().samples_indexed as usize
+        );
 
         let encoded = core
             .read_sample(first.sample_id)
@@ -996,5 +1080,8 @@ mod tests {
 
         assert!(after.misses >= before.misses);
         assert!(after.resident_bytes >= before.resident_bytes);
+        assert_eq!(core.status().range_cache_config.chunk_size, 8 * 1024 * 1024);
+        core.clear_cache();
+        assert_eq!(core.cache_stats().resident_bytes, 0);
     }
 }

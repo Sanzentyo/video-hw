@@ -11,7 +11,9 @@ video-hw-fmp4 = { path = "../crates/video-hw-fmp4" }
 use anyhow::{Context, Result, anyhow};
 use std::env;
 use std::path::PathBuf;
-use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, IndexMode, SampleId, TrackKind};
+use video_hw_fmp4::{
+    Fmp4Reader, Fmp4ReaderConfig, IndexMode, SampleId, SampleLookupMatch, TrackKind,
+};
 
 fn main() -> Result<()> {
     let input_path = env::args()
@@ -79,6 +81,50 @@ fn main() -> Result<()> {
     if sample_count == 0 {
         return Err(anyhow!("video track had no indexed samples"));
     }
+    let checkpoints = {
+        let samples = reader.samples(video_track)?;
+        [
+            samples[0].sample_id,
+            samples[samples.len() / 2].sample_id,
+            samples[samples.len() - 1].sample_id,
+        ]
+    };
+    for sample_id in checkpoints {
+        let meta = reader
+            .sample_meta(sample_id)
+            .cloned()
+            .with_context(|| format!("sample metadata disappeared for {sample_id}"))?;
+        let lookup = reader
+            .sample_at_pts_with_delta(video_track, meta.pts)
+            .with_context(|| format!("sample_at_pts_with_delta failed for {sample_id}"))?;
+        if lookup.match_type != SampleLookupMatch::Exact {
+            return Err(anyhow!(
+                "expected exact PTS match for sample {}, got {:?}",
+                sample_id,
+                lookup.match_type
+            ));
+        }
+        let gop = reader
+            .gop_for_sample(sample_id)
+            .with_context(|| format!("gop_for_sample failed for {sample_id}"))?;
+        println!(
+            "checkpoint sample={} pts={} lookup={:?} gop_start={} gop_end={}",
+            sample_id,
+            meta.pts.ticks,
+            lookup.match_type,
+            gop.keyframe_sample,
+            gop.end_sample_exclusive
+        );
+    }
+    let snapshot = reader.index_snapshot()?;
+    println!(
+        "snapshot tracks={} samples={} cache_resident={}",
+        snapshot.tracks.len(),
+        snapshot.samples.len(),
+        reader.status().cache_resident_bytes
+    );
+    reader.clear_cache();
+    println!("cache_after_clear={}", reader.status().cache_resident_bytes);
 
     println!("verify_fmp4_lazy=ok");
     Ok(())

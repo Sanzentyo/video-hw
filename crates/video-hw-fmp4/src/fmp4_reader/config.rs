@@ -118,6 +118,12 @@ pub struct SampleMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4IndexSnapshot {
+    pub tracks: Vec<Fmp4Track>,
+    pub samples: Vec<SampleMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GopSegment {
     pub track_id: TrackId,
     pub keyframe_sample: SampleId,
@@ -131,6 +137,23 @@ pub struct SampleRange {
     pub track_id: TrackId,
     pub start_sample: SampleId,
     pub end_sample_exclusive: SampleId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleLookupMatch {
+    Exact,
+    Previous,
+    FirstAfter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleLookup {
+    pub requested_pts: MediaTime,
+    pub matched_sample: SampleId,
+    pub matched_pts: MediaTime,
+    pub delta_ticks: i128,
+    pub delta_seconds: f64,
+    pub match_type: SampleLookupMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +180,7 @@ impl EncodedSample {
     pub fn to_annexb(&self) -> anyhow::Result<Vec<u8>> {
         match self.encoded_layout() {
             Some(EncodedLayout::Avcc) | Some(EncodedLayout::Hvcc) => {
+                let nal_length_size = sample_entry_nal_length_size(self.sample_entry.as_ref())?;
                 let mut annexb = Vec::new();
                 if self.meta.keyframe {
                     for parameter_set in self.parameter_sets() {
@@ -168,11 +192,10 @@ impl EncodedSample {
                 while cursor < self.data.len() {
                     let len_bytes = self
                         .data
-                        .get(cursor..cursor + 4)
+                        .get(cursor..cursor + nal_length_size)
                         .context("length-prefixed sample truncated before NAL length")?;
-                    let nalu_len =
-                        u32::from_be_bytes(len_bytes.try_into().expect("slice length")) as usize;
-                    cursor = cursor.saturating_add(4);
+                    let nalu_len = read_be_nal_length(len_bytes);
+                    cursor = cursor.saturating_add(nal_length_size);
                     let nalu = self
                         .data
                         .get(cursor..cursor + nalu_len)
@@ -208,6 +231,7 @@ pub struct Fmp4ReaderStatus {
     pub cache_misses: u64,
     pub cache_evictions: u64,
     pub cache_resident_bytes: usize,
+    pub range_cache_config: RangeCacheConfig,
 }
 
 pub(crate) fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<Codec> {
@@ -251,6 +275,36 @@ pub(crate) fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) ->
     }
 }
 
+pub(crate) fn sample_entry_nal_length_size(
+    sample_entry: Option<&SampleEntry>,
+) -> anyhow::Result<usize> {
+    let Some(sample_entry) = sample_entry else {
+        anyhow::bail!("cannot determine NAL length size without a video sample entry");
+    };
+    let length_size_minus_one = match sample_entry {
+        SampleEntry::Avc1(avc1) => avc1.avcc_box.length_size_minus_one.get(),
+        SampleEntry::Hev1(hev1) => hev1.hvcc_box.length_size_minus_one.get(),
+        SampleEntry::Hvc1(hvc1) => hvc1.hvcc_box.length_size_minus_one.get(),
+        _ => anyhow::bail!("sample entry does not declare a supported NAL length size"),
+    };
+    match length_size_minus_one {
+        0 => Ok(1),
+        1 => Ok(2),
+        3 => Ok(4),
+        value => anyhow::bail!(
+            "unsupported NAL length size: length_size_minus_one={} gives {} bytes",
+            value,
+            value + 1
+        ),
+    }
+}
+
+fn read_be_nal_length(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .fold(0usize, |value, byte| (value << 8) | usize::from(*byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,31 +315,7 @@ mod tests {
 
     #[test]
     fn h264_helpers_detect_codec_layout_and_annexb() {
-        let sample_entry = SampleEntry::Avc1(Avc1Box {
-            visual: VisualSampleEntryFields {
-                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
-                width: 640,
-                height: 360,
-                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
-                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
-                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
-                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
-                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
-            },
-            avcc_box: AvccBox {
-                avc_profile_indication: 100,
-                profile_compatibility: 0,
-                avc_level_indication: 30,
-                length_size_minus_one: Uint::new(3),
-                sps_list: vec![vec![0x67, 0x64, 0x00, 0x1f]],
-                pps_list: vec![vec![0x68, 0xee, 0x3c, 0x80]],
-                chroma_format: Some(Uint::new(1)),
-                bit_depth_luma_minus8: Some(Uint::new(0)),
-                bit_depth_chroma_minus8: Some(Uint::new(0)),
-                sps_ext_list: vec![],
-            },
-            unknown_boxes: vec![],
-        });
+        let sample_entry = h264_sample_entry(3);
         let sample = EncodedSample {
             meta: test_meta(true),
             kind: TrackKind::Video,
@@ -312,8 +342,113 @@ mod tests {
     }
 
     #[test]
+    fn h264_annexb_uses_declared_nal_length_size() {
+        for (length_size_minus_one, data) in [
+            (0, vec![2, 0x65, 0x88]),
+            (1, vec![0, 2, 0x65, 0x88]),
+            (3, vec![0, 0, 0, 2, 0x65, 0x88]),
+        ] {
+            let sample = EncodedSample {
+                meta: test_meta(true),
+                kind: TrackKind::Video,
+                sample_entry: Some(h264_sample_entry(length_size_minus_one)),
+                data,
+            };
+            let annexb = sample.to_annexb().expect("annexb conversion");
+            assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
+        }
+        let invalid = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(h264_sample_entry(2)),
+            data: vec![0, 0, 2, 0x65, 0x88],
+        };
+        assert!(invalid.to_annexb().is_err());
+    }
+
+    #[test]
     fn hevc_helpers_detect_codec_layout_and_annexb() {
-        let sample_entry = SampleEntry::Hvc1(Hvc1Box {
+        let sample_entry = hevc_sample_entry(3);
+        let sample = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(sample_entry.clone()),
+            data: vec![0, 0, 0, 2, 0x26, 0x01],
+        };
+        assert_eq!(sample.codec(), Some(Codec::Hevc));
+        assert_eq!(sample.encoded_layout(), Some(EncodedLayout::Hvcc));
+        let annexb = sample
+            .to_annexb()
+            .expect("annexb conversion should succeed");
+        assert!(annexb.starts_with(&[0, 0, 0, 1, 0x40]));
+        assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x26]));
+        let track = Fmp4Track {
+            track_id: TrackId(1),
+            kind: TrackKind::Video,
+            duration: 0,
+            timescale: NonZeroU32::new(90_000).expect("non-zero timescale"),
+            sample_entry: Some(sample_entry),
+        };
+        assert_eq!(track.codec(), Some(Codec::Hevc));
+        assert_eq!(track.encoded_layout(), Some(EncodedLayout::Hvcc));
+        assert_eq!(track.parameter_sets().len(), 3);
+    }
+
+    #[test]
+    fn hevc_annexb_uses_declared_nal_length_size() {
+        for (length_size_minus_one, data) in [
+            (0, vec![2, 0x26, 0x01]),
+            (1, vec![0, 2, 0x26, 0x01]),
+            (3, vec![0, 0, 0, 2, 0x26, 0x01]),
+        ] {
+            let sample = EncodedSample {
+                meta: test_meta(true),
+                kind: TrackKind::Video,
+                sample_entry: Some(hevc_sample_entry(length_size_minus_one)),
+                data,
+            };
+            let annexb = sample.to_annexb().expect("annexb conversion");
+            assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x26]));
+        }
+        let invalid = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(hevc_sample_entry(2)),
+            data: vec![0, 0, 2, 0x26, 0x01],
+        };
+        assert!(invalid.to_annexb().is_err());
+    }
+
+    fn h264_sample_entry(length_size_minus_one: u8) -> SampleEntry {
+        SampleEntry::Avc1(Avc1Box {
+            visual: VisualSampleEntryFields {
+                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+                width: 640,
+                height: 360,
+                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+            },
+            avcc_box: AvccBox {
+                avc_profile_indication: 100,
+                profile_compatibility: 0,
+                avc_level_indication: 30,
+                length_size_minus_one: Uint::new(length_size_minus_one),
+                sps_list: vec![vec![0x67, 0x64, 0x00, 0x1f]],
+                pps_list: vec![vec![0x68, 0xee, 0x3c, 0x80]],
+                chroma_format: Some(Uint::new(1)),
+                bit_depth_luma_minus8: Some(Uint::new(0)),
+                bit_depth_chroma_minus8: Some(Uint::new(0)),
+                sps_ext_list: vec![],
+            },
+            unknown_boxes: vec![],
+        })
+    }
+
+    fn hevc_sample_entry(length_size_minus_one: u8) -> SampleEntry {
+        SampleEntry::Hvc1(Hvc1Box {
             visual: VisualSampleEntryFields {
                 data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
                 width: 640,
@@ -340,7 +475,7 @@ mod tests {
                 constant_frame_rate: Uint::new(0),
                 num_temporal_layers: Uint::new(0),
                 temporal_id_nested: Uint::new(1),
-                length_size_minus_one: Uint::new(3),
+                length_size_minus_one: Uint::new(length_size_minus_one),
                 nalu_arrays: vec![
                     HvccNalUintArray {
                         array_completeness: Uint::new(1),
@@ -360,30 +495,7 @@ mod tests {
                 ],
             },
             unknown_boxes: vec![],
-        });
-        let sample = EncodedSample {
-            meta: test_meta(true),
-            kind: TrackKind::Video,
-            sample_entry: Some(sample_entry.clone()),
-            data: vec![0, 0, 0, 2, 0x26, 0x01],
-        };
-        assert_eq!(sample.codec(), Some(Codec::Hevc));
-        assert_eq!(sample.encoded_layout(), Some(EncodedLayout::Hvcc));
-        let annexb = sample
-            .to_annexb()
-            .expect("annexb conversion should succeed");
-        assert!(annexb.starts_with(&[0, 0, 0, 1, 0x40]));
-        assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x26]));
-        let track = Fmp4Track {
-            track_id: TrackId(1),
-            kind: TrackKind::Video,
-            duration: 0,
-            timescale: NonZeroU32::new(90_000).expect("non-zero timescale"),
-            sample_entry: Some(sample_entry),
-        };
-        assert_eq!(track.codec(), Some(Codec::Hevc));
-        assert_eq!(track.encoded_layout(), Some(EncodedLayout::Hvcc));
-        assert_eq!(track.parameter_sets().len(), 3);
+        })
     }
 
     fn test_meta(keyframe: bool) -> SampleMeta {
