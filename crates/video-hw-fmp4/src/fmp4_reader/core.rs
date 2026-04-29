@@ -697,6 +697,43 @@ mod tests {
     }
 
     #[test]
+    fn fragmented_mp4_sample_supports_metadata_gop_and_on_demand_reads() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif_fmp4.mp4");
+        let mut core =
+            ReaderCore::open(&Fmp4ReaderConfig::new(input_path)).expect("fMP4 sample should open");
+        let video_track = core
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let samples = core.samples(video_track).expect("video samples");
+        assert_eq!(samples.len(), 300);
+        assert_eq!(samples[0].dts.ticks, 0);
+        assert_eq!(samples[0].pts.ticks, 2002);
+        assert_eq!(samples[0].duration, 1001);
+        assert!(samples[0].keyframe);
+        assert!(samples.iter().all(|sample| sample.size > 0));
+        let first_sample_id = samples[0].sample_id;
+        let first_sample_size = samples[0].size as usize;
+
+        let gop = core
+            .gop_for_sample(samples[4].sample_id)
+            .expect("inter frame should produce GOP segment");
+        assert_eq!(gop.keyframe_sample, first_sample_id);
+
+        let encoded = core
+            .read_sample(first_sample_id)
+            .expect("on-demand fMP4 sample read should succeed");
+        assert_eq!(encoded.data.len(), first_sample_size);
+        assert!(!encoded.to_annexb().expect("annexb").is_empty());
+    }
+
+    #[test]
     fn encoded_iter_reads_gop_on_demand() {
         let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -786,6 +823,38 @@ mod tests {
         );
         assert_eq!(cache.stats.evictions, 1);
         assert_eq!(cache.resident_bytes, 8);
+
+        let _ = std::fs::remove_file(input_path);
+    }
+
+    #[test]
+    fn range_cache_read_ahead_loads_next_chunk() {
+        let input_path = std::env::temp_dir().join(format!(
+            "video-hw-fmp4-range-cache-read-ahead-{}.bin",
+            std::process::id()
+        ));
+        {
+            let mut file = File::create(&input_path).expect("create temp range-cache file");
+            file.write_all(&(0_u8..16).collect::<Vec<_>>())
+                .expect("write temp range-cache file");
+        }
+
+        let mut file = File::open(&input_path).expect("open temp range-cache file");
+        let mut cache = RangeCache::new(RangeCacheConfig {
+            chunk_size: 4,
+            max_bytes: 16,
+            read_ahead_chunks: 1,
+        });
+
+        assert_eq!(
+            cache
+                .read_range(&mut file, 16, 0, 2)
+                .expect("range read should succeed"),
+            vec![0, 1]
+        );
+        assert!(cache.chunks.contains_key(&0));
+        assert!(cache.chunks.contains_key(&1));
+        assert_eq!(cache.stats.misses, 2);
 
         let _ = std::fs::remove_file(input_path);
     }
