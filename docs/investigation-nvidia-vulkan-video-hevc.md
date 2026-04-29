@@ -31,3 +31,15 @@ The most useful local checks were:
 - Decode `sample-videos/foreman_cif.h265`, compare raw NV12 vs raw NV12 reference, and inspect the minimum per-frame Y PSNR.
 
 The encoded-input-vs-raw-input PSNR path can produce misleading mid-stream frame pairing, so raw-vs-raw comparison is preferred for this diagnostic.
+
+## Follow-up Check
+
+`cargo +nightly -Zscript scripts/check_vulkan_hevc_psnr.rs` is the focused regression check for this issue. It decodes HEVC with the Vulkan backend to NV12, decodes the same stream with FFmpeg to NV12, and computes raw-vs-raw PSNR.
+
+On 2026-04-30, `sample-videos/foreman_cif.h265` produced:
+
+- `psnr_y_avg=48.2443 dB`
+- `psnr_y_min=47.4900 dB` at frame 220
+- `psnr_avg=49.6294 dB`
+
+This keeps the repaired inter-frame path well above the 40 dB regression threshold and covers the earlier POC-wrap failure area.

@@ -6,9 +6,10 @@ mod session_async;
 mod state;
 
 pub use config::{
-    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
-    SampleMeta, SampleRange, SampleReadStats, TrackId, TrackReadStats,
+    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, Fmp4TrackDescription, GopSegment,
+    IndexMode, MediaTime, Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats,
+    SampleEntryDescription, SampleId, SampleLookup, SampleLookupMatch, SampleMeta, SampleRange,
+    SampleReadStats, TrackId, TrackReadStats,
 };
 pub use core::EncodedSampleIter;
 pub use decode::{
@@ -115,6 +116,10 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.read_gop(sample)
     }
 
+    pub fn read_segment(&mut self, segment: GopSegment) -> Result<Vec<EncodedSample>> {
+        self.state.core.read_segment(segment)
+    }
+
     pub fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.core.next_sample()
     }
@@ -160,8 +165,68 @@ impl Fmp4Reader<AsyncReading> {
         &self.state.tracks
     }
 
+    pub async fn samples(&mut self, track: TrackId) -> Result<Vec<SampleMeta>> {
+        self.state.handle.samples(track).await
+    }
+
+    pub async fn sample_meta(&mut self, sample: SampleId) -> Result<Option<SampleMeta>> {
+        self.state.handle.sample_meta(sample).await
+    }
+
+    pub async fn sample_at_pts(
+        &mut self,
+        track: TrackId,
+        pts: MediaTime,
+    ) -> Result<Option<SampleId>> {
+        self.state.handle.sample_at_pts(track, pts).await
+    }
+
+    pub async fn sample_at_pts_with_delta(
+        &mut self,
+        track: TrackId,
+        pts: MediaTime,
+    ) -> Result<Option<SampleLookup>> {
+        self.state.handle.sample_at_pts_with_delta(track, pts).await
+    }
+
+    pub async fn keyframe_before(&mut self, sample: SampleId) -> Result<Option<SampleId>> {
+        self.state.handle.keyframe_before(sample).await
+    }
+
+    pub async fn gop_for_sample(&mut self, sample: SampleId) -> Result<Option<GopSegment>> {
+        self.state.handle.gop_for_sample(sample).await
+    }
+
+    pub async fn read_sample(&mut self, sample: SampleId) -> Result<EncodedSample> {
+        self.state.handle.read_sample(sample).await
+    }
+
+    pub async fn read_gop(&mut self, sample: SampleId) -> Result<Vec<EncodedSample>> {
+        self.state.handle.read_gop(sample).await
+    }
+
+    pub async fn read_segment(&mut self, segment: GopSegment) -> Result<Vec<EncodedSample>> {
+        self.state.handle.read_segment(segment).await
+    }
+
     pub async fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.handle.next_sample().await
+    }
+
+    pub async fn index_snapshot(&mut self) -> Result<Mp4IndexSnapshot> {
+        self.state.handle.index_snapshot().await
+    }
+
+    pub async fn status(&mut self) -> Result<Fmp4ReaderStatus> {
+        self.state.handle.status().await
+    }
+
+    pub async fn cache_stats(&mut self) -> Result<RangeCacheStats> {
+        self.state.handle.cache_stats().await
+    }
+
+    pub async fn clear_cache(&mut self) -> Result<()> {
+        self.state.handle.clear_cache().await
     }
 
     pub async fn recv_event(&mut self) -> Option<AsyncReaderEvent> {
@@ -185,5 +250,71 @@ impl Fmp4Reader<AsyncReading> {
 impl Fmp4Reader<Finished> {
     pub fn status(&self) -> &Fmp4ReaderStatus {
         &self.state.status
+    }
+}
+
+#[cfg(all(test, feature = "async-session"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn async_reader_exposes_indexed_seek_and_read_api() -> Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread().build()?;
+        rt.block_on(async {
+            let input_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("sample-videos")
+                .join("sample-10s.mp4");
+            let mut reader =
+                Fmp4Reader::new(Fmp4ReaderConfig::new(input_path)).into_async_session()?;
+            let track_id = reader
+                .tracks()
+                .iter()
+                .find(|track| track.kind == TrackKind::Video)
+                .expect("video track should exist")
+                .track_id;
+            let samples = reader.samples(track_id).await?;
+            assert!(!samples.is_empty());
+            let first = samples[0].clone();
+            assert_eq!(
+                reader.sample_meta(first.sample_id).await?,
+                Some(first.clone())
+            );
+            assert_eq!(
+                reader.sample_at_pts(track_id, first.pts).await?,
+                Some(first.sample_id)
+            );
+            let lookup = reader
+                .sample_at_pts_with_delta(track_id, first.pts)
+                .await?
+                .expect("exact lookup");
+            assert_eq!(lookup.matched_sample, first.sample_id);
+            assert_eq!(
+                reader.keyframe_before(first.sample_id).await?,
+                Some(first.sample_id)
+            );
+            let gop = reader
+                .gop_for_sample(first.sample_id)
+                .await?
+                .expect("gop segment");
+            let encoded = reader.read_sample(first.sample_id).await?;
+            assert_eq!(encoded.meta.sample_id, first.sample_id);
+            let gop_samples = reader.read_gop(first.sample_id).await?;
+            assert!(!gop_samples.is_empty());
+            let segment_samples = reader.read_segment(gop).await?;
+            assert_eq!(segment_samples[0].meta.sample_id, first.sample_id);
+            let snapshot = reader.index_snapshot().await?;
+            assert!(!snapshot.track_descriptions.is_empty());
+            let status = reader.status().await?;
+            assert!(status.samples_read >= 1);
+            assert!(reader.cache_stats().await?.resident_bytes > 0);
+            reader.clear_cache().await?;
+            assert_eq!(reader.cache_stats().await?.resident_bytes, 0);
+            let finished = reader.finish().await?;
+            assert!(finished.status().samples_read >= 1);
+            Ok::<_, anyhow::Error>(())
+        })?;
+        Ok(())
     }
 }

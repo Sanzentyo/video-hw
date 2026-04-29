@@ -14,9 +14,9 @@ use shiguredo_mp4::{
 };
 
 use super::config::{
-    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
-    SampleMeta, TrackId,
+    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, Fmp4TrackDescription, GopSegment,
+    IndexMode, MediaTime, Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId,
+    SampleLookup, SampleLookupMatch, SampleMeta, TrackId,
 };
 
 #[derive(Debug)]
@@ -449,6 +449,10 @@ impl ReaderCore {
         self.iter_gop_for_sample(sample)?.collect()
     }
 
+    pub(crate) fn read_segment(&mut self, segment: GopSegment) -> Result<Vec<EncodedSample>> {
+        self.encoded_iter(segment)?.collect()
+    }
+
     pub(crate) fn iter_gop_for_sample(
         &mut self,
         sample: SampleId,
@@ -490,6 +494,7 @@ impl ReaderCore {
             .filter_map(|sample_id| self.indexed_sample(*sample_id).cloned())
             .collect();
         Ok(Mp4IndexSnapshot {
+            track_descriptions: self.tracks.iter().map(Fmp4TrackDescription::from).collect(),
             tracks: self.tracks.clone(),
             samples,
         })

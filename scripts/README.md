@@ -125,6 +125,18 @@ cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
 - `--decode-features` を渡すと `read_fmp4_slider_gui --smoke-test` を子プロセスで起動し、checkpoint GOP decode と `DecodeDiagnostics` 出力を確認する。
 - 通常 MP4 と fragmented MP4 の両方で使える。
 
+### 9) Vulkan HEVC PSNR 検証
+
+```bash
+cargo +nightly -Zscript scripts/check_vulkan_hevc_psnr.rs
+cargo +nightly -Zscript scripts/check_vulkan_hevc_psnr.rs --input sample-videos/foreman_cif.h265 --min-psnr-y 40
+```
+
+- `decode_to_yuv` の `backend-vulkan` HEVC NV12 出力を FFmpeg software decode の NV12 と raw-vs-raw で比較する。
+- 既定入力は `sample-videos/foreman_cif.h265`、既定しきい値は frame 単位の `psnr_y` 最小値 40 dB。
+- slice offset の診断をしたい場合は `--offset-mode annexb|rbsp|nalu|global|memory` を指定する。
+- `FFMPEG_PATH` または `--ffmpeg` で FFmpeg 実行ファイルを指定できる。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること

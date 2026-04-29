@@ -25,6 +25,7 @@
 - `serde`
   - reader metadata/report 型の `Serialize` / `Deserialize` を有効化します
   - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
+  - `Mp4IndexSnapshot::track_descriptions` には codec / layout / NAL length size / parameter sets / basic audio-video fields を含む軽量 description が入ります
   - `DecodeDiagnostics` は backend と output mode を文字列として serialize します。deserialize では有効化済み backend feature に含まれる `resolved_backend` だけを復元できます
 
 ## Writer Example
@@ -142,6 +143,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
 - `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由を返します。
 - `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。
+- async reader は `samples` / `sample_meta` / `sample_at_pts_with_delta` / `read_sample` / `read_gop` / `read_segment` / `index_snapshot` / cache/status 系 API を worker 経由で利用できます。borrow を返せないため metadata slice は `Vec<SampleMeta>` として返します。
 
 ライトな確認だけ行う場合:
 

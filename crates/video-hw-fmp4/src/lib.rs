@@ -19,11 +19,11 @@ mod tests;
 pub use fmp4_reader::{
     DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, EncodedSample,
     Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track,
-    FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult,
-    FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode, MediaTime,
-    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady, SampleId,
-    SampleLookup, SampleLookupMatch, SampleMeta, SampleRange, SampleReadStats, SyncReading,
-    TrackId, TrackKind, TrackReadStats,
+    Fmp4TrackDescription, FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest,
+    FrameDecodeResult, FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode,
+    MediaTime, Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady,
+    SampleEntryDescription, SampleId, SampleLookup, SampleLookupMatch, SampleMeta, SampleRange,
+    SampleReadStats, SyncReading, TrackId, TrackKind, TrackReadStats,
 };
 pub use fmp4_writer::{
     ArgbFrame, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,

@@ -140,6 +140,10 @@ impl Fmp4Track {
     pub fn parameter_sets(&self) -> Vec<Vec<u8>> {
         sample_entry_parameter_sets(self.sample_entry.as_ref())
     }
+
+    pub fn codec_description(&self) -> SampleEntryDescription {
+        sample_entry_description(self.sample_entry.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +164,45 @@ pub struct SampleMeta {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mp4IndexSnapshot {
     pub tracks: Vec<Fmp4Track>,
+    pub track_descriptions: Vec<Fmp4TrackDescription>,
     pub samples: Vec<SampleMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Fmp4TrackDescription {
+    pub track_id: TrackId,
+    #[cfg_attr(feature = "serde", serde(with = "serde_track_kind"))]
+    pub kind: TrackKind,
+    pub duration: u64,
+    pub timescale: NonZeroU32,
+    pub sample_entry: SampleEntryDescription,
+}
+
+impl From<&Fmp4Track> for Fmp4TrackDescription {
+    fn from(track: &Fmp4Track) -> Self {
+        Self {
+            track_id: track.track_id,
+            kind: track.kind,
+            duration: track.duration,
+            timescale: track.timescale,
+            sample_entry: track.codec_description(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SampleEntryDescription {
+    pub codec: Option<String>,
+    pub encoded_layout: Option<String>,
+    pub nal_length_size: Option<u8>,
+    pub parameter_sets: Vec<Vec<u8>>,
+    pub video_width: Option<u16>,
+    pub video_height: Option<u16>,
+    pub audio_channel_count: Option<u8>,
+    pub audio_sample_rate: Option<u16>,
+    pub audio_sample_size: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +383,33 @@ pub(crate) fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) ->
     }
 }
 
+pub(crate) fn sample_entry_description(
+    sample_entry: Option<&SampleEntry>,
+) -> SampleEntryDescription {
+    let video_resolution = sample_entry.and_then(SampleEntry::video_resolution);
+    SampleEntryDescription {
+        codec: sample_entry_codec(sample_entry).map(codec_name),
+        encoded_layout: sample_entry_layout(sample_entry).map(encoded_layout_name),
+        nal_length_size: sample_entry_nal_length_size(sample_entry)
+            .ok()
+            .and_then(|size| u8::try_from(size).ok()),
+        parameter_sets: sample_entry_parameter_sets(sample_entry),
+        video_width: video_resolution.map(|(width, _)| width),
+        video_height: video_resolution.map(|(_, height)| height),
+        audio_channel_count: sample_entry.and_then(SampleEntry::audio_channel_count),
+        audio_sample_rate: sample_entry.and_then(SampleEntry::audio_sample_rate),
+        audio_sample_size: sample_entry.and_then(SampleEntry::audio_sample_size),
+    }
+}
+
+fn codec_name(codec: Codec) -> String {
+    codec.to_string()
+}
+
+fn encoded_layout_name(layout: EncodedLayout) -> String {
+    layout.to_string()
+}
+
 pub(crate) fn sample_entry_nal_length_size(
     sample_entry: Option<&SampleEntry>,
 ) -> anyhow::Result<usize> {
@@ -496,16 +565,29 @@ mod tests {
             timescale,
             sample_entry: Some(h264_sample_entry(3)),
         };
+        let track_description = Fmp4TrackDescription::from(&track);
         let snapshot = Mp4IndexSnapshot {
             tracks: vec![track],
+            track_descriptions: vec![track_description],
             samples: vec![test_meta(true)],
         };
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
         assert!(json.contains("\"kind\":\"video\""));
-        assert!(!json.contains("sample_entry"));
+        assert!(json.contains("\"codec\":\"h264\""));
+        assert!(json.contains("\"nal_length_size\":4"));
+        assert!(json.contains("\"video_width\":640"));
+        assert!(json.contains("\"track_descriptions\""));
         let decoded: Mp4IndexSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
         assert_eq!(decoded.tracks[0].kind, TrackKind::Video);
         assert!(decoded.tracks[0].sample_entry.is_none());
+        assert_eq!(
+            decoded.track_descriptions[0].sample_entry.codec.as_deref(),
+            Some("h264")
+        );
+        assert_eq!(
+            decoded.track_descriptions[0].sample_entry.nal_length_size,
+            Some(4)
+        );
         assert_eq!(decoded.samples, snapshot.samples);
 
         let lookup = SampleLookup {
