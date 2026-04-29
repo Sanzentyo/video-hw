@@ -132,6 +132,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - status は tracing で出力します。既定ログレベルは `warn`（warn/error のみ）で、`RUST_LOG=info` などを指定すると詳細ログを確認できます。
 - 通常 MP4（non-fragmented）も読めます（例: `sample-videos/sample-10s.mp4`）。
 - GOP replay + decode submit/reap は crate 側の `FrameDecoder` が担当し、example 側は preview/cache 方針だけを持ちます。
+- 人物検出、HISDF 解釈、bbox crop、tracking、検証 artifact 保存は `video-hw-fmp4` の責務外です。上位層は `sample_at_pts`、`GopCursor`、`decode_range`、`cache_stats` を組み合わせて必要な frame/window を取得します。
 
 ライトな確認だけ行う場合:
 

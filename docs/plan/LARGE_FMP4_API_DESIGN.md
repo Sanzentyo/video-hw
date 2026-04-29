@@ -302,9 +302,25 @@ single-person tracking: 256 frames or 1 GiB
 long sequential tracking: current GOP + next GOP prefetch
 ```
 
-## Analysis Integration
+## Integration Boundary
 
-The analysis layer should map pipeline outputs to video samples.
+`video-hw-fmp4` must stop at video access primitives. Person detection, HISDF
+decoding, bbox crop, behavior tracking, validation policy, decoded-frame cache
+policy, and artifact persistence belong to the caller or an analysis-specific
+crate/tool.
+
+The API should make those callers easy to build by exposing:
+
+- timestamp/sample lookup through `sample_at_pts` and `SampleMeta`
+- keyframe/GOP lookup through `keyframe_before`, `gop_for_sample`, and
+  `GopCursor`
+- on-demand payload reads through `read_sample`, `iter_gop_for_sample`, and
+  `read_gop`
+- decoded frame access through `FrameDecoder::decode_sample` and
+  `FrameDecoder::decode_range`
+- cache diagnostics through `RangeCacheStats`
+
+An upper layer can then map pipeline outputs to video samples.
 
 Short term:
 
@@ -323,8 +339,8 @@ metadata.json timestamp/frame_index
   -> decode sample/window via FrameDecoder
 ```
 
-For validation, always compare extracted frame with saved `frame.png` and report
-all offsets rather than silently selecting the best one.
+For validation, an upper layer should compare extracted frames with saved
+`frame.png` and report all offsets rather than silently selecting the best one.
 
 ```rust
 pub struct FrameWindowRequest {
@@ -341,7 +357,7 @@ pub struct FrameComparison {
 }
 ```
 
-For selected-person extraction:
+For selected-person extraction, the upper layer owns all non-video semantics:
 
 ```text
 pipeline metadata -> selected_index
@@ -396,18 +412,18 @@ the metadata-first reader contract in the same series:
 - Support `Rgb24` first, `Nv12` as an option.
 - Keep backend fallback explicit and observable in result metadata.
 
-### Phase 4: Sequential analysis
+### Phase 4: Sequential access API
 
 - Add `GopCursor` and `decode_range`.
-- Add decoded-frame cache in `analysis-tools`, not in `video-hw-fmp4`.
-- Add frame-window verification reports with PSNR/MAE.
+- Keep decoded-frame cache policy outside `video-hw-fmp4`.
+- Ensure decoded frames can be associated back to `SampleId`.
 
-### Phase 5: Behavior tracking
+### Phase 5: Upper-layer enablement
 
-- Decode frames in timestamp order.
-- Crop selected person using HISDF bbox.
-- Persist derived analysis artifacts outside `mock/`.
-- Never mutate the copied session data.
+- Do not add person detection or HISDF-specific code to `video-hw-fmp4`.
+- Provide enough sample/window decode APIs for external analysis tools to crop,
+  compare, track, or persist their own artifacts.
+- Document that derived artifacts belong outside the source session data.
 
 ## Open Questions
 
