@@ -22,6 +22,10 @@
 - `backend-nvidia`
 - `backend-intel`
 - `backend-vulkan`
+- `serde`
+  - reader metadata/report 型の `Serialize` / `Deserialize` を有効化します
+  - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
+  - `DecodeDiagnostics` は backend と output mode を文字列として serialize します。deserialize では有効化済み backend feature に含まれる `resolved_backend` だけを復元できます
 
 ## Writer Example
 
@@ -65,17 +69,34 @@ fn main() -> Result<()> {
 
 ```rust
 use anyhow::Result;
-use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady};
+use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady, TrackKind};
 
 fn main() -> Result<()> {
-    let mut reader = Fmp4Reader::<Fmp4ReaderReady>::new(Fmp4ReaderConfig {
-        input_path: "output/example.mp4".into(),
-    })
+    let mut reader = Fmp4Reader::<Fmp4ReaderReady>::new(Fmp4ReaderConfig::new(
+        "output/example.mp4",
+    ))
     .into_sync_session()?;
 
-    while let Some(sample) = reader.next_sample()? {
+    let tracks = reader.tracks().to_vec();
+    for track in &tracks {
+        println!("track={} samples={}", track.track_id, reader.samples(track.track_id)?.len());
+    }
+
+    let Some(video_track) = tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .map(|track| track.track_id)
+    else {
+        return Ok(());
+    };
+    let Some(target) = reader.samples(video_track)?.first().map(|sample| sample.sample_id) else {
+        return Ok(());
+    };
+
+    for sample in reader.iter_gop_for_sample(target)? {
+        let sample = sample?;
         let _annexb = sample.to_annexb()?;
-        println!("keyframe={}", sample.keyframe);
+        println!("sample={} keyframe={}", sample.meta.sample_id, sample.meta.keyframe);
     }
     Ok(())
 }
@@ -95,6 +116,12 @@ cargo run -p video-hw-fmp4 --example write_synthetic_fmp4 --features backend-vt
 cargo run -p video-hw-fmp4 --example read_fmp4_file --features backend-vt -- output/synthetic-fmp4.mp4
 ```
 
+任意の sample payload だけ読む場合:
+
+```bash
+cargo run -p video-hw-fmp4 --example read_fmp4_file -- sample-videos/sample-10s.mp4 --sample-id 0
+```
+
 - slider GUI read (seek/playback + decoded preview + backend select)
 
 ```bash
@@ -108,6 +135,13 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `--strict-backend` を付けると選択 backend 固定で decode します。
 - status は tracing で出力します。既定ログレベルは `warn`（warn/error のみ）で、`RUST_LOG=info` などを指定すると詳細ログを確認できます。
 - 通常 MP4（non-fragmented）も読めます（例: `sample-videos/sample-10s.mp4`）。
+- GOP replay + decode submit/reap は crate 側の `FrameDecoder` が担当し、example 側は preview/cache 方針だけを持ちます。
+- 人物検出、HISDF 解釈、bbox crop、tracking、検証 artifact 保存は `video-hw-fmp4` の責務外です。上位層は `sample_at_pts`、`GopCursor`、`decode_range`、`cache_stats` を組み合わせて必要な frame/window を取得します。
+- 既定は `IndexMode::Eager` です。`IndexMode::Lazy` は `next_sample` や `read_sample` で必要分だけ metadata index を延長し、`samples(track)` のような完全な slice を返す API では EOF まで index 化します。
+- `sample_at_pts_with_delta` は `SampleLookupMatch::{Exact,Previous,FirstAfter}` で完全一致/近傍一致を返します。長い区間は `decode_range_iter`、中心sample周辺の短窓は `decode_window` を使えます。
+- `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
+- `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由を返します。
+- `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。
 
 ライトな確認だけ行う場合:
 
@@ -119,6 +153,13 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 
 ```bash
 cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nvidia backend-intel backend-vulkan' -- sample-videos/sample-10s.mp4 --backend nvidia --smoke-test
+```
+
+Lazy/Eager index と任意の decode smoke をまとめて見る場合:
+
+```bash
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4 --decode-features 'backend-nvidia backend-intel backend-vulkan' --decode-backend auto
 ```
 
 - headless camera record

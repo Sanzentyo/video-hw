@@ -46,16 +46,18 @@ fn sync_writer_and_reader_roundtrip_h264() -> Result<()> {
     assert!(summary.bytes_written > 0);
     assert_eq!(summary.packets_seen, 30);
 
-    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig {
-        input_path: output_path.clone(),
-    })
-    .into_sync_session()?;
+    let mut reader =
+        Fmp4Reader::new(Fmp4ReaderConfig::new(output_path.clone())).into_sync_session()?;
     assert_eq!(reader.tracks().len(), 1);
+    let track_id = reader.tracks()[0].track_id;
+    let indexed_samples = reader.samples(track_id)?;
+    assert_eq!(indexed_samples.len(), 30);
+    assert!(indexed_samples[0].keyframe);
 
     let mut samples = 0_u64;
     while let Some(sample) = reader.next_sample()? {
         if samples == 0 {
-            assert!(sample.keyframe);
+            assert!(sample.meta.keyframe);
             assert_eq!(sample.codec(), Some(Codec::H264));
             assert!(!sample.to_annexb()?.is_empty());
             assert_eq!(reader.tracks()[0].codec(), Some(Codec::H264));
@@ -103,16 +105,18 @@ fn sync_writer_and_reader_roundtrip_hevc() -> Result<()> {
     assert!(summary.bytes_written > 0);
     assert_eq!(summary.packets_seen, 30);
 
-    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig {
-        input_path: output_path.clone(),
-    })
-    .into_sync_session()?;
+    let mut reader =
+        Fmp4Reader::new(Fmp4ReaderConfig::new(output_path.clone())).into_sync_session()?;
     assert_eq!(reader.tracks().len(), 1);
+    let track_id = reader.tracks()[0].track_id;
+    let indexed_samples = reader.samples(track_id)?;
+    assert_eq!(indexed_samples.len(), 30);
+    assert!(indexed_samples[0].keyframe);
 
     let mut samples = 0_u64;
     while let Some(sample) = reader.next_sample()? {
         if samples == 0 {
-            assert!(sample.keyframe);
+            assert!(sample.meta.keyframe);
             assert_eq!(sample.codec(), Some(Codec::Hevc));
             assert!(!sample.to_annexb()?.is_empty());
             assert_eq!(reader.tracks()[0].codec(), Some(Codec::Hevc));

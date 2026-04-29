@@ -1,12 +1,24 @@
 mod config;
 mod core;
+mod decode;
 #[cfg(feature = "async-session")]
 mod session_async;
 mod state;
 
-pub use config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track};
+pub use config::{
+    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
+    Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
+    SampleMeta, SampleRange, SampleReadStats, TrackId, TrackReadStats,
+};
+pub use core::EncodedSampleIter;
+pub use decode::{
+    DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, FrameDecodeRangeRequest,
+    FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult, FrameDecodeWindowRequest,
+    FrameDecoder, GopCursor,
+};
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
+pub use shiguredo_mp4::TrackKind;
 #[cfg(feature = "async-session")]
 pub use state::AsyncReading;
 pub use state::{Finished, ReaderReady, SyncReading};
@@ -63,12 +75,72 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.tracks()
     }
 
-    pub fn next_sample(&mut self) -> Result<Option<Fmp4ReadSample>> {
+    pub fn samples(&mut self, track: TrackId) -> Result<&[SampleMeta]> {
+        self.state.core.samples(track)
+    }
+
+    pub fn sample_meta(&mut self, sample: SampleId) -> Option<&SampleMeta> {
+        self.state.core.sample_meta(sample)
+    }
+
+    pub fn iter_samples(&mut self, track: TrackId) -> Result<std::slice::Iter<'_, SampleMeta>> {
+        self.state.core.iter_samples(track)
+    }
+
+    pub fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+        self.state.core.sample_at_pts(track, pts)
+    }
+
+    pub fn sample_at_pts_with_delta(
+        &mut self,
+        track: TrackId,
+        pts: MediaTime,
+    ) -> Option<SampleLookup> {
+        self.state.core.sample_at_pts_with_delta(track, pts)
+    }
+
+    pub fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
+        self.state.core.keyframe_before(sample)
+    }
+
+    pub fn gop_for_sample(&mut self, sample: SampleId) -> Option<GopSegment> {
+        self.state.core.gop_for_sample(sample)
+    }
+
+    pub fn read_sample(&mut self, sample: SampleId) -> Result<EncodedSample> {
+        self.state.core.read_sample(sample)
+    }
+
+    pub fn read_gop(&mut self, sample: SampleId) -> Result<Vec<EncodedSample>> {
+        self.state.core.read_gop(sample)
+    }
+
+    pub fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.core.next_sample()
+    }
+
+    pub fn iter_gop_for_sample(&mut self, sample: SampleId) -> Result<EncodedSampleIter<'_>> {
+        self.state.core.iter_gop_for_sample(sample)
+    }
+
+    pub fn iter_encoded(&mut self, segment: GopSegment) -> Result<EncodedSampleIter<'_>> {
+        self.state.core.encoded_iter(segment)
     }
 
     pub fn status(&self) -> Fmp4ReaderStatus {
         self.state.core.status()
+    }
+
+    pub fn cache_stats(&self) -> RangeCacheStats {
+        self.state.core.cache_stats()
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.state.core.clear_cache();
+    }
+
+    pub fn index_snapshot(&mut self) -> Result<Mp4IndexSnapshot> {
+        self.state.core.index_snapshot()
     }
 
     pub fn finish(self) -> Fmp4Reader<Finished> {
@@ -88,7 +160,7 @@ impl Fmp4Reader<AsyncReading> {
         &self.state.tracks
     }
 
-    pub async fn next_sample(&mut self) -> Result<Option<Fmp4ReadSample>> {
+    pub async fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.handle.next_sample().await
     }
 

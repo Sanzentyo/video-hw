@@ -996,8 +996,9 @@ fn sort_hevc_display_order_frames(
         .into_iter()
         .enumerate()
         .map(|(display_idx, (_, mut frame))| {
-            frame.pts_90k =
-                Some(start_pts_90k.saturating_add(usize_to_i64(display_idx) * pts_step));
+            frame.pts_90k = Some(
+                start_pts_90k.saturating_add(usize_to_i64(display_idx).saturating_mul(pts_step)),
+            );
             frame
         })
         .collect()
@@ -1013,6 +1014,8 @@ fn u64_to_i64(value: u64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -1174,6 +1177,53 @@ mod tests {
         assert_eq!(
             pts_and_markers,
             vec![(9_000, 10), (12_000, 20), (15_000, 30)]
+        );
+    }
+
+    #[test]
+    fn hevc_display_order_sorting_reorders_repository_decode_order_pocs() {
+        let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif.h265");
+        let bitstream = std::fs::read(sample_path).expect("foreman_cif.h265 should be readable");
+        let headers = extract_hevc_access_unit_headers(&bitstream)
+            .expect("HEVC access-unit headers should parse");
+        let first_gop_pocs = headers
+            .iter()
+            .take(5)
+            .map(|header| header.poc_full)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_gop_pocs,
+            vec![0, 4, 2, 1, 3],
+            "repository sample should exercise display-order sorting"
+        );
+
+        let frames_with_poc = first_gop_pocs
+            .iter()
+            .map(|poc| {
+                let mut frame = metadata_only_frame(2, 2, None);
+                frame.decode_info_flags = Some(*poc as u32);
+                (*poc, frame)
+            })
+            .collect::<Vec<_>>();
+        let frames = sort_hevc_display_order_frames(frames_with_poc, 0, decode_pts_step(30));
+
+        let pocs_and_pts = frames
+            .into_iter()
+            .map(|frame| {
+                (
+                    frame.decode_info_flags.expect("poc marker should remain"),
+                    frame.pts_90k.expect("display-order PTS should be assigned"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            pocs_and_pts,
+            vec![(0, 0), (1, 3_000), (2, 6_000), (3, 9_000), (4, 12_000)]
         );
     }
 }

@@ -1,7 +1,7 @@
 use super::config::Fmp4ReaderStatus;
 
 use super::{
-    config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4Track},
+    config::{EncodedSample, Fmp4ReaderConfig, Fmp4Track},
     core::ReaderCore,
 };
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +14,7 @@ pub enum AsyncReaderEvent {
 
 enum AsyncReaderCommand {
     NextSample {
-        reply: tokio::sync::oneshot::Sender<Result<Option<Fmp4ReadSample>>>,
+        reply: tokio::sync::oneshot::Sender<Result<Option<EncodedSample>>>,
     },
     Finish {
         reply: tokio::sync::oneshot::Sender<Result<Fmp4ReaderStatus>>,
@@ -62,7 +62,7 @@ impl AsyncReaderHandle {
         ))
     }
 
-    pub(crate) async fn next_sample(&mut self) -> Result<Option<Fmp4ReadSample>> {
+    pub(crate) async fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.command_tx
             .send(AsyncReaderCommand::NextSample { reply: reply_tx })

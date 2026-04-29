@@ -84,11 +84,30 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - Vulkan HEVC decode は probe ベースで、`VK_KHR_video_queue` / `VK_KHR_video_decode_queue` / `VK_KHR_video_decode_h265` と `VIDEO_DECODE_KHR` 対応 queue family を前提にする
 - `DecodeOutputMode::Metadata` が基本。`DecodeOutputMode::Nv12` / `Rgb24` は bootstrap / submit / readback probe が通る場合のみ返せる
 - 非 metadata 出力は現状 `G8_B8R8_2PLANE_420_UNORM` readback と偶数の coded extent を前提にし、stream が probe で覆える access unit 数を超えると `UnsupportedConfig` になる
+- Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は DPB 参照付きの submit path を既定で使う。品質確認では FFmpeg software decode 参照に対して PSNR を確認する
+- Vulkan HEVC encode は未実装で、`UnsupportedConfig` を返す
 - 同一 bitstream の bootstrap 結果は `submit_probe_access_unit_limit` と合わせてキャッシュされ、Metadata / Nv12 / Rgb24 の連続実行で毎回 device/session を作り直さない
-- 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけで、`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
+- 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけ。既定は `on`。`off` は診断用で、B/P frame の参照品質が大きく落ちる。`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
 - decode 失敗時の blocker message には `session bootstrap probe` / `decode_submit_skeleton` / `decode_submit_execution` が出る。`experimental_dpb_mode` / `experimental_dpb_status`、readback 統計、`submitted_access_units` もここにまとまる
 - `VIDEO_HW_VULKAN_HEVC_DEBUG_READBACK_SUMS=1` は内部診断用で、readback の Y-plane 集計を `stderr` に出す
 - そのほかの `VIDEO_HW_VULKAN_HEVC_*` 環境変数は、`vulkan_hevc_decode` 内の probe / fault-injection 用の内部スイッチで、strict usage ではサポート対象にしない
+
+### 2.4 検証コマンド
+
+- encoder / decoder の出力品質を確認する場合は、Rust script の `cargo +nightly -Zscript scripts/quality_check.rs` を使う
+- Windows で FFmpeg が `PATH` にない場合は `FFMPEG_PATH` を明示する:
+
+```powershell
+$env:FFMPEG_PATH = '<path-to-ffmpeg.exe>'
+cargo +nightly -Zscript scripts/quality_check.rs
+```
+
+- Intel decode の `Loader::new_session: NotFound` は oneVPL runtime/driver が見つからない状態を示す。画質劣化ではなく runtime availability の問題として扱う
+- fMP4 reader の性能を見る場合は、open/index 時間、`sample_at_pts`、`keyframe_before`、`read_sample`、GOP 範囲の `iter_encoded` を分けて測る。payload は on-demand read なので、metadata-only 操作と payload read を同じ指標に混ぜない。payload read の実績は `status().track_reads` / `status().sample_reads` / `cache_stats()` を記録する
+- fMP4 reader の `IndexMode::Eager` / `IndexMode::Lazy` を確認する場合は `cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4` を使う。通常 MP4 / fMP4 の両方を確認する場合は `sample-videos/foreman_cif_fmp4.mp4` でも実行する。decode checkpoint まで確認する場合は `--decode-features "backend-vulkan"` のように backend feature を渡す
+- PTS seek の厳密性が必要な場合は `sample_at_pts_with_delta` を使い、`SampleLookupMatch::Exact` / `Previous` / `FirstAfter` を記録する。完全一致かどうかを bool 推定しない
+- 長い decode 区間は `decode_range_iter` で逐次処理し、中心sample周辺の短窓は `decode_window` を使う。decode結果には `DecodeDiagnostics` を保存し、`requested_backend`、`resolved_backend`、`fallback_used`、`fallback_reason` を区別する
+- fMP4 metadata/report を JSON 等へ保存する利用者は `video-hw-fmp4` の `serde` feature を有効化する。`SampleEntry` は外部 runtime 型なので serde 出力には含めず、deserialization 後は `sample_entry=None` として扱う。decode や `to_annexb()` が必要な場合は元ファイルを reader で開き直して `read_sample()` する。`DecodeDiagnostics` の `resolved_backend` を deserialize する場合は、保存時に使った backend feature を読み込み側でも有効化する
 
 #### Intel backend トラブルシュート（Windows）
 

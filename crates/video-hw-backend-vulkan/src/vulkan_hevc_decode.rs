@@ -2105,12 +2105,51 @@ fn probe_hevc_decode_submit_execution(
             }
             let is_reference = experimental_dpb_enabled
                 && is_hevc_reference_nal_type(access_unit.header.nal_unit_type);
+            // Use the full (unwrapped) POC computed during payload building. Resolve the
+            // references before choosing the destination slot so the allocator can avoid
+            // overwriting a picture that this command is about to read.
+            let current_pic_order_cnt_val = access_unit.header.poc_full;
+            let selected_references = if experimental_dpb_enabled && !is_irap {
+                if let Some(ref inline_pocs) = access_unit.inline_short_term_ref_pic_set_pocs {
+                    select_hevc_references_by_inline_poc(&active_reference_slots, inline_pocs)
+                } else {
+                    let count_limits = resolve_hevc_ref_pic_set_usage_limits(
+                        &parameter_sets.parsed_sps,
+                        access_unit.short_term_ref_pic_set_idx,
+                    )
+                    .or_else(|| {
+                        resolve_hevc_slice_type_reference_usage_limits(
+                            &payload.parsed_pps,
+                            access_unit.slice_type,
+                        )
+                    });
+                    let candidates = active_reference_slots
+                        .iter()
+                        .rev()
+                        .take(HEVC_REF_PIC_SET_LIST_SIZE)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if let Some((max_before, max_after)) = count_limits {
+                        select_hevc_references_for_ref_pic_set(
+                            &candidates,
+                            current_pic_order_cnt_val,
+                            max_before.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                            max_after.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                        )
+                    } else {
+                        candidates
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             let slot = select_hevc_decode_dpb_slot(
                 experimental_dpb_enabled,
                 is_reference,
                 dpb_slot_count,
                 &mut next_reference_slot,
                 &active_reference_slots,
+                &selected_references,
             );
             if experimental_dpb_enabled {
                 // Eviction-triggered copy: if this slot is currently occupied by a reference frame
@@ -2176,8 +2215,6 @@ fn probe_hevc_decode_submit_execution(
                 }
                 active_reference_slots.retain(|entry| entry.slot != slot);
             }
-            // Use the full (unwrapped) POC computed during payload building.
-            let current_pic_order_cnt_val = access_unit.header.poc_full;
             // Non-COINCIDE mode only: transition a reference slot back from DPB_KHR to DST_KHR
             // before decoding into it again.  In experimental (COINCIDE) mode, all images stay
             // in DPB_KHR; decoding into DPB_KHR is valid in COINCIDE (DPB = decode-dst), so no
@@ -2230,42 +2267,6 @@ fn probe_hevc_decode_submit_execution(
             std_picture_info_flags.set_short_term_ref_pic_set_sps_flag(bool_to_u32(
                 access_unit.short_term_ref_pic_set_idx.is_some(),
             ));
-            let selected_references = if experimental_dpb_enabled && !is_irap {
-                if let Some(ref inline_pocs) = access_unit.inline_short_term_ref_pic_set_pocs {
-                    // Inline RPS: select references by exact POC match from the bitstream.
-                    select_hevc_references_by_inline_poc(&active_reference_slots, inline_pocs)
-                } else {
-                    // SPS-indexed RPS or slice-type fallback: count-based recency selection.
-                    let count_limits = resolve_hevc_ref_pic_set_usage_limits(
-                        &parameter_sets.parsed_sps,
-                        access_unit.short_term_ref_pic_set_idx,
-                    )
-                    .or_else(|| {
-                        resolve_hevc_slice_type_reference_usage_limits(
-                            &payload.parsed_pps,
-                            access_unit.slice_type,
-                        )
-                    });
-                    let candidates = active_reference_slots
-                        .iter()
-                        .rev()
-                        .take(HEVC_REF_PIC_SET_LIST_SIZE)
-                        .copied()
-                        .collect::<Vec<_>>();
-                    if let Some((max_before, max_after)) = count_limits {
-                        select_hevc_references_for_ref_pic_set(
-                            &candidates,
-                            current_pic_order_cnt_val,
-                            max_before.min(HEVC_REF_PIC_SET_LIST_SIZE),
-                            max_after.min(HEVC_REF_PIC_SET_LIST_SIZE),
-                        )
-                    } else {
-                        candidates
-                    }
-                }
-            } else {
-                Vec::new()
-            };
             let (
                 reference_pic_set_st_curr_before,
                 reference_pic_set_st_curr_after,
@@ -2936,13 +2937,22 @@ fn align_up(value: u64, alignment: u64) -> u64 {
 }
 
 fn hevc_experimental_dpb_mode() -> HevcExperimentalDpbMode {
-    match std::env::var("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB")
-        .ok()
-        .as_deref()
-    {
-        Some("1" | "on" | "true" | "full") => HevcExperimentalDpbMode::On,
-        Some("auto") => HevcExperimentalDpbMode::Auto,
-        _ => HevcExperimentalDpbMode::Off,
+    parse_hevc_experimental_dpb_mode(
+        std::env::var("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_hevc_experimental_dpb_mode(value: Option<&str>) -> HevcExperimentalDpbMode {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) => match value.as_str() {
+            "0" | "off" | "false" | "disable" | "disabled" => HevcExperimentalDpbMode::Off,
+            "auto" => HevcExperimentalDpbMode::Auto,
+            "1" | "on" | "true" | "full" | "" => HevcExperimentalDpbMode::On,
+            _ => HevcExperimentalDpbMode::On,
+        },
+        None => HevcExperimentalDpbMode::On,
     }
 }
 
@@ -4708,6 +4718,7 @@ fn select_hevc_decode_dpb_slot(
     dpb_slot_count: usize,
     next_reference_slot: &mut usize,
     active_reference_slots: &[HevcActiveReferenceSlot],
+    selected_references: &[HevcActiveReferenceSlot],
 ) -> usize {
     if !experimental_dpb_enabled || dpb_slot_count == 0 {
         return 0;
@@ -4717,9 +4728,23 @@ fn select_hevc_decode_dpb_slot(
             return 0;
         }
         let reference_slot_count = dpb_slot_count - 1;
-        let slot = 1 + (*next_reference_slot % reference_slot_count);
-        *next_reference_slot = next_reference_slot.saturating_add(1);
-        return slot;
+        for _ in 0..reference_slot_count {
+            let slot = 1 + (*next_reference_slot % reference_slot_count);
+            *next_reference_slot = next_reference_slot.saturating_add(1);
+            if !selected_references
+                .iter()
+                .any(|reference| reference.slot == slot)
+            {
+                return slot;
+            }
+        }
+        return (1..dpb_slot_count)
+            .find(|candidate| {
+                !active_reference_slots
+                    .iter()
+                    .any(|reference| reference.slot == *candidate)
+            })
+            .unwrap_or(1);
     }
 
     let non_reference_slot = 0_usize;
@@ -5779,6 +5804,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_hevc_experimental_dpb_mode_defaults_to_on() {
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(None),
+            HevcExperimentalDpbMode::On
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("")),
+            HevcExperimentalDpbMode::On
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("unknown")),
+            HevcExperimentalDpbMode::On
+        );
+    }
+
+    #[test]
+    fn parse_hevc_experimental_dpb_mode_accepts_explicit_overrides() {
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("off")),
+            HevcExperimentalDpbMode::Off
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("auto")),
+            HevcExperimentalDpbMode::Auto
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("on")),
+            HevcExperimentalDpbMode::On
+        );
+    }
+
+    #[test]
     fn format_hevc_experimental_dpb_status_surfaces_auto_marker_reason() {
         let marker_path = PathBuf::from("C:\\temp\\video-hw-vulkan-hevc-dpb-inflight.flag");
         let status = format_hevc_experimental_dpb_status(
@@ -5811,9 +5868,31 @@ mod tests {
     fn select_hevc_decode_dpb_slot_rotates_reference_slots() {
         let mut next_reference_slot = 0_usize;
         let active = Vec::new();
-        let first = select_hevc_decode_dpb_slot(true, true, 4, &mut next_reference_slot, &active);
-        let second = select_hevc_decode_dpb_slot(true, true, 4, &mut next_reference_slot, &active);
-        let third = select_hevc_decode_dpb_slot(true, true, 4, &mut next_reference_slot, &active);
+        let selected = Vec::new();
+        let first = select_hevc_decode_dpb_slot(
+            true,
+            true,
+            4,
+            &mut next_reference_slot,
+            &active,
+            &selected,
+        );
+        let second = select_hevc_decode_dpb_slot(
+            true,
+            true,
+            4,
+            &mut next_reference_slot,
+            &active,
+            &selected,
+        );
+        let third = select_hevc_decode_dpb_slot(
+            true,
+            true,
+            4,
+            &mut next_reference_slot,
+            &active,
+            &selected,
+        );
         assert_eq!(first, 1);
         assert_eq!(second, 2);
         assert_eq!(third, 3);
@@ -5826,8 +5905,35 @@ mod tests {
             slot: 0,
             pic_order_cnt_val: 0,
         }];
-        let slot = select_hevc_decode_dpb_slot(true, false, 4, &mut next_reference_slot, &active);
+        let selected = Vec::new();
+        let slot = select_hevc_decode_dpb_slot(
+            true,
+            false,
+            4,
+            &mut next_reference_slot,
+            &active,
+            &selected,
+        );
         assert_eq!(slot, 1);
+    }
+
+    #[test]
+    fn select_hevc_decode_dpb_slot_avoids_current_references() {
+        let mut next_reference_slot = 0_usize;
+        let active = vec![HevcActiveReferenceSlot {
+            slot: 1,
+            pic_order_cnt_val: 0,
+        }];
+        let selected = active.clone();
+        let slot = select_hevc_decode_dpb_slot(
+            true,
+            true,
+            4,
+            &mut next_reference_slot,
+            &active,
+            &selected,
+        );
+        assert_eq!(slot, 2);
     }
 
     #[test]

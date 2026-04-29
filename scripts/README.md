@@ -109,6 +109,22 @@ cargo +nightly -Zscript scripts/setup_onevpl.rs --apply --force
 - 生成した `mfx.h` / `libvpl.dll` に合わせた `LIBVPL_INCLUDE_PATH` / `PATH` の設定例を出力する（`LIBVPL_LIBRARY_PATH` は通常不要）
 - setup 後の検証コマンド（`clippy` / `test`）も出力する
 
+### 8) fMP4 Lazy index 検証
+
+```bash
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/foreman_cif_fmp4.mp4
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4 --decode-features "backend-nvidia backend-intel backend-vulkan" --decode-backend auto
+```
+
+- `IndexMode::Eager` が open 時に metadata index を構築することを確認する。
+- `IndexMode::Lazy` が open 時に sample metadata を構築しないことを確認する。
+- `next_sample` と `read_sample(SampleId)` が必要な位置までだけ index を延長することを確認する。
+- `samples(track)` が完全な metadata slice を返すため EOF まで index 化することを確認する。
+- first / middle / last checkpoint で `sample_at_pts_with_delta` の `Exact`、GOP lookup、`index_snapshot`、`clear_cache` を確認する。
+- `--decode-features` を渡すと `read_fmp4_slider_gui --smoke-test` を子プロセスで起動し、checkpoint GOP decode と `DecodeDiagnostics` 出力を確認する。
+- 通常 MP4 と fragmented MP4 の両方で使える。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること
