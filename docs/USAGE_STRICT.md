@@ -84,10 +84,10 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - Vulkan HEVC decode は probe ベースで、`VK_KHR_video_queue` / `VK_KHR_video_decode_queue` / `VK_KHR_video_decode_h265` と `VIDEO_DECODE_KHR` 対応 queue family を前提にする
 - `DecodeOutputMode::Metadata` が基本。`DecodeOutputMode::Nv12` / `Rgb24` は bootstrap / submit / readback probe が通る場合のみ返せる
 - 非 metadata 出力は現状 `G8_B8R8_2PLANE_420_UNORM` readback と偶数の coded extent を前提にし、stream が probe で覆える access unit 数を超えると `UnsupportedConfig` になる
-- Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は実験段階。フレーム内容の正確性を必要とする用途では H.264 の Vulkan decode、または NVIDIA / Intel / VideoToolbox などの安定 backend を優先する
+- Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は DPB 参照付きの submit path を既定で使う。品質確認では FFmpeg software decode 参照に対して PSNR を確認する
 - Vulkan HEVC encode は未実装で、`UnsupportedConfig` を返す
 - 同一 bitstream の bootstrap 結果は `submit_probe_access_unit_limit` と合わせてキャッシュされ、Metadata / Nv12 / Rgb24 の連続実行で毎回 device/session を作り直さない
-- 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけで、`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
+- 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけ。既定は `on`。`off` は診断用で、B/P frame の参照品質が大きく落ちる。`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
 - decode 失敗時の blocker message には `session bootstrap probe` / `decode_submit_skeleton` / `decode_submit_execution` が出る。`experimental_dpb_mode` / `experimental_dpb_status`、readback 統計、`submitted_access_units` もここにまとまる
 - `VIDEO_HW_VULKAN_HEVC_DEBUG_READBACK_SUMS=1` は内部診断用で、readback の Y-plane 集計を `stderr` に出す
 - そのほかの `VIDEO_HW_VULKAN_HEVC_*` 環境変数は、`vulkan_hevc_decode` 内の probe / fault-injection 用の内部スイッチで、strict usage ではサポート対象にしない

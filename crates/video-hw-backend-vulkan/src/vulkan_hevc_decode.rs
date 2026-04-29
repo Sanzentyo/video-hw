@@ -2937,13 +2937,22 @@ fn align_up(value: u64, alignment: u64) -> u64 {
 }
 
 fn hevc_experimental_dpb_mode() -> HevcExperimentalDpbMode {
-    match std::env::var("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB")
-        .ok()
-        .as_deref()
-    {
-        Some("1" | "on" | "true" | "full") => HevcExperimentalDpbMode::On,
-        Some("auto") => HevcExperimentalDpbMode::Auto,
-        _ => HevcExperimentalDpbMode::Off,
+    parse_hevc_experimental_dpb_mode(
+        std::env::var("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_hevc_experimental_dpb_mode(value: Option<&str>) -> HevcExperimentalDpbMode {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) => match value.as_str() {
+            "0" | "off" | "false" | "disable" | "disabled" => HevcExperimentalDpbMode::Off,
+            "auto" => HevcExperimentalDpbMode::Auto,
+            "1" | "on" | "true" | "full" | "" => HevcExperimentalDpbMode::On,
+            _ => HevcExperimentalDpbMode::On,
+        },
+        None => HevcExperimentalDpbMode::On,
     }
 }
 
@@ -5792,6 +5801,38 @@ mod tests {
         let decision = decide_hevc_experimental_dpb(HevcExperimentalDpbMode::On, false, true);
         assert_eq!(decision, HevcExperimentalDpbDecision::EnabledOn);
         assert!(decision.enabled());
+    }
+
+    #[test]
+    fn parse_hevc_experimental_dpb_mode_defaults_to_on() {
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(None),
+            HevcExperimentalDpbMode::On
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("")),
+            HevcExperimentalDpbMode::On
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("unknown")),
+            HevcExperimentalDpbMode::On
+        );
+    }
+
+    #[test]
+    fn parse_hevc_experimental_dpb_mode_accepts_explicit_overrides() {
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("off")),
+            HevcExperimentalDpbMode::Off
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("auto")),
+            HevcExperimentalDpbMode::Auto
+        );
+        assert_eq!(
+            parse_hevc_experimental_dpb_mode(Some("on")),
+            HevcExperimentalDpbMode::On
+        );
     }
 
     #[test]
