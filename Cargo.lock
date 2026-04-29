@@ -4551,6 +4551,8 @@ dependencies = [
  "anyhow",
  "clap",
  "eframe",
+ "serde",
+ "serde_json",
  "shiguredo_mp4",
  "shiguredo_video_device",
  "tokio",

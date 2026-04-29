@@ -4,7 +4,36 @@ use anyhow::Context;
 use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
 use video_hw::{Codec, EncodedLayout};
 
+#[cfg(feature = "serde")]
+mod serde_track_kind {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use shiguredo_mp4::TrackKind;
+
+    pub fn serialize<S>(kind: &TrackKind, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match kind {
+            TrackKind::Audio => "audio",
+            TrackKind::Video => "video",
+        };
+        serializer.serialize_str(value)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<TrackKind, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "audio" => Ok(TrackKind::Audio),
+            "video" => Ok(TrackKind::Video),
+            other => Err(de::Error::unknown_variant(other, &["audio", "video"])),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackId(pub u32);
 
 impl fmt::Display for TrackId {
@@ -14,6 +43,7 @@ impl fmt::Display for TrackId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SampleId(pub u64);
 
 impl fmt::Display for SampleId {
@@ -23,6 +53,7 @@ impl fmt::Display for SampleId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MediaTime {
     pub ticks: u64,
     pub timescale: NonZeroU32,
@@ -35,6 +66,8 @@ impl MediaTime {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum IndexMode {
     /// Build the full metadata index while opening the reader.
     #[default]
@@ -48,6 +81,7 @@ pub enum IndexMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RangeCacheConfig {
     pub chunk_size: usize,
     pub max_bytes: usize,
@@ -65,6 +99,7 @@ impl Default for RangeCacheConfig {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fmp4ReaderConfig {
     pub input_path: PathBuf,
     pub index_mode: IndexMode,
@@ -82,11 +117,14 @@ impl Fmp4ReaderConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fmp4Track {
     pub track_id: TrackId,
+    #[cfg_attr(feature = "serde", serde(with = "serde_track_kind"))]
     pub kind: TrackKind,
     pub duration: u64,
     pub timescale: NonZeroU32,
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     pub sample_entry: Option<SampleEntry>,
 }
 
@@ -105,6 +143,7 @@ impl Fmp4Track {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SampleMeta {
     pub sample_id: SampleId,
     pub track_id: TrackId,
@@ -118,12 +157,14 @@ pub struct SampleMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mp4IndexSnapshot {
     pub tracks: Vec<Fmp4Track>,
     pub samples: Vec<SampleMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GopSegment {
     pub track_id: TrackId,
     pub keyframe_sample: SampleId,
@@ -133,6 +174,7 @@ pub struct GopSegment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SampleRange {
     pub track_id: TrackId,
     pub start_sample: SampleId,
@@ -140,6 +182,8 @@ pub struct SampleRange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum SampleLookupMatch {
     Exact,
     Previous,
@@ -147,6 +191,7 @@ pub enum SampleLookupMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SampleLookup {
     pub requested_pts: MediaTime,
     pub matched_sample: SampleId,
@@ -157,9 +202,12 @@ pub struct SampleLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EncodedSample {
     pub meta: SampleMeta,
+    #[cfg_attr(feature = "serde", serde(with = "serde_track_kind"))]
     pub kind: TrackKind,
+    #[cfg_attr(feature = "serde", serde(skip, default))]
     pub sample_entry: Option<SampleEntry>,
     pub data: Vec<u8>,
 }
@@ -215,6 +263,7 @@ impl EncodedSample {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RangeCacheStats {
     pub hits: u64,
     pub misses: u64,
@@ -223,18 +272,21 @@ pub struct RangeCacheStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackReadStats {
     pub samples_read: u64,
     pub bytes_read: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SampleReadStats {
     pub reads: u64,
     pub bytes_read: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fmp4ReaderStatus {
     pub samples_indexed: u64,
     pub samples_read: u64,
@@ -431,6 +483,64 @@ mod tests {
             data: vec![0, 0, 2, 0x26, 0x01],
         };
         assert!(invalid.to_annexb().is_err());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrips_reader_metadata_and_status() {
+        let timescale = NonZeroU32::new(90_000).expect("non-zero timescale");
+        let track = Fmp4Track {
+            track_id: TrackId(7),
+            kind: TrackKind::Video,
+            duration: 9_000,
+            timescale,
+            sample_entry: Some(h264_sample_entry(3)),
+        };
+        let snapshot = Mp4IndexSnapshot {
+            tracks: vec![track],
+            samples: vec![test_meta(true)],
+        };
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        assert!(json.contains("\"kind\":\"video\""));
+        assert!(!json.contains("sample_entry"));
+        let decoded: Mp4IndexSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+        assert_eq!(decoded.tracks[0].kind, TrackKind::Video);
+        assert!(decoded.tracks[0].sample_entry.is_none());
+        assert_eq!(decoded.samples, snapshot.samples);
+
+        let lookup = SampleLookup {
+            requested_pts: MediaTime::new(1, timescale),
+            matched_sample: SampleId(0),
+            matched_pts: MediaTime::new(0, timescale),
+            delta_ticks: -1,
+            delta_seconds: -1.0 / 90_000.0,
+            match_type: SampleLookupMatch::Previous,
+        };
+        let lookup_json = serde_json::to_string(&lookup).expect("serialize lookup");
+        assert!(lookup_json.contains("\"match_type\":\"previous\""));
+
+        let mut status = Fmp4ReaderStatus {
+            samples_indexed: 1,
+            ..Fmp4ReaderStatus::default()
+        };
+        status.track_reads.insert(
+            TrackId(7),
+            TrackReadStats {
+                samples_read: 1,
+                bytes_read: 6,
+            },
+        );
+        status.sample_reads.insert(
+            SampleId(0),
+            SampleReadStats {
+                reads: 1,
+                bytes_read: 6,
+            },
+        );
+        let status_json = serde_json::to_string(&status).expect("serialize status");
+        let status_roundtrip: Fmp4ReaderStatus =
+            serde_json::from_str(&status_json).expect("deserialize status");
+        assert_eq!(status_roundtrip, status);
     }
 
     fn h264_sample_entry(length_size_minus_one: u8) -> SampleEntry {

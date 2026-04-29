@@ -8,6 +8,7 @@ readme = "README.md"
 [features]
 default = []
 async-session = ["dep:tokio"]
+serde = ["dep:serde"]
 unstable-raw-inputs = ["video-hw/unstable-raw-inputs"]
 backend-vt = ["video-hw/backend-vt"]
 backend-nvidia = ["video-hw/backend-nvidia"]
@@ -19,10 +20,12 @@ anyhow = "1.0.101"
 shiguredo_mp4 = "2026.2.0"
 video-hw = { path = "../video-hw", default-features = false }
 tokio = { version = "1.50.0", features = ["rt", "sync"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [dev-dependencies]
 clap = { version = "4.5.59", features = ["derive"] }
 eframe = "0.33.3"
+serde_json = "1.0.149"
 shiguredo_video_device = "2026.1.0-canary.3"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }

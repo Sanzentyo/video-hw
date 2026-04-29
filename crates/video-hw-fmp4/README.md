@@ -22,6 +22,9 @@
 - `backend-nvidia`
 - `backend-intel`
 - `backend-vulkan`
+- `serde`
+  - reader metadata/report 型の `Serialize` / `Deserialize` を有効化します
+  - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
 
 ## Writer Example
 
@@ -137,6 +140,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `sample_at_pts_with_delta` は `SampleLookupMatch::{Exact,Previous,FirstAfter}` で完全一致/近傍一致を返します。長い区間は `decode_range_iter`、中心sample周辺の短窓は `decode_window` を使えます。
 - `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
 - `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由を返します。
+- `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。
 
 ライトな確認だけ行う場合:
 
