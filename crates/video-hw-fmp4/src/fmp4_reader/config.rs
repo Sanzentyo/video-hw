@@ -1,16 +1,83 @@
-use std::{num::NonZeroU32, path::PathBuf};
+use std::{fmt, num::NonZeroU32, path::PathBuf};
 
+use anyhow::Context;
 use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
 use video_hw::{Codec, EncodedLayout};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrackId(pub u32);
+
+impl fmt::Display for TrackId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SampleId(pub u64);
+
+impl fmt::Display for SampleId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MediaTime {
+    pub ticks: u64,
+    pub timescale: NonZeroU32,
+}
+
+impl MediaTime {
+    pub const fn new(ticks: u64, timescale: NonZeroU32) -> Self {
+        Self { ticks, timescale }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IndexMode {
+    #[default]
+    Eager,
+    Lazy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeCacheConfig {
+    pub chunk_size: usize,
+    pub max_bytes: usize,
+    pub read_ahead_chunks: usize,
+}
+
+impl Default for RangeCacheConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size: 8 * 1024 * 1024,
+            max_bytes: 512 * 1024 * 1024,
+            read_ahead_chunks: 1,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Fmp4ReaderConfig {
     pub input_path: PathBuf,
+    pub index_mode: IndexMode,
+    pub range_cache: RangeCacheConfig,
+}
+
+impl Fmp4ReaderConfig {
+    pub fn new(input_path: impl Into<PathBuf>) -> Self {
+        Self {
+            input_path: input_path.into(),
+            index_mode: IndexMode::default(),
+            range_cache: RangeCacheConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fmp4Track {
-    pub track_id: u32,
+    pub track_id: TrackId,
     pub kind: TrackKind,
     pub duration: u64,
     pub timescale: NonZeroU32,
@@ -32,18 +99,36 @@ impl Fmp4Track {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fmp4ReadSample {
-    pub track_id: u32,
-    pub kind: TrackKind,
-    pub sample_entry: Option<SampleEntry>,
-    pub keyframe: bool,
-    pub timestamp: u64,
+pub struct SampleMeta {
+    pub sample_id: SampleId,
+    pub track_id: TrackId,
+    pub offset: u64,
+    pub size: u32,
+    pub dts: MediaTime,
+    pub pts: MediaTime,
     pub duration: u32,
     pub composition_time_offset: Option<i64>,
+    pub keyframe: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GopSegment {
+    pub track_id: TrackId,
+    pub keyframe_sample: SampleId,
+    pub end_sample_exclusive: SampleId,
+    pub start_pts: MediaTime,
+    pub end_pts: MediaTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedSample {
+    pub meta: SampleMeta,
+    pub kind: TrackKind,
+    pub sample_entry: Option<SampleEntry>,
     pub data: Vec<u8>,
 }
 
-impl Fmp4ReadSample {
+impl EncodedSample {
     pub fn codec(&self) -> Option<Codec> {
         sample_entry_codec(self.sample_entry.as_ref())
     }
@@ -60,7 +145,7 @@ impl Fmp4ReadSample {
         match self.encoded_layout() {
             Some(EncodedLayout::Avcc) | Some(EncodedLayout::Hvcc) => {
                 let mut annexb = Vec::new();
-                if self.keyframe {
+                if self.meta.keyframe {
                     for parameter_set in self.parameter_sets() {
                         annexb.extend_from_slice(&[0, 0, 0, 1]);
                         annexb.extend_from_slice(&parameter_set);
@@ -95,10 +180,16 @@ impl Fmp4ReadSample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Fmp4ReaderStatus {
+    pub samples_indexed: u64,
     pub samples_read: u64,
+    pub bytes_read: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub cache_resident_bytes: usize,
 }
 
-fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<Codec> {
+pub(crate) fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<Codec> {
     match sample_entry? {
         SampleEntry::Avc1(_) => Some(Codec::H264),
         SampleEntry::Hev1(_) | SampleEntry::Hvc1(_) => Some(Codec::Hevc),
@@ -106,7 +197,7 @@ fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<Codec> {
     }
 }
 
-fn sample_entry_layout(sample_entry: Option<&SampleEntry>) -> Option<EncodedLayout> {
+pub(crate) fn sample_entry_layout(sample_entry: Option<&SampleEntry>) -> Option<EncodedLayout> {
     match sample_entry? {
         SampleEntry::Avc1(_) => Some(EncodedLayout::Avcc),
         SampleEntry::Hev1(_) | SampleEntry::Hvc1(_) => Some(EncodedLayout::Hvcc),
@@ -114,7 +205,7 @@ fn sample_entry_layout(sample_entry: Option<&SampleEntry>) -> Option<EncodedLayo
     }
 }
 
-fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) -> Vec<Vec<u8>> {
+pub(crate) fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) -> Vec<Vec<u8>> {
     match sample_entry {
         Some(SampleEntry::Avc1(avc1)) => avc1
             .avcc_box
@@ -138,8 +229,6 @@ fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) -> Vec<Vec<u8
         _ => Vec::new(),
     }
 }
-
-use anyhow::Context;
 
 #[cfg(test)]
 mod tests {
@@ -176,14 +265,10 @@ mod tests {
             },
             unknown_boxes: vec![],
         });
-        let sample = Fmp4ReadSample {
-            track_id: 1,
+        let sample = EncodedSample {
+            meta: test_meta(true),
             kind: TrackKind::Video,
             sample_entry: Some(sample_entry.clone()),
-            keyframe: true,
-            timestamp: 0,
-            duration: 3_000,
-            composition_time_offset: None,
             data: vec![0, 0, 0, 2, 0x65, 0x88],
         };
         assert_eq!(sample.codec(), Some(Codec::H264));
@@ -194,7 +279,7 @@ mod tests {
         assert!(annexb.starts_with(&[0, 0, 0, 1, 0x67]));
         assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
         let track = Fmp4Track {
-            track_id: 1,
+            track_id: TrackId(1),
             kind: TrackKind::Video,
             duration: 0,
             timescale: NonZeroU32::new(90_000).expect("non-zero timescale"),
@@ -255,14 +340,10 @@ mod tests {
             },
             unknown_boxes: vec![],
         });
-        let sample = Fmp4ReadSample {
-            track_id: 1,
+        let sample = EncodedSample {
+            meta: test_meta(true),
             kind: TrackKind::Video,
             sample_entry: Some(sample_entry.clone()),
-            keyframe: true,
-            timestamp: 0,
-            duration: 3_000,
-            composition_time_offset: None,
             data: vec![0, 0, 0, 2, 0x26, 0x01],
         };
         assert_eq!(sample.codec(), Some(Codec::Hevc));
@@ -273,7 +354,7 @@ mod tests {
         assert!(annexb.starts_with(&[0, 0, 0, 1, 0x40]));
         assert!(annexb.windows(5).any(|window| window == [0, 0, 0, 1, 0x26]));
         let track = Fmp4Track {
-            track_id: 1,
+            track_id: TrackId(1),
             kind: TrackKind::Video,
             duration: 0,
             timescale: NonZeroU32::new(90_000).expect("non-zero timescale"),
@@ -282,5 +363,20 @@ mod tests {
         assert_eq!(track.codec(), Some(Codec::Hevc));
         assert_eq!(track.encoded_layout(), Some(EncodedLayout::Hvcc));
         assert_eq!(track.parameter_sets().len(), 3);
+    }
+
+    fn test_meta(keyframe: bool) -> SampleMeta {
+        let timescale = NonZeroU32::new(90_000).expect("non-zero timescale");
+        SampleMeta {
+            sample_id: SampleId(0),
+            track_id: TrackId(1),
+            offset: 0,
+            size: 6,
+            dts: MediaTime::new(0, timescale),
+            pts: MediaTime::new(0, timescale),
+            duration: 3_000,
+            composition_time_offset: None,
+            keyframe,
+        }
     }
 }

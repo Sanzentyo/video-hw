@@ -68,14 +68,22 @@ use anyhow::Result;
 use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady};
 
 fn main() -> Result<()> {
-    let mut reader = Fmp4Reader::<Fmp4ReaderReady>::new(Fmp4ReaderConfig {
-        input_path: "output/example.mp4".into(),
-    })
+    let mut reader = Fmp4Reader::<Fmp4ReaderReady>::new(Fmp4ReaderConfig::new(
+        "output/example.mp4",
+    ))
     .into_sync_session()?;
+
+    for track in reader.tracks() {
+        println!("track={} samples={}", track.track_id, reader.samples(track.track_id)?.len());
+    }
 
     while let Some(sample) = reader.next_sample()? {
         let _annexb = sample.to_annexb()?;
-        println!("keyframe={}", sample.keyframe);
+        println!(
+            "sample={} keyframe={}",
+            sample.meta.sample_id,
+            sample.meta.keyframe
+        );
     }
     Ok(())
 }

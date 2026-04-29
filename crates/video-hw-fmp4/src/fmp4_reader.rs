@@ -4,7 +4,11 @@ mod core;
 mod session_async;
 mod state;
 
-pub use config::{Fmp4ReadSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track};
+pub use config::{
+    EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
+    RangeCacheConfig, SampleId, SampleMeta, TrackId,
+};
+pub use core::EncodedSampleIter;
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
 #[cfg(feature = "async-session")]
@@ -63,8 +67,40 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.tracks()
     }
 
-    pub fn next_sample(&mut self) -> Result<Option<Fmp4ReadSample>> {
+    pub fn samples(&self, track: TrackId) -> Result<&[SampleMeta]> {
+        self.state.core.samples(track)
+    }
+
+    pub fn sample_meta(&self, sample: SampleId) -> Option<&SampleMeta> {
+        self.state.core.sample_meta(sample)
+    }
+
+    pub fn iter_samples(&self, track: TrackId) -> Result<std::slice::Iter<'_, SampleMeta>> {
+        self.state.core.iter_samples(track)
+    }
+
+    pub fn sample_at_pts(&self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+        self.state.core.sample_at_pts(track, pts)
+    }
+
+    pub fn keyframe_before(&self, sample: SampleId) -> Option<SampleId> {
+        self.state.core.keyframe_before(sample)
+    }
+
+    pub fn gop_for_sample(&self, sample: SampleId) -> Option<GopSegment> {
+        self.state.core.gop_for_sample(sample)
+    }
+
+    pub fn read_sample(&mut self, sample: SampleId) -> Result<EncodedSample> {
+        self.state.core.read_sample(sample)
+    }
+
+    pub fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.core.next_sample()
+    }
+
+    pub fn iter_encoded(&mut self, segment: GopSegment) -> Result<EncodedSampleIter<'_>> {
+        self.state.core.encoded_iter(segment)
     }
 
     pub fn status(&self) -> Fmp4ReaderStatus {
@@ -88,7 +124,7 @@ impl Fmp4Reader<AsyncReading> {
         &self.state.tracks
     }
 
-    pub async fn next_sample(&mut self) -> Result<Option<Fmp4ReadSample>> {
+    pub async fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
         self.state.handle.next_sample().await
     }
 

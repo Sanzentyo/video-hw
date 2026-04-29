@@ -18,7 +18,7 @@ use video_hw::{
     AnyDecodeSession, Backend, BackendError, BackendKind, BitstreamInput, Codec, DecodeOutputMode,
     DecodedFrame, DecoderConfig, Nv12Frame, Timestamp90k, nv12_to_rgb24,
 };
-use video_hw_fmp4::{Fmp4ReadSample, Fmp4Reader, Fmp4ReaderConfig, Fmp4Track};
+use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, Fmp4Track, SampleMeta};
 
 #[derive(Debug, Parser)]
 #[command(about = "Read fMP4/MP4 with seek slider")]
@@ -41,7 +41,7 @@ struct LoadedVideo {
     input_path: PathBuf,
     track: Fmp4Track,
     codec: Codec,
-    samples: Vec<Fmp4ReadSample>,
+    samples: Vec<SampleMeta>,
     keyframe_indices: Vec<usize>,
     total_duration_ticks: u64,
     default_sample_duration_ticks: u64,
@@ -55,7 +55,7 @@ impl LoadedVideo {
 
     fn sample_timestamp_seconds(&self, sample_index: usize) -> f64 {
         let clamped = sample_index.min(self.samples.len().saturating_sub(1));
-        ticks_to_seconds(self.samples[clamped].timestamp, self.track.timescale)
+        ticks_to_seconds(self.samples[clamped].pts.ticks, self.track.timescale)
     }
 
     fn sample_duration_ticks(&self, sample_index: usize) -> u64 {
@@ -77,7 +77,7 @@ impl LoadedVideo {
         let target_ticks = seconds_to_ticks(seconds.max(0.0), self.track.timescale);
         match self
             .samples
-            .binary_search_by_key(&target_ticks, |sample| sample.timestamp)
+            .binary_search_by_key(&target_ticks, |sample| sample.pts.ticks)
         {
             Ok(index) => index,
             Err(0) => 0,
@@ -655,23 +655,18 @@ impl eframe::App for ReaderApp {
             ui.separator();
 
             let sample = &self.video.samples[self.current_index];
-            let codec = sample
+            let codec = self
+                .video
+                .track
                 .codec()
-                .or_else(|| self.video.track.codec())
                 .map(|codec| codec.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let layout = sample
+            let layout = self
+                .video
+                .track
                 .encoded_layout()
-                .or_else(|| self.video.track.encoded_layout())
                 .map(|layout| layout.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let sample_data_preview = sample
-                .data
-                .iter()
-                .take(16)
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ");
 
             ui.heading("fMP4 reader (slider seek + decode preview)");
             ui.separator();
@@ -695,10 +690,10 @@ impl eframe::App for ReaderApp {
                 self.video.sample_duration_ticks(self.current_index),
                 sample.keyframe
             ));
-            ui.label(format!("bytes: {}", sample.data.len()));
+            ui.label(format!("sample_id: {}", sample.sample_id));
+            ui.label(format!("offset: {} bytes: {}", sample.offset, sample.size));
             ui.label(format!("estimated_fps: {}", self.video.estimated_fps));
-            ui.label(format!("head(16): {sample_data_preview}"));
-            ui.small("Fmp4Reader timeline + backend decoder preview.");
+            ui.small("Fmp4Reader metadata index + on-demand backend decoder preview.");
         });
     }
 }
@@ -786,9 +781,9 @@ fn run_smoke_test(
     for &target in &checkpoints {
         let sample = &video.samples[target];
         println!(
-            "smoke_seek sample={} ts={} dur={} keyframe={} keyframe_start={}",
+            "smoke_seek sample={} pts={} dur={} keyframe={} keyframe_start={}",
             target,
-            sample.timestamp,
+            sample.pts.ticks,
             sample.duration,
             sample.keyframe,
             video.keyframe_start_for(target)
@@ -806,8 +801,8 @@ fn run_smoke_test(
         video
             .samples
             .windows(2)
-            .all(|window| window[0].timestamp <= window[1].timestamp),
-        "sample timestamps are not monotonic"
+            .all(|window| window[0].pts.ticks <= window[1].pts.ticks),
+        "sample PTS values are not monotonic"
     );
 
     for &target in &checkpoints {
@@ -852,11 +847,9 @@ fn run_smoke_test(
 }
 
 fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
-    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig {
-        input_path: input_path.clone(),
-    })
-    .into_sync_session()
-    .with_context(|| format!("failed to open {}", input_path.display()))?;
+    let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.clone()))
+        .into_sync_session()
+        .with_context(|| format!("failed to open {}", input_path.display()))?;
 
     let track = reader
         .tracks()
@@ -864,12 +857,10 @@ fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
         .find(|track| track.kind == TrackKind::Video)
         .cloned()
         .context("failed to find video track in input")?;
-    let mut samples = Vec::new();
-    while let Some(sample) = reader.next_sample().context("failed to read sample")? {
-        if sample.track_id == track.track_id {
-            samples.push(sample);
-        }
-    }
+    let samples = reader
+        .samples(track.track_id)
+        .with_context(|| format!("failed to get samples for track {}", track.track_id))?
+        .to_vec();
     let _finished = reader.finish();
 
     anyhow::ensure!(
@@ -887,7 +878,8 @@ fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
         track.duration
     } else {
         let last = samples.last().expect("samples is non-empty");
-        last.timestamp
+        last.pts
+            .ticks
             .saturating_add(u64::from(last.duration).max(default_sample_duration_ticks))
     };
     let mut keyframe_indices: Vec<usize> = samples
@@ -901,7 +893,6 @@ fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
     let estimated_fps = estimate_fps(track.timescale, &samples);
     let codec = track
         .codec()
-        .or_else(|| samples.iter().find_map(Fmp4ReadSample::codec))
         .context("failed to determine video codec from sample entry")?;
 
     Ok(LoadedVideo {
@@ -916,7 +907,7 @@ fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
     })
 }
 
-fn estimate_fps(timescale: NonZeroU32, samples: &[Fmp4ReadSample]) -> i32 {
+fn estimate_fps(timescale: NonZeroU32, samples: &[SampleMeta]) -> i32 {
     let non_zero_durations: Vec<u32> = samples
         .iter()
         .map(|sample| sample.duration)
@@ -934,7 +925,7 @@ fn estimate_fps(timescale: NonZeroU32, samples: &[Fmp4ReadSample]) -> i32 {
     fps.clamp(1.0, 120.0) as i32
 }
 
-fn average_non_zero_duration_ticks(samples: &[Fmp4ReadSample]) -> Option<u64> {
+fn average_non_zero_duration_ticks(samples: &[SampleMeta]) -> Option<u64> {
     let non_zero_durations: Vec<u64> = samples
         .iter()
         .map(|sample| u64::from(sample.duration))
@@ -962,10 +953,8 @@ fn seconds_to_ticks(seconds: f64, timescale: NonZeroU32) -> u64 {
     scaled.round() as u64
 }
 
-fn sample_timestamp_to_90k(sample: &Fmp4ReadSample, timescale: NonZeroU32) -> Option<Timestamp90k> {
-    let composition_offset = i128::from(sample.composition_time_offset.unwrap_or(0));
-    let pts_ticks = i128::from(sample.timestamp).checked_add(composition_offset)?;
-    let pts_ticks = u64::try_from(pts_ticks).ok()?;
+fn sample_timestamp_to_90k(sample: &SampleMeta, timescale: NonZeroU32) -> Option<Timestamp90k> {
+    let pts_ticks = sample.pts.ticks;
     let scaled_90k = u128::from(pts_ticks).saturating_mul(90_000) / u128::from(timescale.get());
     i64::try_from(scaled_90k).ok().map(Timestamp90k)
 }
@@ -1066,15 +1055,21 @@ fn decode_attempt_for_mode(
             format!("failed to create decoder session with backend {resolved_backend}")
         })?;
     let keyframe_start = video.keyframe_start_for(sample_index);
+    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(video.input_path.clone()))
+        .into_sync_session()
+        .with_context(|| format!("failed to open {}", video.input_path.display()))?;
     let mut frame_count = 0usize;
     let mut latest_preview = None;
     let mut buffered_previews = Vec::new();
     for index in keyframe_start..=sample_index {
-        let sample = &video.samples[index];
+        let sample_meta = &video.samples[index];
+        let sample = reader
+            .read_sample(sample_meta.sample_id)
+            .with_context(|| format!("failed to read sample {}", sample_meta.sample_id))?;
         let annexb = sample
             .to_annexb()
             .with_context(|| format!("failed to convert sample {index} to Annex-B"))?;
-        let pts_90k = sample_timestamp_to_90k(sample, video.track.timescale);
+        let pts_90k = sample_timestamp_to_90k(&sample.meta, video.track.timescale);
         loop {
             match session.submit(BitstreamInput::AnnexBChunk {
                 chunk: annexb.clone(),

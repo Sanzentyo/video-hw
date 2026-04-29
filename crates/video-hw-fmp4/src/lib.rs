@@ -17,8 +17,9 @@ pub mod fmp4_writer;
 mod tests;
 
 pub use fmp4_reader::{
-    Finished as ReaderFinished, Fmp4ReadSample, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus,
-    Fmp4Track, ReaderReady as Fmp4ReaderReady, SyncReading,
+    EncodedSample, Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus,
+    Fmp4Track, GopSegment, IndexMode, MediaTime, RangeCacheConfig, ReaderReady as Fmp4ReaderReady,
+    SampleId, SampleMeta, SyncReading, TrackId,
 };
 pub use fmp4_writer::{
     ArgbFrame, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,
