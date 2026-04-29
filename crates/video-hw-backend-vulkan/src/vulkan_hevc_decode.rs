@@ -19,10 +19,11 @@ use ash::vk::native::{
     StdVideoH265PictureParameterSet, StdVideoH265PpsFlags, StdVideoH265ProfileIdc,
     StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN, StdVideoH265ProfileTierLevel,
     StdVideoH265ProfileTierLevelFlags, StdVideoH265SequenceParameterSet,
-    StdVideoH265ShortTermRefPicSet, StdVideoH265ShortTermRefPicSetFlags, StdVideoH265SpsFlags,
+    StdVideoH265SequenceParameterSetVui, StdVideoH265ShortTermRefPicSet,
+    StdVideoH265ShortTermRefPicSetFlags, StdVideoH265SpsFlags, StdVideoH265SpsVuiFlags,
     StdVideoH265VideoParameterSet, StdVideoH265VpsFlags,
 };
-use scuffle_h265::{NALUnitType, SpsNALUnit, SpsRbsp};
+use scuffle_h265::{AspectRatioIdc, AspectRatioInfo, NALUnitType, SpsNALUnit, SpsRbsp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HevcDecodePrerequisiteProbe {
@@ -137,6 +138,10 @@ pub(crate) struct HevcAccessUnitHeader {
     pub nal_unit_type: u8,
     pub pps_id: u8,
     pub pic_order_cnt_lsb: Option<u16>,
+    /// H.265 spec temporal identifier (0-based; derived from `nuh_temporal_id_plus1 - 1`).
+    pub temporal_id: u8,
+    /// Full (unwrapped) picture order count per H.265 spec section 8.3.1.
+    pub poc_full: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +195,31 @@ struct ParsedHevcPps {
     slice_segment_header_extension_present_flag: bool,
 }
 
+/// Absolute POC values for the short-term reference picture sets derived from an inline
+/// `st_ref_pic_set()` syntax element, plus the count of delta POCs in the referenced
+/// prediction RPS (zero for non-predicted inline RPS).  Both `before` and `after` are stored
+/// most-recent-first / nearest-first respectively, matching the ordering required by
+/// `RefPicSetStCurrBefore` / `RefPicSetStCurrAfter` in the Vulkan Video API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HevcInlineRefPicSetPocs {
+    before: [i32; HEVC_REF_PIC_SET_LIST_SIZE],
+    after: [i32; HEVC_REF_PIC_SET_LIST_SIZE],
+    before_count: usize,
+    after_count: usize,
+    /// `NumDeltaPocsOfRefRpsIdx`: non-zero only when inter-RPS prediction is used.
+    num_delta_pocs_of_ref_rps_idx: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HevcSpsShortTermRefPicSetPredictionMetadata {
+    inter_ref_pic_set_prediction_flag: bool,
+    delta_idx_minus1: u32,
+    delta_rps_sign: bool,
+    abs_delta_rps_minus1: u32,
+    used_by_curr_pic_flag: u16,
+    use_delta_flag: u16,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ParsedHevcSliceHeader {
     nal_unit_type: u8,
@@ -198,12 +228,23 @@ struct ParsedHevcSliceHeader {
     pic_order_cnt_lsb: Option<u16>,
     slice_type: Option<u8>,
     short_term_ref_pic_set_idx: Option<usize>,
-    inline_short_term_ref_pic_set_usage: Option<(usize, usize)>,
+    /// Absolute POC values for each reference in the inline `st_ref_pic_set()`, or `None`
+    /// when the SPS-indexed path is used (or for IDR frames).
+    inline_short_term_ref_pic_set_pocs: Option<HevcInlineRefPicSetPocs>,
+    /// Bits consumed by `st_ref_pic_set()` syntax in the slice header (when sps_flag=0),
+    /// or by `short_term_ref_pic_set_idx` (when sps_flag=1 and count>1).  The 1-bit
+    /// `short_term_ref_pic_set_sps_flag` is NOT included.  Zero for IDR frames and for
+    /// SPS-based RPS with exactly one SPS entry.
+    num_bits_for_st_ref_pic_set_in_slice: u16,
+    /// `NumDeltaPocsOfRefRpsIdx`: number of delta POCs in the referenced ST-RPS when
+    /// inter-RPS prediction is used; zero for non-predicted inline RPS and for IDR frames.
+    num_delta_pocs_of_ref_rps_idx: u8,
 }
 
 const MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS: usize = 16;
 const HEVC_REF_PIC_SET_LIST_SIZE: usize = 8;
 const HEVC_NO_REFERENCE_PICTURE: u8 = u8::MAX;
+const HEVC_NAL_HEADER_SIZE: u32 = 2;
 const HEVC_DECODE_BOOTSTRAP_CACHE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -240,10 +281,22 @@ struct HevcExperimentalDpbConfiguration {
 #[derive(Debug, Clone, Copy)]
 struct HevcSubmitProbeAccessUnit {
     header: HevcAccessUnitHeader,
+    /// Byte offset of this access unit's data from the start of the bitstream buffer.
+    /// Aligned to `min_bitstream_buffer_offset_alignment`.
+    buffer_offset: u64,
+    /// Byte range of this access unit's data. Aligned to `min_bitstream_buffer_size_alignment`.
+    buffer_range: u64,
+    /// Exact byte size of this access unit's Annex-B VCL data before range alignment.
+    vcl_size: u64,
+    /// Byte offset from `buffer_offset` to the first byte of the slice segment RBSP payload
+    /// (i.e. past the Annex-B start code and the 2-byte NAL unit header). The decode loop may
+    /// translate this to a driver-facing start-code or NAL-header offset at submit time.
     slice_segment_offset: u32,
     slice_type: Option<u8>,
     short_term_ref_pic_set_idx: Option<usize>,
-    inline_short_term_ref_pic_set_usage: Option<(usize, usize)>,
+    inline_short_term_ref_pic_set_pocs: Option<HevcInlineRefPicSetPocs>,
+    num_bits_for_st_ref_pic_set_in_slice: u16,
+    num_delta_pocs_of_ref_rps_idx: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,10 +317,11 @@ pub(crate) struct HevcStdParameterSetStorage {
     vps: [StdVideoH265VideoParameterSet; 1],
     sps: [StdVideoH265SequenceParameterSet; 1],
     pps: [StdVideoH265PictureParameterSet; 1],
-    profile_tier_level: StdVideoH265ProfileTierLevel,
-    dec_pic_buf_mgr: StdVideoH265DecPicBufMgr,
-    short_term_ref_pic_sets: Vec<StdVideoH265ShortTermRefPicSet>,
-    long_term_ref_pics_sps: Option<StdVideoH265LongTermRefPicsSps>,
+    profile_tier_level: Box<StdVideoH265ProfileTierLevel>,
+    dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
+    short_term_ref_pic_sets: Box<[StdVideoH265ShortTermRefPicSet]>,
+    long_term_ref_pics_sps: Option<Box<StdVideoH265LongTermRefPicsSps>>,
+    sequence_parameter_set_vui: Option<Box<StdVideoH265SequenceParameterSetVui>>,
 }
 
 impl HevcStdParameterSetStorage {
@@ -411,6 +465,35 @@ struct HevcCapabilitySnapshot {
     std_header_version: vk::ExtensionProperties,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcSliceSegmentOffsetMode {
+    RbspPayload,
+    NaluHeader,
+    AnnexBStartCode,
+    GlobalRbspPayload,
+    MemoryBindingAbsolute,
+    Fixed(u32),
+}
+
+impl HevcSliceSegmentOffsetMode {
+    fn slice_segment_offset(self, access_unit: &HevcSubmitProbeAccessUnit) -> u32 {
+        match self {
+            Self::RbspPayload => access_unit.slice_segment_offset,
+            Self::GlobalRbspPayload => access_unit.slice_segment_offset,
+            Self::NaluHeader => access_unit
+                .slice_segment_offset
+                .saturating_sub(HEVC_NAL_HEADER_SIZE),
+            Self::AnnexBStartCode => 0,
+            Self::MemoryBindingAbsolute => access_unit
+                .buffer_offset
+                .saturating_add(u64::from(access_unit.slice_segment_offset))
+                .try_into()
+                .unwrap_or(u32::MAX),
+            Self::Fixed(offset) => offset,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct HevcDecodeSubmitExecutionContext<'a> {
     instance: &'a ash::Instance,
@@ -507,6 +590,8 @@ pub(crate) fn extract_hevc_access_unit_headers(
 ) -> Result<Vec<HevcAccessUnitHeader>, String> {
     let parameter_sets = extract_hevc_parameter_sets_annexb(bitstream)?;
     let parsed_pps = parse_hevc_pps(&parameter_sets.pps)?;
+    let mut unwrapper =
+        HevcPocUnwrapper::new(parameter_sets.parsed_sps.log2_max_pic_order_cnt_lsb_minus4);
     let mut headers = Vec::new();
 
     for nalu in split_annexb_nalus(bitstream) {
@@ -521,10 +606,15 @@ pub(crate) fn extract_hevc_access_unit_headers(
             format!("failed to parse HEVC slice header while extracting access units: {err}")
         })?;
         if slice_header.is_first_slice_segment {
+            let temporal_id = hevc_nalu_temporal_id(nalu);
+            let poc_full =
+                unwrapper.advance(slice_header.pic_order_cnt_lsb, nal_unit_type, temporal_id);
             headers.push(HevcAccessUnitHeader {
                 nal_unit_type: slice_header.nal_unit_type,
                 pps_id: slice_header.pps_id,
                 pic_order_cnt_lsb: slice_header.pic_order_cnt_lsb,
+                temporal_id,
+                poc_full,
             });
         }
     }
@@ -740,12 +830,20 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
             let max_dpb_slots = capabilities.max_dpb_slots;
             let max_active_reference_pictures = capabilities.max_active_reference_pictures;
             let std_header_version = capabilities.std_header_version;
+            let min_bitstream_buffer_offset_alignment =
+                capabilities.min_bitstream_buffer_offset_alignment;
+            let min_bitstream_buffer_size_alignment =
+                capabilities.min_bitstream_buffer_size_alignment;
+            let picture_access_granularity = capabilities.picture_access_granularity;
+            // Prefer discrete adapters and those exposing VK_KHR_video_maintenance1.
+            // On mixed Intel/NVIDIA systems this avoids picking an iGPU path that can
+            // satisfy capability probes but fails later in session execution.
+            let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+            let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
             let capability_snapshot = HevcCapabilitySnapshot {
-                min_bitstream_buffer_offset_alignment: capabilities
-                    .min_bitstream_buffer_offset_alignment,
-                min_bitstream_buffer_size_alignment: capabilities
-                    .min_bitstream_buffer_size_alignment,
-                picture_access_granularity: capabilities.picture_access_granularity,
+                min_bitstream_buffer_offset_alignment,
+                min_bitstream_buffer_size_alignment,
+                picture_access_granularity,
                 min_coded_extent,
                 max_coded_extent,
                 max_dpb_slots,
@@ -753,11 +851,6 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
                 max_level_idc: decode_h265_capabilities.max_level_idc,
                 std_header_version,
             };
-            // Prefer discrete adapters and those exposing VK_KHR_video_maintenance1.
-            // On mixed Intel/NVIDIA systems this avoids picking an iGPU path that can
-            // satisfy capability probes but fails later in session execution.
-            let properties = unsafe { instance.get_physical_device_properties(physical_device) };
-            let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
             let selection_score =
                 u32::from(is_discrete) * 2 + u32::from(support.extensions.has_video_maintenance1);
             let candidate = CapabilityProbeComplete {
@@ -1224,16 +1317,28 @@ fn probe_hevc_decode_submit_execution(
     } = context;
     let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
     let video_decode_device = ash::khr::video_decode_queue::Device::new(instance, device);
+    // SAFETY: `physical_device` belongs to `instance`; this only reads immutable properties.
+    let physical_device_properties =
+        unsafe { instance.get_physical_device_properties(physical_device) };
+    let slice_segment_offset_mode =
+        hevc_slice_segment_offset_mode(physical_device_properties.vendor_id);
+    let use_global_src_buffer = matches!(
+        slice_segment_offset_mode,
+        HevcSliceSegmentOffsetMode::GlobalRbspPayload
+            | HevcSliceSegmentOffsetMode::MemoryBindingAbsolute
+    );
     let mut video_session = vk::VideoSessionKHR::null();
     let mut video_session_parameters = vk::VideoSessionParametersKHR::null();
     let mut session_memories = Vec::new();
-    let mut src_buffer = vk::Buffer::null();
+    let mut src_buffer_per_au: Vec<vk::Buffer> = Vec::new();
     let mut src_buffer_memory = vk::DeviceMemory::null();
+    let mut src_buffer_memories: Vec<vk::DeviceMemory> = Vec::new();
     let mut readback_buffer = vk::Buffer::null();
     let mut readback_buffer_memory = vk::DeviceMemory::null();
-    let mut decode_image = vk::Image::null();
-    let mut decode_image_memory = vk::DeviceMemory::null();
-    let mut decode_image_views = Vec::new();
+    let mut decode_images: Vec<vk::Image> = Vec::new();
+    let mut decode_image_memories: Vec<vk::DeviceMemory> = Vec::new();
+    let mut decode_image_view = vk::ImageView::null();
+    let mut decode_image_views: Vec<vk::ImageView> = Vec::new();
     let mut command_pool = vk::CommandPool::null();
     let mut fence = vk::Fence::null();
     let mut readback_non_zero = false;
@@ -1247,6 +1352,12 @@ fn probe_hevc_decode_submit_execution(
     let mut experimental_dpb_mode = HevcExperimentalDpbMode::Off;
     let mut experimental_dpb_status = "mode=off (experimental DPB disabled)".to_string();
     let mut experimental_dpb_marker_path = None;
+    let use_per_slot_picture_views =
+        std::env::var("VIDEO_HW_VULKAN_HEVC_PER_SLOT_VIEWS").as_deref() == Ok("1");
+    let use_separate_src_memory =
+        std::env::var("VIDEO_HW_VULKAN_HEVC_SEPARATE_SRC_MEMORY").as_deref() == Ok("1");
+    let use_scope_per_access_unit =
+        std::env::var("VIDEO_HW_VULKAN_HEVC_SCOPE_PER_AU").as_deref() == Ok("1");
 
     let submit_result = (|| -> Result<(), String> {
         let mut decode_h265_profile = vk::VideoDecodeH265ProfileInfoKHR::default()
@@ -1396,10 +1507,18 @@ fn probe_hevc_decode_submit_execution(
             parameter_sets,
         )?;
 
+        let src_offset_alignment = capability_snapshot
+            .min_bitstream_buffer_offset_alignment
+            .max(1);
+        let src_size_alignment = capability_snapshot
+            .min_bitstream_buffer_size_alignment
+            .max(1);
         let payload = build_hevc_submit_probe_bitstream_payload(
             parameter_sets,
             bitstream,
             submit_probe_access_unit_limit,
+            src_offset_alignment,
+            src_size_alignment,
         )?;
         let queue = unsafe { device.get_device_queue(queue_family_index.0, 0) };
         if queue == vk::Queue::null() {
@@ -1409,85 +1528,218 @@ fn probe_hevc_decode_submit_execution(
             ));
         }
 
-        let src_buffer_offset = 0_u64;
-        let src_offset_alignment = capability_snapshot
-            .min_bitstream_buffer_offset_alignment
-            .max(1);
-        if !src_buffer_offset.is_multiple_of(src_offset_alignment) {
-            return Err(format!(
-                "src buffer offset {src_buffer_offset} is not aligned to {}",
-                src_offset_alignment
-            ));
-        }
-        let src_buffer_range = align_up(
-            u64::try_from(payload.bytes.len())
-                .map_err(|_| "submit probe payload size exceeds u64 range".to_string())?,
-            capability_snapshot
-                .min_bitstream_buffer_size_alignment
-                .max(1),
-        );
-        if src_buffer_range == 0 {
+        if payload.bytes.is_empty() {
             return Err("submit probe payload produced an empty bitstream buffer".to_string());
         }
-        let src_buffer_create_info = vk::BufferCreateInfo::default()
-            .size(src_buffer_range)
-            .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        // SAFETY: `src_buffer_create_info` is fully initialized and `device` is valid.
-        src_buffer = unsafe { device.create_buffer(&src_buffer_create_info, None) }
-            .map_err(|err| format!("vkCreateBuffer for decode source failed: {err}"))?;
-        // SAFETY: source buffer was created from the same logical device.
-        let src_buffer_requirements = unsafe { device.get_buffer_memory_requirements(src_buffer) };
+
+        // Create one VkBuffer per AU, each covering only that AU's bitstream data.
+        //
+        // NVIDIA (vendor 0x10DE) ignores `srcBufferOffset` and scans the buffer from byte 0 for
+        // the first start code, regardless of `pSliceSegmentOffsets`. Splitting into per-AU
+        // buffers ensures each buffer contains only one AU's bitstream so the driver cannot
+        // accidentally decode a different AU. The per-AU buffers are all bound to a single
+        // shared VkDeviceMemory allocation at their respective `buffer_offset` positions, which
+        // preserves the existing memory layout without additional copies.
+        //
+        // `global` diagnostics use one buffer covering the whole prepared bitstream; normal mode
+        // keeps one buffer per AU. VkVideoProfileListInfoKHR is required by spec for buffers with
+        // VIDEO_DECODE_SRC_KHR.
+        let src_buffer_sizes = if use_global_src_buffer {
+            vec![
+                u64::try_from(payload.bytes.len())
+                    .map_err(|_| "submit probe payload size exceeds u64 range".to_string())?,
+            ]
+        } else {
+            payload
+                .access_units
+                .iter()
+                .map(|au| au.buffer_range)
+                .collect::<Vec<_>>()
+        };
+        for src_buffer_size in src_buffer_sizes {
+            let mut per_au_h265_profile = vk::VideoDecodeH265ProfileInfoKHR::default()
+                .std_profile_idc(StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN);
+            let mut per_au_decode_usage = vk::VideoDecodeUsageInfoKHR::default()
+                .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+            let per_au_video_profile = vk::VideoProfileInfoKHR::default()
+                .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H265)
+                .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+                .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+                .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+                .push_next(&mut per_au_h265_profile)
+                .push_next(&mut per_au_decode_usage);
+            let per_au_video_profiles = [per_au_video_profile];
+            let mut per_au_profile_list =
+                vk::VideoProfileListInfoKHR::default().profiles(&per_au_video_profiles);
+            let per_au_create_info = vk::BufferCreateInfo::default()
+                .size(src_buffer_size)
+                .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .push_next(&mut per_au_profile_list);
+            // SAFETY: `per_au_create_info` is fully initialized and `device` is valid.
+            let per_au_buf =
+                unsafe { device.create_buffer(&per_au_create_info, None) }.map_err(|err| {
+                    format!("vkCreateBuffer for per-AU bitstream buffer failed: {err}")
+                })?;
+            src_buffer_per_au.push(per_au_buf);
+        }
+
+        // Gather memory requirements from all per-AU buffers so the allocation covers every
+        // buffer's requirement. All VIDEO_DECODE_SRC_KHR buffers share the same memory type
+        // bits and alignment on a given device, but we verify this explicitly.
+        let per_au_requirements: Vec<vk::MemoryRequirements> = src_buffer_per_au
+            .iter()
+            // SAFETY: each buffer was just created from `device` and has not been bound yet.
+            .map(|&buf| unsafe { device.get_buffer_memory_requirements(buf) })
+            .collect();
+        // Verify binding-offset alignment: au.buffer_offset must be aligned to both
+        // minBitstreamBufferOffsetAlignment AND the buffer's memoryRequirements.alignment.
+        // If they differ, the binding could be misaligned and NVIDIA would silently produce zeros.
+        if !use_global_src_buffer && !use_separate_src_memory {
+            for (i, (au, req)) in payload
+                .access_units
+                .iter()
+                .zip(per_au_requirements.iter())
+                .enumerate()
+            {
+                if req.alignment > 0 && au.buffer_offset % req.alignment != 0 {
+                    return Err(format!(
+                        "per-AU buffer[{i}] binding offset {} is not aligned to memoryRequirements.alignment {} — \
+                         increase bitstream buffer offset alignment to fix P-frame decode failures",
+                        au.buffer_offset, req.alignment
+                    ));
+                }
+            }
+        }
+        let src_memory_type_bits = per_au_requirements
+            .iter()
+            .fold(u32::MAX, |acc, r| acc & r.memory_type_bits);
+        if src_memory_type_bits == 0 {
+            return Err("no common memory type across per-AU bitstream buffers".to_string());
+        }
         let src_memory_type_index = select_memory_type_index(
             &memory_properties,
-            src_buffer_requirements.memory_type_bits,
+            src_memory_type_bits,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )
         .ok_or_else(|| {
             format!(
-                "no HOST_VISIBLE|HOST_COHERENT memory type for decode source buffer (bits=0x{:X})",
-                src_buffer_requirements.memory_type_bits
+                "no HOST_VISIBLE|HOST_COHERENT memory type for per-AU bitstream buffers (bits=0x{src_memory_type_bits:X})"
             )
         })?;
-        let src_allocation_size = src_buffer_requirements.size.max(src_buffer_range);
-        let src_allocate_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(src_allocation_size)
-            .memory_type_index(src_memory_type_index);
-        // SAFETY: Allocation info references only POD values and `device` is valid.
-        src_buffer_memory = unsafe { device.allocate_memory(&src_allocate_info, None) }
-            .map_err(|err| format!("vkAllocateMemory for decode source buffer failed: {err}"))?;
-        // SAFETY: Buffer and memory were created from the same logical device.
-        unsafe { device.bind_buffer_memory(src_buffer, src_buffer_memory, 0) }
-            .map_err(|err| format!("vkBindBufferMemory for decode source buffer failed: {err}"))?;
-        // SAFETY: Mapping range is within the allocated memory bound to `src_buffer_memory`.
-        let mapped = unsafe {
-            device.map_memory(
-                src_buffer_memory,
-                0,
-                src_buffer_range,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .map_err(|err| format!("vkMapMemory for decode source buffer failed: {err}"))?;
-        let mapped_len = usize::try_from(src_buffer_range)
-            .map_err(|_| "decode source buffer range exceeds usize range".to_string())?;
-        // SAFETY: destination pointer is valid for `mapped_len` bytes from `vkMapMemory`.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                payload.bytes.as_ptr(),
-                mapped.cast::<u8>(),
-                payload.bytes.len(),
-            );
-            if mapped_len > payload.bytes.len() {
-                std::ptr::write_bytes(
-                    mapped.cast::<u8>().add(payload.bytes.len()),
-                    0,
-                    mapped_len - payload.bytes.len(),
-                );
+        if use_separate_src_memory {
+            for ((per_au_buf, au), req) in src_buffer_per_au
+                .iter()
+                .zip(payload.access_units.iter())
+                .zip(per_au_requirements.iter())
+            {
+                let allocate_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(req.size.max(au.buffer_range))
+                    .memory_type_index(src_memory_type_index);
+                let memory =
+                    unsafe { device.allocate_memory(&allocate_info, None) }.map_err(|err| {
+                        format!("vkAllocateMemory for separate HEVC bitstream buffer failed: {err}")
+                    })?;
+                unsafe { device.bind_buffer_memory(*per_au_buf, memory, 0) }.map_err(|err| {
+                    format!("vkBindBufferMemory for separate HEVC bitstream buffer failed: {err}")
+                })?;
+                let mapped = unsafe {
+                    device.map_memory(memory, 0, au.buffer_range, vk::MemoryMapFlags::empty())
+                }
+                .map_err(|err| {
+                    format!("vkMapMemory for separate HEVC bitstream buffer failed: {err}")
+                })?;
+                let src_start = usize::try_from(au.buffer_offset)
+                    .map_err(|_| "AU source offset exceeds usize".to_string())?;
+                let src_len = usize::try_from(au.vcl_size)
+                    .map_err(|_| "AU source size exceeds usize".to_string())?;
+                let src_end = src_start
+                    .checked_add(src_len)
+                    .ok_or_else(|| "AU source end overflow".to_string())?;
+                let source = payload.bytes.get(src_start..src_end).ok_or_else(|| {
+                    "AU source range is outside prepared bitstream payload".to_string()
+                })?;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        source.as_ptr(),
+                        mapped.cast::<u8>(),
+                        source.len(),
+                    );
+                    device.unmap_memory(memory);
+                }
+                src_buffer_memories.push(memory);
             }
-            device.unmap_memory(src_buffer_memory);
-        }
+        } else {
+            let src_payload_size = u64::try_from(payload.bytes.len())
+                .map_err(|_| "submit probe payload size exceeds u64 range".to_string())?;
+            let src_allocation_size = if use_global_src_buffer {
+                per_au_requirements
+                    .first()
+                    .map(|req| req.size)
+                    .unwrap_or(0)
+                    .max(src_payload_size)
+            } else {
+                payload
+                    .access_units
+                    .iter()
+                    .zip(per_au_requirements.iter())
+                    .map(|(au, req)| au.buffer_offset.saturating_add(req.size))
+                    .max()
+                    .unwrap_or(0)
+                    .max(src_payload_size)
+            };
+            let src_allocate_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(src_allocation_size)
+                .memory_type_index(src_memory_type_index);
+            // SAFETY: allocation info references only POD values and `device` is valid.
+            src_buffer_memory = unsafe { device.allocate_memory(&src_allocate_info, None) }
+                .map_err(|err| {
+                    format!("vkAllocateMemory for per-AU bitstream buffers failed: {err}")
+                })?;
 
+            if use_global_src_buffer {
+                // SAFETY: buffer and memory were created from the same logical device.
+                unsafe { device.bind_buffer_memory(src_buffer_per_au[0], src_buffer_memory, 0) }
+                    .map_err(|err| {
+                        format!("vkBindBufferMemory for HEVC bitstream buffer failed: {err}")
+                    })?;
+            } else {
+                for (per_au_buf, au) in src_buffer_per_au.iter().zip(payload.access_units.iter()) {
+                    // SAFETY: buffer and memory were created from the same logical device.
+                    unsafe {
+                        device.bind_buffer_memory(*per_au_buf, src_buffer_memory, au.buffer_offset)
+                    }
+                    .map_err(|err| {
+                        format!(
+                            "vkBindBufferMemory for per-AU bitstream buffer (off={}) failed: {err}",
+                            au.buffer_offset
+                        )
+                    })?;
+                }
+            }
+
+            let src_alloc_map_size = u64::try_from(payload.bytes.len())
+                .map_err(|_| "submit probe payload size exceeds u64 range".to_string())?;
+            // SAFETY: mapping range is within the allocated per-AU source memory.
+            let mapped = unsafe {
+                device.map_memory(
+                    src_buffer_memory,
+                    0,
+                    src_alloc_map_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+            }
+            .map_err(|err| format!("vkMapMemory for per-AU bitstream buffers failed: {err}"))?;
+            // SAFETY: destination pointer is valid for `payload.bytes.len()` bytes from `vkMapMemory`.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    payload.bytes.as_ptr(),
+                    mapped.cast::<u8>(),
+                    payload.bytes.len(),
+                );
+                device.unmap_memory(src_buffer_memory);
+            }
+        }
         let coded_extent = vk::Extent2D {
             width: parameter_sets.coded_width,
             height: parameter_sets.coded_height,
@@ -1513,8 +1765,6 @@ fn probe_hevc_decode_submit_execution(
         } else {
             1
         };
-        let image_array_layers = u32::try_from(dpb_slot_count)
-            .map_err(|_| "decode DPB slot count exceeds u32 range".to_string())?;
         let image_extent_width = u32::try_from(align_up(
             u64::from(coded_extent.width),
             u64::from(capability_snapshot.picture_access_granularity.width.max(1)),
@@ -1525,6 +1775,25 @@ fn probe_hevc_decode_submit_execution(
             u64::from(capability_snapshot.picture_access_granularity.height.max(1)),
         ))
         .map_err(|_| "aligned decode image height exceeds u32 range".to_string())?;
+        // All DPB slots share one VkImage with dpb_slot_count array layers. NVIDIA RTX 3080
+        // (COINCIDE-only) requires all DPB slots to reside in a single image so the driver can
+        // track inter-slot reference data correctly; using separate single-layer images causes all
+        // non-IDR frames to produce all-zero output.
+        // VkVideoProfileListInfoKHR is required in pNext for images with VIDEO_DECODE_DST/DPB usage.
+        let mut image_decode_h265_profile_ext = vk::VideoDecodeH265ProfileInfoKHR::default()
+            .std_profile_idc(StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN);
+        let mut image_decode_usage_ext = vk::VideoDecodeUsageInfoKHR::default()
+            .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+        let image_video_profile = vk::VideoProfileInfoKHR::default()
+            .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H265)
+            .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+            .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+            .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+            .push_next(&mut image_decode_h265_profile_ext)
+            .push_next(&mut image_decode_usage_ext);
+        let image_video_profiles = [image_video_profile];
+        let mut image_profile_list =
+            vk::VideoProfileListInfoKHR::default().profiles(&image_video_profiles);
         let decode_image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(output_format)
@@ -1534,7 +1803,7 @@ fn probe_hevc_decode_submit_execution(
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(image_array_layers)
+            .array_layers(dpb_slot_count as u32)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(
@@ -1543,68 +1812,82 @@ fn probe_hevc_decode_submit_execution(
                     | vk::ImageUsageFlags::TRANSFER_SRC,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut image_profile_list);
         // SAFETY: image create info is fully initialized and device is valid.
-        decode_image = unsafe { device.create_image(&decode_image_create_info, None) }
-            .map_err(|err| format!("vkCreateImage for decode destination failed: {err}"))?;
+        let dpb_image = unsafe { device.create_image(&decode_image_create_info, None) }
+            .map_err(|err| format!("vkCreateImage for DPB image failed: {err}"))?;
         // SAFETY: image handle was created from `device`.
-        let decode_image_requirements =
-            unsafe { device.get_image_memory_requirements(decode_image) };
-        let decode_image_memory_type = select_memory_type_index(
+        let dpb_requirements = unsafe { device.get_image_memory_requirements(dpb_image) };
+        let dpb_memory_type = select_memory_type_index(
             &memory_properties,
-            decode_image_requirements.memory_type_bits,
+            dpb_requirements.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
         .or_else(|| {
             select_memory_type_index(
                 &memory_properties,
-                decode_image_requirements.memory_type_bits,
+                dpb_requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::empty(),
             )
         })
         .ok_or_else(|| {
             format!(
-                "no compatible memory type for decode destination image (bits=0x{:X})",
-                decode_image_requirements.memory_type_bits
+                "no compatible memory type for DPB image (bits=0x{:X})",
+                dpb_requirements.memory_type_bits
             )
         })?;
-        let decode_image_allocate_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(decode_image_requirements.size.max(1))
-            .memory_type_index(decode_image_memory_type);
+        let dpb_alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(dpb_requirements.size.max(1))
+            .memory_type_index(dpb_memory_type);
         // SAFETY: allocation parameters are provided by Vulkan memory requirements.
-        decode_image_memory = unsafe { device.allocate_memory(&decode_image_allocate_info, None) }
-            .map_err(|err| {
-                format!("vkAllocateMemory for decode destination image failed: {err}")
-            })?;
+        let dpb_memory = unsafe { device.allocate_memory(&dpb_alloc_info, None) }
+            .map_err(|err| format!("vkAllocateMemory for DPB image failed: {err}"))?;
         // SAFETY: image and memory were created by the same logical device.
-        unsafe { device.bind_image_memory(decode_image, decode_image_memory, 0) }.map_err(
-            |err| format!("vkBindImageMemory for decode destination image failed: {err}"),
-        )?;
-        for layer_index in 0..image_array_layers {
-            let decode_image_view_create_info = vk::ImageViewCreateInfo::default()
-                .image(decode_image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(output_format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: layer_index,
-                    layer_count: 1,
-                });
-            // SAFETY: image view create info references a valid image and subresource range.
-            let decode_image_view =
-                unsafe { device.create_image_view(&decode_image_view_create_info, None) }.map_err(
-                    |err| format!("vkCreateImageView for decode destination failed: {err}"),
-                )?;
-            decode_image_views.push(decode_image_view);
-        }
-        if decode_image_views.is_empty() {
+        unsafe { device.bind_image_memory(dpb_image, dpb_memory, 0) }
+            .map_err(|err| format!("vkBindImageMemory for DPB image failed: {err}"))?;
+        decode_images.push(dpb_image);
+        decode_image_memories.push(dpb_memory);
+        let decode_image_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(dpb_image)
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+            .format(output_format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: dpb_slot_count as u32,
+            });
+        // SAFETY: image view create info references a valid image and subresource range.
+        decode_image_view =
+            unsafe { device.create_image_view(&decode_image_view_create_info, None) }
+                .map_err(|err| format!("vkCreateImageView for DPB slots failed: {err}"))?;
+        if decode_image_view == vk::ImageView::null() {
             return Err(
                 "submit execution probe could not create any decode image views".to_string(),
             );
         }
-
+        if use_per_slot_picture_views {
+            decode_image_views.reserve(dpb_slot_count);
+            for slot in 0..dpb_slot_count {
+                let view_create_info = vk::ImageViewCreateInfo::default()
+                    .image(dpb_image)
+                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                    .format(output_format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: slot as u32,
+                        layer_count: 1,
+                    });
+                let view = unsafe { device.create_image_view(&view_create_info, None) }.map_err(
+                    |err| format!("vkCreateImageView for DPB slot {slot} failed: {err}"),
+                )?;
+                decode_image_views.push(view);
+            }
+        }
         let readback_buffer_create_info = vk::BufferCreateInfo::default()
             .size(readback_buffer_size)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
@@ -1662,60 +1945,162 @@ fn probe_hevc_decode_submit_execution(
         unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
             .map_err(|err| format!("vkBeginCommandBuffer failed: {err}"))?;
 
-        let source_buffer_barrier = vk::BufferMemoryBarrier2::default()
+        let source_memory_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::HOST)
             .src_access_mask(vk::AccessFlags2::HOST_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
-            .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_READ_KHR)
-            .buffer(src_buffer)
-            .offset(0)
-            .size(src_buffer_range);
-        let destination_image_barrier = vk::ImageMemoryBarrier2::default()
+            .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_READ_KHR);
+        // Transition all array layers of the single DPB image from UNDEFINED to
+        // VIDEO_DECODE_DPB_KHR in one barrier. COINCIDE mode keeps all slots in DPB_KHR layout.
+        // Use DST_KHR as the working layout for the single array-layer DPB image.  Although
+        // the spec recommends DPB_KHR for COINCIDE mode, NVIDIA RTX 3080 requires DST_KHR
+        // for the decode to produce non-zero output for non-IDR frames.
+        let decode_working_layout =
+            if std::env::var("VIDEO_HW_VULKAN_HEVC_USE_DPB_LAYOUT").as_deref() == Ok("1") {
+                vk::ImageLayout::VIDEO_DECODE_DPB_KHR
+            } else {
+                vk::ImageLayout::VIDEO_DECODE_DST_KHR
+            };
+        let dpb_init_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::NONE)
             .src_access_mask(vk::AccessFlags2::NONE)
             .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
             .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
             .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
-            .image(decode_image)
+            .new_layout(decode_working_layout)
+            .image(decode_images[0])
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: image_array_layers,
+                layer_count: dpb_slot_count as u32,
             });
+        let destination_image_barriers = [dpb_init_barrier];
         let dependency_info = vk::DependencyInfo::default()
-            .buffer_memory_barriers(std::slice::from_ref(&source_buffer_barrier))
-            .image_memory_barriers(std::slice::from_ref(&destination_image_barrier));
+            .memory_barriers(std::slice::from_ref(&source_memory_barrier))
+            .image_memory_barriers(&destination_image_barriers);
         // SAFETY: barriers reference resources created above and the command buffer is recording.
         unsafe {
             device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
         }
 
-        let begin_coding_info = vk::VideoBeginCodingInfoKHR::default()
-            .video_session(video_session)
-            .video_session_parameters(video_session_parameters);
         let mut next_reference_slot = 0_usize;
         let mut active_reference_slots = Vec::new();
+        // Tracks which DPB slots currently hold a reference picture (VIDEO_DECODE_DST_KHR layout).
+        // All slots start in DST layout (true) when DPB is enabled; false = DST layout (non-COINCIDE).
+        let mut slot_in_dpb_layout = vec![experimental_dpb_enabled; dpb_slot_count];
+        // Per-slot deferred readback: tracks the BufferImageCopy regions for the reference frame
+        // currently occupying each DPB slot.  Reference frame copies are deferred to just before
+        // slot reuse (eviction-triggered, inside the scope) or until after cmd_end_video_coding_khr
+        // (post-scope batch copy).  Deferring avoids VIDEO_DECODE_DST_KHR → TRANSFER_SRC_OPTIMAL
+        // → VIDEO_DECODE_DST_KHR layout cycles on actively-referenced slots, which appear to
+        // invalidate NVIDIA RTX 3080's internal DPB cache and cause subsequent P-frame decodes to
+        // produce all-zero output.  Slot 0 (non-reference scratch) is never stored here since
+        // non-reference frames are copied immediately in the non-reference branch below.
+        let mut per_slot_deferred: Vec<Option<Vec<vk::BufferImageCopy>>> =
+            vec![None; dpb_slot_count];
+        // Cap active references at the SPS DPB limit.  The syntax element is a "minus1" value:
+        // `sps_max_dec_pic_buffering_minus1 + 1` pictures may be held in the DPB.
         let max_active_reference_slots = if experimental_dpb_enabled {
-            usize::try_from(capability_snapshot.max_active_reference_pictures.max(1))
-                .ok()
-                .unwrap_or(1)
-                .min(dpb_slot_count.max(1))
+            let highest_tid = usize::from(parameter_sets.parsed_sps.sps_max_sub_layers_minus1);
+            let sps_max = parameter_sets
+                .parsed_sps
+                .sub_layer_ordering_info
+                .sps_max_dec_pic_buffering_minus1
+                .get(highest_tid)
+                .copied()
+                .unwrap_or(4);
+            usize::try_from(sps_max).unwrap_or(4).saturating_add(1)
         } else {
             0
         };
-        // SAFETY: command buffer is recording and session/session-parameters are valid.
+        let max_poc_lsb = i32::try_from(parameter_sets.parsed_sps.max_pic_order_cnt_lsb())
+            .unwrap_or(i32::MAX / 2);
+        // Open the single video coding scope.  Vulkan spec requires RESET to be issued before the
+        // first decode command in a new session.  We issue it unconditionally here.
+        //
+        // Vulkan spec VUID-07264 / VUID-07144: every DPB slot used as pSetupReferenceSlot or in
+        // pReferenceSlots during vkCmdDecodeVideoKHR MUST be bound in vkBeginVideoCodingKHR.
+        // NVIDIA RTX 3080 silently returns zero-filled output if slots are not bound here, even
+        // though the spec permits mid-scope slot activation via pSetupReferenceSlot.  Binding all
+        // dpb_slot_count slots upfront ensures every slot is usable throughout the scope.
+        let begin_coding_picture_resources: Vec<vk::VideoPictureResourceInfoKHR<'_>> =
+            if experimental_dpb_enabled {
+                (0..dpb_slot_count)
+                    .map(|s| {
+                        let (view, layer) = if use_per_slot_picture_views {
+                            (decode_image_views[s], 0)
+                        } else {
+                            (decode_image_view, s as u32)
+                        };
+                        vk::VideoPictureResourceInfoKHR::default()
+                            .coded_offset(vk::Offset2D { x: 0, y: 0 })
+                            .coded_extent(coded_extent)
+                            .base_array_layer(layer)
+                            .image_view_binding(view)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let mut begin_coding_reference_info_flags = empty_decode_h265_reference_info_flags();
+        begin_coding_reference_info_flags.set_used_for_long_term_reference(0);
+        begin_coding_reference_info_flags.set_unused_for_reference(1);
+        let begin_coding_reference_info_values = vec![
+            StdVideoDecodeH265ReferenceInfo {
+                flags: begin_coding_reference_info_flags,
+                PicOrderCntVal: 0,
+            };
+            begin_coding_picture_resources.len()
+        ];
+        let mut begin_coding_dpb_slot_infos = begin_coding_reference_info_values
+            .iter()
+            .map(|reference_info| {
+                vk::VideoDecodeH265DpbSlotInfoKHR::default().std_reference_info(reference_info)
+            })
+            .collect::<Vec<_>>();
+        let mut begin_coding_reference_slots =
+            Vec::with_capacity(begin_coding_picture_resources.len());
+        for ((s, resource), dpb_slot_info) in begin_coding_picture_resources
+            .iter()
+            .enumerate()
+            .zip(begin_coding_dpb_slot_infos.iter_mut())
+        {
+            let slot = vk::VideoReferenceSlotInfoKHR::default()
+                .slot_index(i32::try_from(s).unwrap_or(-1))
+                .picture_resource(resource);
+            begin_coding_reference_slots.push(slot.push_next(dpb_slot_info));
+        }
+        let begin_coding_info = vk::VideoBeginCodingInfoKHR::default()
+            .video_session(video_session)
+            .video_session_parameters(video_session_parameters)
+            .reference_slots(&begin_coding_reference_slots);
+        // SAFETY: command buffer is recording; session and parameters are valid.
         unsafe {
             (video_queue_device.fp().cmd_begin_video_coding_khr)(
                 command_buffer,
                 &begin_coding_info,
             );
         }
+        // Issue mandatory codec reset before the first decode command in this fresh session.
+        // The spec requires RESET to precede all decode commands in a newly-created session.
+        let coding_control_reset =
+            vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
+        // SAFETY: command buffer is in a video coding scope.
+        unsafe {
+            (video_queue_device.fp().cmd_control_video_coding_khr)(
+                command_buffer,
+                &coding_control_reset,
+            );
+        }
         for (submitted_index, access_unit) in payload.access_units.iter().enumerate() {
             let is_irap = (16..=23).contains(&access_unit.header.nal_unit_type);
-            if experimental_dpb_enabled && is_irap {
+            // IDR (19,20) and BLA (16-18) always reset the DPB. CRA (21) and reserved IRAP
+            // (22-23) preserve pre-IRAP references so that RASL pictures can use them when
+            // decoding from stream start (NoRaslOutputFlag = 0 for CRA in this scenario).
+            let is_dpb_reset = matches!(access_unit.header.nal_unit_type, 16..=20);
+            if experimental_dpb_enabled && is_dpb_reset {
                 active_reference_slots.clear();
             }
             let is_reference = experimental_dpb_enabled
@@ -1728,82 +2113,186 @@ fn probe_hevc_decode_submit_execution(
                 &active_reference_slots,
             );
             if experimental_dpb_enabled {
+                // Eviction-triggered copy: if this slot is currently occupied by a reference frame
+                // whose readback was deferred, flush the copy now before the new decode overwrites
+                // the slot.  The old occupant has been dropped from active_reference_slots (just
+                // below), so no future decode will use it as a reference; the DST_KHR →
+                // TRANSFER_SRC_OPTIMAL → DST_KHR cycle here cannot invalidate any live DPB entry.
+                if let Some(evicted_regions) = per_slot_deferred[slot].take() {
+                    let evict_to_transfer = vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                        .src_access_mask(
+                            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
+                                | vk::AccessFlags2::VIDEO_DECODE_READ_KHR,
+                        )
+                        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .old_layout(decode_working_layout)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .image(decode_images[0])
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: slot as u32,
+                            layer_count: 1,
+                        });
+                    let evict_to_decode = vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                        .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                        .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .new_layout(decode_working_layout)
+                        .image(decode_images[0])
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: slot as u32,
+                            layer_count: 1,
+                        });
+                    // SAFETY: barriers and copy use valid resources; the slot's old data is
+                    // being evicted (no longer actively referenced) before the new decode.
+                    unsafe {
+                        device.cmd_pipeline_barrier2(
+                            command_buffer,
+                            &vk::DependencyInfo::default()
+                                .image_memory_barriers(std::slice::from_ref(&evict_to_transfer)),
+                        );
+                        device.cmd_copy_image_to_buffer(
+                            command_buffer,
+                            decode_images[0],
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            readback_buffer,
+                            &evicted_regions,
+                        );
+                        device.cmd_pipeline_barrier2(
+                            command_buffer,
+                            &vk::DependencyInfo::default()
+                                .image_memory_barriers(std::slice::from_ref(&evict_to_decode)),
+                        );
+                    }
+                }
                 active_reference_slots.retain(|entry| entry.slot != slot);
             }
+            // Use the full (unwrapped) POC computed during payload building.
+            let current_pic_order_cnt_val = access_unit.header.poc_full;
+            // Non-COINCIDE mode only: transition a reference slot back from DPB_KHR to DST_KHR
+            // before decoding into it again.  In experimental (COINCIDE) mode, all images stay
+            // in DPB_KHR; decoding into DPB_KHR is valid in COINCIDE (DPB = decode-dst), so no
+            // layout transition is needed.
+            if slot_in_dpb_layout[slot] && !experimental_dpb_enabled {
+                let dpb_to_dst_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_READ_KHR)
+                    .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                    .old_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
+                    .new_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
+                    .image(decode_images[0])
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: slot as u32,
+                        layer_count: 1,
+                    });
+                let dpb_to_dst_dep = vk::DependencyInfo::default()
+                    .image_memory_barriers(std::slice::from_ref(&dpb_to_dst_barrier));
+                // SAFETY: image barrier transitions a subresource in DPB layout to DST layout.
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &dpb_to_dst_dep);
+                }
+                slot_in_dpb_layout[slot] = false;
+            }
+            // IRAP frames (IDR, BLA) reset DPB state; active_reference_slots was already
+            // cleared before the loop body.
+            let (destination_image_view, destination_base_array_layer) =
+                if use_per_slot_picture_views {
+                    (decode_image_views[slot], 0)
+                } else {
+                    (decode_image_view, slot as u32)
+                };
             let destination_picture_resource = vk::VideoPictureResourceInfoKHR::default()
                 .coded_offset(vk::Offset2D { x: 0, y: 0 })
                 .coded_extent(coded_extent)
-                .base_array_layer(0)
-                .image_view_binding(decode_image_views[slot]);
+                .base_array_layer(destination_base_array_layer)
+                .image_view_binding(destination_image_view);
             let mut std_picture_info_flags = empty_decode_h265_picture_info_flags();
             std_picture_info_flags.set_IrapPicFlag(bool_to_u32(is_irap));
             std_picture_info_flags.set_IdrPicFlag(bool_to_u32(is_hevc_idr_nal_type(
                 access_unit.header.nal_unit_type,
             )));
             std_picture_info_flags.set_IsReference(bool_to_u32(is_reference));
-            let current_pic_order_cnt_val = access_unit
-                .header
-                .pic_order_cnt_lsb
-                .map(i32::from)
-                .unwrap_or(0);
-            let ref_pic_set_usage_limits = resolve_hevc_ref_pic_set_usage_limits(
-                &parameter_sets.parsed_sps,
-                access_unit.short_term_ref_pic_set_idx,
-            )
-            .or(access_unit.inline_short_term_ref_pic_set_usage)
-            .or_else(|| {
-                resolve_hevc_slice_type_reference_usage_limits(
-                    &payload.parsed_pps,
-                    access_unit.slice_type,
-                )
-            });
+            // current_pic_order_cnt_val is declared earlier in the loop (before begin_coding)
+            // so that bc_std_ref_infos for the setup slot can carry the correct POC.
             std_picture_info_flags.set_short_term_ref_pic_set_sps_flag(bool_to_u32(
                 access_unit.short_term_ref_pic_set_idx.is_some(),
             ));
-            let mut selected_references = if experimental_dpb_enabled && !is_irap {
-                active_reference_slots
-                    .iter()
-                    .rev()
-                    .take(HEVC_REF_PIC_SET_LIST_SIZE)
-                    .copied()
-                    .collect::<Vec<_>>()
+            let selected_references = if experimental_dpb_enabled && !is_irap {
+                if let Some(ref inline_pocs) = access_unit.inline_short_term_ref_pic_set_pocs {
+                    // Inline RPS: select references by exact POC match from the bitstream.
+                    select_hevc_references_by_inline_poc(&active_reference_slots, inline_pocs)
+                } else {
+                    // SPS-indexed RPS or slice-type fallback: count-based recency selection.
+                    let count_limits = resolve_hevc_ref_pic_set_usage_limits(
+                        &parameter_sets.parsed_sps,
+                        access_unit.short_term_ref_pic_set_idx,
+                    )
+                    .or_else(|| {
+                        resolve_hevc_slice_type_reference_usage_limits(
+                            &payload.parsed_pps,
+                            access_unit.slice_type,
+                        )
+                    });
+                    let candidates = active_reference_slots
+                        .iter()
+                        .rev()
+                        .take(HEVC_REF_PIC_SET_LIST_SIZE)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if let Some((max_before, max_after)) = count_limits {
+                        select_hevc_references_for_ref_pic_set(
+                            &candidates,
+                            current_pic_order_cnt_val,
+                            max_before.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                            max_after.min(HEVC_REF_PIC_SET_LIST_SIZE),
+                        )
+                    } else {
+                        candidates
+                    }
+                }
             } else {
                 Vec::new()
             };
-            if let Some((max_before, max_after)) = ref_pic_set_usage_limits {
-                selected_references = select_hevc_references_for_ref_pic_set(
-                    &selected_references,
-                    current_pic_order_cnt_val,
-                    max_before.min(HEVC_REF_PIC_SET_LIST_SIZE),
-                    max_after.min(HEVC_REF_PIC_SET_LIST_SIZE),
-                );
-            }
-            let selected_reference_picture_order_cnt_values = selected_references
-                .iter()
-                .map(|reference| reference.pic_order_cnt_val)
-                .collect::<Vec<_>>();
             let (
                 reference_pic_set_st_curr_before,
                 reference_pic_set_st_curr_after,
-                num_delta_pocs_of_ref_rps_idx,
+                _num_delta_pocs_total,
             ) = build_hevc_ref_pic_set_lists(
-                &selected_reference_picture_order_cnt_values,
+                &selected_references,
                 current_pic_order_cnt_val,
+                max_poc_lsb,
             );
             let std_picture_info = StdVideoDecodeH265PictureInfo {
                 flags: std_picture_info_flags,
                 sps_video_parameter_set_id: parameter_sets.parsed_sps.sps_video_parameter_set_id,
                 pps_seq_parameter_set_id: payload.parsed_pps.pps_seq_parameter_set_id,
                 pps_pic_parameter_set_id: access_unit.header.pps_id,
-                NumDeltaPocsOfRefRpsIdx: num_delta_pocs_of_ref_rps_idx,
+                NumDeltaPocsOfRefRpsIdx: access_unit.num_delta_pocs_of_ref_rps_idx,
                 PicOrderCntVal: current_pic_order_cnt_val,
-                NumBitsForSTRefPicSetInSlice: 0,
+                // Pass the actual parsed bit count so the driver can correctly skip over the
+                // inline RPS bits when parsing the rest of the slice header. A value of 0 for
+                // IDR frames (no inline RPS) is naturally correct.
+                NumBitsForSTRefPicSetInSlice: access_unit.num_bits_for_st_ref_pic_set_in_slice,
                 reserved: 0,
                 RefPicSetStCurrBefore: reference_pic_set_st_curr_before,
                 RefPicSetStCurrAfter: reference_pic_set_st_curr_after,
                 RefPicSetLtCurr: [HEVC_NO_REFERENCE_PICTURE; HEVC_REF_PIC_SET_LIST_SIZE],
             };
-            let slice_segment_offsets = [access_unit.slice_segment_offset];
+            let slice_segment_offsets =
+                [slice_segment_offset_mode.slice_segment_offset(access_unit)];
             let mut h265_picture_info = vk::VideoDecodeH265PictureInfoKHR::default()
                 .std_picture_info(&std_picture_info)
                 .slice_segment_offsets(&slice_segment_offsets);
@@ -1814,12 +2303,18 @@ fn probe_hevc_decode_submit_execution(
             reference_info_flags.set_unused_for_reference(0);
             let mut reference_slots = Vec::new();
             for reference in &selected_references {
+                let (reference_image_view, reference_base_array_layer) =
+                    if use_per_slot_picture_views {
+                        (decode_image_views[reference.slot], 0)
+                    } else {
+                        (decode_image_view, reference.slot as u32)
+                    };
                 reference_picture_resources.push(
                     vk::VideoPictureResourceInfoKHR::default()
                         .coded_offset(vk::Offset2D { x: 0, y: 0 })
                         .coded_extent(coded_extent)
-                        .base_array_layer(0)
-                        .image_view_binding(decode_image_views[reference.slot]),
+                        .base_array_layer(reference_base_array_layer)
+                        .image_view_binding(reference_image_view),
                 );
                 reference_info_values.push(StdVideoDecodeH265ReferenceInfo {
                     flags: reference_info_flags,
@@ -1840,21 +2335,65 @@ fn probe_hevc_decode_submit_execution(
             {
                 let reference_slot_index = i32::try_from(reference.slot)
                     .map_err(|_| "decode reference slot index exceeds i32 range".to_string())?;
+                let slot_info =
+                    vk::VideoReferenceSlotInfoKHR::default().slot_index(reference_slot_index);
                 reference_slots.push(
-                    vk::VideoReferenceSlotInfoKHR::default()
-                        .slot_index(reference_slot_index)
+                    slot_info
                         .picture_resource(reference_picture_resource)
                         .push_next(reference_dpb_slot_info),
                 );
             }
+            let effective_src_buf = if use_global_src_buffer {
+                src_buffer_per_au[0]
+            } else {
+                src_buffer_per_au[submitted_index]
+            };
+            let effective_src_offset = if matches!(
+                slice_segment_offset_mode,
+                HevcSliceSegmentOffsetMode::GlobalRbspPayload
+            ) {
+                access_unit.buffer_offset
+            } else {
+                0
+            };
+            let effective_src_range = if matches!(
+                slice_segment_offset_mode,
+                HevcSliceSegmentOffsetMode::MemoryBindingAbsolute
+            ) {
+                u64::try_from(payload.bytes.len()).unwrap_or(u64::MAX)
+            } else if std::env::var("VIDEO_HW_VULKAN_HEVC_EXACT_SRC_RANGE").as_deref() == Ok("1") {
+                access_unit.vcl_size
+            } else {
+                access_unit.buffer_range
+            };
             let decode_info_base = vk::VideoDecodeInfoKHR::default()
-                .src_buffer(src_buffer)
-                .src_buffer_offset(src_buffer_offset)
-                .src_buffer_range(src_buffer_range)
+                .src_buffer(effective_src_buf)
+                .src_buffer_offset(effective_src_offset)
+                .src_buffer_range(effective_src_range)
                 .dst_picture_resource(destination_picture_resource);
             let mut decode_info_builder = decode_info_base;
             if !reference_slots.is_empty() {
                 decode_info_builder = decode_info_builder.reference_slots(&reference_slots);
+            }
+            // Explicit inter-decode memory barrier: ensure VIDEO_DECODE_WRITE from any prior decode
+            // command is made visible to VIDEO_DECODE_READ in this command.  The Vulkan spec does
+            // NOT guarantee implicit synchronization between consecutive vkCmdDecodeVideoKHR calls;
+            // without this barrier a P-frame may observe stale (zero-initialised) data when reading
+            // a reference slot that was written by an earlier decode in the same scope.
+            if !reference_slots.is_empty() {
+                let inter_decode_barrier = vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                    .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_READ_KHR);
+                // SAFETY: barrier uses valid stage/access masks; command buffer is recording.
+                unsafe {
+                    device.cmd_pipeline_barrier2(
+                        command_buffer,
+                        &vk::DependencyInfo::default()
+                            .memory_barriers(std::slice::from_ref(&inter_decode_barrier)),
+                    );
+                }
             }
             if is_reference {
                 let mut setup_reference_info_flags = empty_decode_h265_reference_info_flags();
@@ -1866,17 +2405,14 @@ fn probe_hevc_decode_submit_execution(
                 };
                 let mut setup_reference_info = vk::VideoDecodeH265DpbSlotInfoKHR::default()
                     .std_reference_info(&setup_reference_info_value);
-                let setup_picture_resource = vk::VideoPictureResourceInfoKHR::default()
-                    .coded_offset(vk::Offset2D { x: 0, y: 0 })
-                    .coded_extent(coded_extent)
-                    .base_array_layer(0)
-                    .image_view_binding(decode_image_views[slot]);
                 let slot_index = i32::try_from(slot).map_err(|_| {
                     "decode setup reference slot index exceeds i32 range".to_string()
                 })?;
                 let setup_reference_slot = vk::VideoReferenceSlotInfoKHR::default()
                     .slot_index(slot_index)
-                    .picture_resource(&setup_picture_resource)
+                    // VUID-07170 (COINCIDE): pSetupReferenceSlot->pPictureResource MUST identify
+                    // the same image subresource as dstPictureResource — reuse the same struct.
+                    .picture_resource(&destination_picture_resource)
                     .push_next(&mut setup_reference_info);
                 let decode_info = decode_info_builder
                     .setup_reference_slot(&setup_reference_slot)
@@ -1886,14 +2422,43 @@ fn probe_hevc_decode_submit_execution(
                     (video_decode_device.fp().cmd_decode_video_khr)(command_buffer, &decode_info);
                 }
             } else {
-                let decode_info = decode_info_builder.push_next(&mut h265_picture_info);
+                // On COINCIDE-only hardware (e.g. RTX 3080), pSetupReferenceSlot MUST NOT be
+                // NULL even for non-reference frames (VUID-vkCmdDecodeVideoKHR-pDecodeInfo-07137).
+                // Use the scratch slot (slot 0) with unused_for_reference=1 so the driver knows
+                // this output picture will not be used as a future reference.
+                let mut scratch_setup_info_flags = empty_decode_h265_reference_info_flags();
+                scratch_setup_info_flags.set_used_for_long_term_reference(0);
+                scratch_setup_info_flags.set_unused_for_reference(1);
+                let scratch_setup_info_value = StdVideoDecodeH265ReferenceInfo {
+                    flags: scratch_setup_info_flags,
+                    PicOrderCntVal: current_pic_order_cnt_val,
+                };
+                let mut scratch_setup_dpb_info = vk::VideoDecodeH265DpbSlotInfoKHR::default()
+                    .std_reference_info(&scratch_setup_info_value);
+                let (scratch_image_view, scratch_base_array_layer) = if use_per_slot_picture_views {
+                    (decode_image_views[slot], 0)
+                } else {
+                    (decode_image_view, slot as u32)
+                };
+                let scratch_picture_resource = vk::VideoPictureResourceInfoKHR::default()
+                    .coded_offset(vk::Offset2D { x: 0, y: 0 })
+                    .coded_extent(coded_extent)
+                    .base_array_layer(scratch_base_array_layer)
+                    .image_view_binding(scratch_image_view);
+                let scratch_slot_index = i32::try_from(slot)
+                    .map_err(|_| "decode scratch slot index exceeds i32 range".to_string())?;
+                let scratch_setup_slot = vk::VideoReferenceSlotInfoKHR::default()
+                    .slot_index(scratch_slot_index)
+                    .picture_resource(&scratch_picture_resource)
+                    .push_next(&mut scratch_setup_dpb_info);
+                let decode_info = decode_info_builder
+                    .setup_reference_slot(&scratch_setup_slot)
+                    .push_next(&mut h265_picture_info);
                 // SAFETY: command buffer is recording and decode info references live local data.
                 unsafe {
                     (video_decode_device.fp().cmd_decode_video_khr)(command_buffer, &decode_info);
                 }
             }
-            let submitted_layer = u32::try_from(slot)
-                .map_err(|_| "submitted DPB slot index exceeds u32 range".to_string())?;
             let sample_offset = single_readback_buffer_size
                 .checked_mul(
                     u64::try_from(submitted_index)
@@ -1902,63 +2467,83 @@ fn probe_hevc_decode_submit_execution(
                 .ok_or_else(|| "decode readback sample offset overflow".to_string())?;
             let mut readback_regions = readback_regions_template.clone();
             for region in &mut readback_regions {
-                region.image_subresource.base_array_layer = submitted_layer;
                 region.buffer_offset = region
                     .buffer_offset
                     .checked_add(sample_offset)
                     .ok_or_else(|| "decode readback region offset overflow".to_string())?;
+                // With a single array-layer DPB image, each slot occupies a separate layer;
+                // set the copy source to the correct layer for this slot.
+                region.image_subresource.base_array_layer = slot as u32;
             }
 
-            let decode_to_copy_image_barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
-                .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
-                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(decode_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: submitted_layer,
-                    layer_count: 1,
-                });
-            let decode_to_copy_dependency = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&decode_to_copy_image_barrier));
-            // SAFETY: decode output image and readback buffer are valid resources in this command buffer.
-            unsafe {
-                device.cmd_pipeline_barrier2(command_buffer, &decode_to_copy_dependency);
-                device.cmd_copy_image_to_buffer(
-                    command_buffer,
-                    decode_image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    readback_buffer,
-                    &readback_regions,
-                );
+            // Reference frames in experimental mode: defer copy to just before slot reuse or
+            // end-of-stream, eliminating DST_KHR → TRANSFER_SRC → DST_KHR layout cycles while
+            // the slot is actively referenced by subsequent decode commands.  Those cycles appear
+            // to invalidate NVIDIA RTX 3080's internal DPB cache, causing P-frames that reference
+            // the cycled slot to produce all-zero output.
+            // Non-reference frames (slot 0 shared scratch) must be copied immediately since the
+            // slot is reused on the very next non-reference frame.
+            if is_reference {
+                // Defer: store the readback regions for post-scope or eviction-triggered copy.
+                // The slot stays in VIDEO_DECODE_DST_KHR; no layout transition here.
+                per_slot_deferred[slot] = Some(readback_regions);
+            } else {
+                let decode_to_copy_image_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .old_layout(decode_working_layout)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(decode_images[0])
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: slot as u32,
+                        layer_count: 1,
+                    });
+                let decode_to_copy_dependency = vk::DependencyInfo::default()
+                    .image_memory_barriers(std::slice::from_ref(&decode_to_copy_image_barrier));
+                // SAFETY: decode output image and readback buffer are valid resources.
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &decode_to_copy_dependency);
+                    device.cmd_copy_image_to_buffer(
+                        command_buffer,
+                        decode_images[0],
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        readback_buffer,
+                        &readback_regions,
+                    );
+                }
+                // In COINCIDE mode the scratch slot stays in VIDEO_DECODE_DST_KHR (matching
+                // the working layout used throughout); non-COINCIDE mode also uses DST_KHR.
+                let post_copy_layout = decode_working_layout;
+                let copy_to_decode_image_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                    .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(post_copy_layout)
+                    .image(decode_images[0])
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: slot as u32,
+                        layer_count: 1,
+                    });
+                let copy_to_decode_dependency = vk::DependencyInfo::default()
+                    .image_memory_barriers(std::slice::from_ref(&copy_to_decode_image_barrier));
+                // SAFETY: image barrier transitions the subresource to its next usage layout.
+                unsafe {
+                    device.cmd_pipeline_barrier2(command_buffer, &copy_to_decode_dependency);
+                }
             }
-
-            let copy_to_decode_image_barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
-                .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .new_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
-                .image(decode_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: submitted_layer,
-                    layer_count: 1,
-                });
-            let copy_to_decode_dependency = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&copy_to_decode_image_barrier));
-            // SAFETY: image barrier transitions the same subresource back to decode destination layout.
-            unsafe {
-                device.cmd_pipeline_barrier2(command_buffer, &copy_to_decode_dependency);
-            }
+            // In experimental (COINCIDE) mode all images stay in DPB_KHR; in non-experimental
+            // mode reference frames go to DPB_KHR and non-reference frames stay in DST_KHR.
+            slot_in_dpb_layout[slot] = experimental_dpb_enabled || is_reference;
             if experimental_dpb_enabled && is_reference {
                 active_reference_slots.push(HevcActiveReferenceSlot {
                     slot,
@@ -1971,15 +2556,80 @@ fn probe_hevc_decode_submit_execution(
                     active_reference_slots.drain(0..evicted);
                 }
             }
+            if use_scope_per_access_unit && submitted_index + 1 < payload.access_units.len() {
+                unsafe {
+                    (video_queue_device.fp().cmd_end_video_coding_khr)(
+                        command_buffer,
+                        &vk::VideoEndCodingInfoKHR::default(),
+                    );
+                    (video_queue_device.fp().cmd_begin_video_coding_khr)(
+                        command_buffer,
+                        &begin_coding_info,
+                    );
+                }
+            }
         }
-        submitted_access_units = u32::try_from(payload.access_units.len()).unwrap_or(u32::MAX);
-        // SAFETY: command buffer is recording and video coding has started.
+        // End the single video coding scope after all frames have been decoded and copied.
+        // SAFETY: command buffer is in a video coding scope started before the loop.
         unsafe {
             (video_queue_device.fp().cmd_end_video_coding_khr)(
                 command_buffer,
                 &vk::VideoEndCodingInfoKHR::default(),
             );
         }
+        // Post-scope batch copy: flush all reference frames whose readbacks are still pending.
+        // The video coding scope is now closed, so layout transitions from VIDEO_DECODE_DST_KHR
+        // to TRANSFER_SRC_OPTIMAL no longer interact with NVIDIA's DPB cache.
+        let deferred_slot_indices: Vec<usize> = per_slot_deferred
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, maybe)| maybe.as_ref().map(|_| idx))
+            .collect();
+        if !deferred_slot_indices.is_empty() {
+            let post_scope_barriers: Vec<vk::ImageMemoryBarrier2> = deferred_slot_indices
+                .iter()
+                .map(|&slot_idx| {
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                        // Include both WRITE and READ: the last use of each reference slot is a
+                        // VIDEO_DECODE_READ by a later P/B-frame; both must be ordered before the
+                        // layout transition.
+                        .src_access_mask(
+                            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
+                                | vk::AccessFlags2::VIDEO_DECODE_READ_KHR,
+                        )
+                        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .old_layout(decode_working_layout)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .image(decode_images[0])
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: slot_idx as u32,
+                            layer_count: 1,
+                        })
+                })
+                .collect();
+            // SAFETY: barriers transition deferred slots; copies read from each slot's layer.
+            unsafe {
+                device.cmd_pipeline_barrier2(
+                    command_buffer,
+                    &vk::DependencyInfo::default().image_memory_barriers(&post_scope_barriers),
+                );
+                for regions in per_slot_deferred.iter().flatten() {
+                    device.cmd_copy_image_to_buffer(
+                        command_buffer,
+                        decode_images[0],
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        readback_buffer,
+                        regions,
+                    );
+                }
+            }
+        }
+        submitted_access_units = u32::try_from(payload.access_units.len()).unwrap_or(u32::MAX);
         // SAFETY: command buffer is in recording state.
         unsafe { device.end_command_buffer(command_buffer) }
             .map_err(|err| format!("vkEndCommandBuffer failed: {err}"))?;
@@ -2015,6 +2665,25 @@ fn probe_hevc_decode_submit_execution(
         readback_sample = readback_slice.to_vec();
         // SAFETY: pointer returned by `vkMapMemory` is valid for `readback_len` bytes.
         readback_non_zero = readback_slice.iter().any(|&byte| byte != 0);
+        if std::env::var("VIDEO_HW_VULKAN_HEVC_DEBUG_READBACK_SUMS").as_deref() == Ok("1") {
+            let y_bytes = usize::try_from(coded_extent.width)
+                .ok()
+                .and_then(|w| {
+                    usize::try_from(coded_extent.height)
+                        .ok()
+                        .and_then(|h| w.checked_mul(h))
+                })
+                .unwrap_or(0);
+            let sample_count = usize::try_from(readback_sample_count).unwrap_or(0).min(10);
+            for sample_index in 0..sample_count {
+                let start = sample_index.saturating_mul(readback_sample_stride);
+                let end = start.saturating_add(y_bytes).min(readback_slice.len());
+                let sum = readback_slice[start..end]
+                    .iter()
+                    .fold(0_u64, |acc, &byte| acc.saturating_add(u64::from(byte)));
+                eprintln!("[RAWBUF] sample={} y_sum={sum}", sample_index + 1);
+            }
+        }
         // SAFETY: readback buffer memory was mapped in this scope and must be unmapped once.
         unsafe {
             device.unmap_memory(readback_buffer_memory);
@@ -2030,22 +2699,36 @@ fn probe_hevc_decode_submit_execution(
         if command_pool != vk::CommandPool::null() {
             device.destroy_command_pool(command_pool, None);
         }
-        for decode_image_view in decode_image_views {
-            if decode_image_view != vk::ImageView::null() {
-                device.destroy_image_view(decode_image_view, None);
+        for view in decode_image_views {
+            if view != vk::ImageView::null() {
+                device.destroy_image_view(view, None);
             }
         }
-        if decode_image != vk::Image::null() {
-            device.destroy_image(decode_image, None);
+        if decode_image_view != vk::ImageView::null() {
+            device.destroy_image_view(decode_image_view, None);
         }
-        if decode_image_memory != vk::DeviceMemory::null() {
-            device.free_memory(decode_image_memory, None);
+        for slot_image in decode_images {
+            if slot_image != vk::Image::null() {
+                device.destroy_image(slot_image, None);
+            }
         }
-        if src_buffer != vk::Buffer::null() {
-            device.destroy_buffer(src_buffer, None);
+        for slot_memory in decode_image_memories {
+            if slot_memory != vk::DeviceMemory::null() {
+                device.free_memory(slot_memory, None);
+            }
+        }
+        for per_au_buf in src_buffer_per_au {
+            if per_au_buf != vk::Buffer::null() {
+                device.destroy_buffer(per_au_buf, None);
+            }
         }
         if src_buffer_memory != vk::DeviceMemory::null() {
             device.free_memory(src_buffer_memory, None);
+        }
+        for memory in src_buffer_memories {
+            if memory != vk::DeviceMemory::null() {
+                device.free_memory(memory, None);
+            }
         }
         if readback_buffer != vk::Buffer::null() {
             device.destroy_buffer(readback_buffer, None);
@@ -2105,9 +2788,15 @@ fn build_hevc_submit_probe_bitstream_payload(
     parameter_sets: &HevcParameterSets,
     bitstream: &[u8],
     access_unit_limit: usize,
+    offset_alignment: u64,
+    size_alignment: u64,
 ) -> Result<HevcSubmitProbeBitstreamPayload, String> {
     let parsed_pps = parse_hevc_pps(&parameter_sets.pps)?;
-    let mut bytes = Vec::new();
+    let max_poc_lsb =
+        i32::try_from(parameter_sets.parsed_sps.max_pic_order_cnt_lsb()).unwrap_or(i32::MAX / 2);
+    let mut unwrapper =
+        HevcPocUnwrapper::new(parameter_sets.parsed_sps.log2_max_pic_order_cnt_lsb_minus4);
+    let mut bytes: Vec<u8> = Vec::new();
     let mut access_units = Vec::new();
     for nalu in split_annexb_nalus(bitstream) {
         let Some(nal_unit_type) = hevc_nal_type_raw(nalu) else {
@@ -2123,22 +2812,72 @@ fn build_hevc_submit_probe_bitstream_payload(
         if !slice_header.is_first_slice_segment {
             continue;
         }
-        append_annexb_nalu(&mut bytes, &parameter_sets.vps);
-        append_annexb_nalu(&mut bytes, &parameter_sets.sps);
-        append_annexb_nalu(&mut bytes, &parameter_sets.pps);
-        let slice_segment_offset = u32::try_from(bytes.len())
-            .map_err(|_| "submit execution probe payload offset exceeds u32 range".to_string())?;
-        append_annexb_nalu(&mut bytes, nalu);
+        let temporal_id = hevc_nalu_temporal_id(nalu);
+        let poc_full =
+            unwrapper.advance(slice_header.pic_order_cnt_lsb, nal_unit_type, temporal_id);
+        // Adjust inline RPS absolute POCs from LSB-space to full POC space so they match the
+        // full POCs stored in active_reference_slots.pic_order_cnt_val.
+        let mut inline_pocs = slice_header.inline_short_term_ref_pic_set_pocs;
+        if let Some(ref mut pocs) = inline_pocs {
+            adjust_inline_rps_pocs_to_full_poc(pocs, poc_full, max_poc_lsb);
+        }
+        // Pad the buffer so this AU starts on an offset-alignment boundary.
+        let current_len =
+            u64::try_from(bytes.len()).map_err(|_| "bitstream buffer length exceeds u64")?;
+        let buffer_offset = align_up(current_len, offset_alignment);
+        let padding = usize::try_from(buffer_offset - current_len)
+            .map_err(|_| "bitstream alignment padding exceeds usize")?;
+        bytes.resize(bytes.len() + padding, 0u8);
+
+        // Write the VCL NALU in Annex B format. VPS/SPS/PPS are provided via video session
+        // parameters; only the slice NALU is needed here.
+        if std::env::var("VIDEO_HW_VULKAN_HEVC_PREFIX_PARAM_SETS").as_deref() == Ok("1") {
+            for parameter_set_nalu in [
+                &parameter_sets.vps,
+                &parameter_sets.sps,
+                &parameter_sets.pps,
+            ] {
+                bytes.extend_from_slice(&[0, 0, 0, 1]);
+                bytes.extend_from_slice(parameter_set_nalu);
+            }
+        }
+        let vcl_start = u64::try_from(bytes.len())
+            .map_err(|_| "bitstream buffer length exceeds u64")?
+            .saturating_sub(buffer_offset);
+        let start_code_len = 3_u64;
+        bytes.extend_from_slice(&[0, 0, 1]);
+        bytes.extend_from_slice(nalu);
+        // `slice_segment_offset` is the byte offset from `buffer_offset` to the RBSP payload
+        // (past the 3-byte Annex-B start code and the 2-byte NAL unit header). Keep this as the
+        // normalized RBSP offset; the decode loop derives the driver-facing offset from it.
+        let slice_segment_offset = u32::try_from(
+            vcl_start
+                .saturating_add(start_code_len)
+                .saturating_add(u64::from(HEVC_NAL_HEADER_SIZE)),
+        )
+        .map_err(|_| "slice segment offset exceeds u32")?;
+        let vcl_end =
+            u64::try_from(bytes.len()).map_err(|_| "bitstream buffer length exceeds u64")?;
+        let vcl_size = vcl_end - buffer_offset;
+        let buffer_range = align_up(vcl_size, size_alignment);
+
         access_units.push(HevcSubmitProbeAccessUnit {
             header: HevcAccessUnitHeader {
                 nal_unit_type: slice_header.nal_unit_type,
                 pps_id: slice_header.pps_id,
                 pic_order_cnt_lsb: slice_header.pic_order_cnt_lsb,
+                temporal_id,
+                poc_full,
             },
+            buffer_offset,
+            buffer_range,
+            vcl_size,
             slice_segment_offset,
             slice_type: slice_header.slice_type,
             short_term_ref_pic_set_idx: slice_header.short_term_ref_pic_set_idx,
-            inline_short_term_ref_pic_set_usage: slice_header.inline_short_term_ref_pic_set_usage,
+            inline_short_term_ref_pic_set_pocs: inline_pocs,
+            num_bits_for_st_ref_pic_set_in_slice: slice_header.num_bits_for_st_ref_pic_set_in_slice,
+            num_delta_pocs_of_ref_rps_idx: slice_header.num_delta_pocs_of_ref_rps_idx,
         });
         if access_units.len() >= access_unit_limit {
             break;
@@ -2150,16 +2889,19 @@ fn build_hevc_submit_probe_bitstream_payload(
         );
     }
 
+    // Ensure the bytes buffer is large enough to cover the last AU's full aligned range.
+    let last_au = &access_units[access_units.len() - 1];
+    let required_len = usize::try_from(last_au.buffer_offset + last_au.buffer_range)
+        .map_err(|_| "total bitstream buffer size exceeds usize")?;
+    if bytes.len() < required_len {
+        bytes.resize(required_len, 0u8);
+    }
+
     Ok(HevcSubmitProbeBitstreamPayload {
         bytes,
         access_units,
         parsed_pps,
     })
-}
-
-fn append_annexb_nalu(buffer: &mut Vec<u8>, nalu: &[u8]) {
-    buffer.extend_from_slice(&[0, 0, 0, 1]);
-    buffer.extend_from_slice(nalu);
 }
 
 fn select_memory_type_index(
@@ -2317,6 +3059,41 @@ fn configure_hevc_experimental_dpb() -> HevcExperimentalDpbConfiguration {
         status,
         marker_path: armed_marker_path,
     }
+}
+
+fn hevc_slice_segment_offset_mode(vendor_id: u32) -> HevcSliceSegmentOffsetMode {
+    let env_value = std::env::var("VIDEO_HW_VULKAN_HEVC_SLICE_OFFSET_MODE").ok();
+    hevc_slice_segment_offset_mode_from_override(vendor_id, env_value.as_deref())
+}
+
+fn hevc_slice_segment_offset_mode_from_override(
+    vendor_id: u32,
+    override_value: Option<&str>,
+) -> HevcSliceSegmentOffsetMode {
+    if let Some(raw) = override_value {
+        if let Ok(offset) = raw.parse::<u32>() {
+            return HevcSliceSegmentOffsetMode::Fixed(offset);
+        }
+        match raw.to_ascii_lowercase().as_str() {
+            "rbsp" | "payload" | "spec" => return HevcSliceSegmentOffsetMode::RbspPayload,
+            "nalu" | "nal" | "header" => return HevcSliceSegmentOffsetMode::NaluHeader,
+            "annexb" | "startcode" | "start_code" | "zero" | "0" => {
+                return HevcSliceSegmentOffsetMode::AnnexBStartCode;
+            }
+            "global" | "global_rbsp" | "single" | "single_buffer" => {
+                return HevcSliceSegmentOffsetMode::GlobalRbspPayload;
+            }
+            "memory" | "memory_absolute" | "binding" | "bind" => {
+                return HevcSliceSegmentOffsetMode::MemoryBindingAbsolute;
+            }
+            _ => {}
+        }
+    }
+    default_hevc_slice_segment_offset_mode(vendor_id)
+}
+
+fn default_hevc_slice_segment_offset_mode(_vendor_id: u32) -> HevcSliceSegmentOffsetMode {
+    HevcSliceSegmentOffsetMode::AnnexBStartCode
 }
 
 fn build_decode_readback_regions(
@@ -2500,8 +3277,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
             narrow_u64_to_u8(value, "sps_max_num_reorder_pics")?;
     }
 
-    let short_term_ref_pic_sets = build_std_short_term_ref_pic_sets(sps)?;
+    let short_term_ref_pic_sets = build_std_short_term_ref_pic_sets(&parameter_sets.sps, sps)?;
     let long_term_ref_pics_sps = build_std_long_term_ref_pics_sps(sps)?;
+    let sequence_parameter_set_vui = build_std_sequence_parameter_set_vui(sps)?;
 
     let has_conformance_window = sps.conformance_window.conf_win_left_offset != 0
         || sps.conformance_window.conf_win_right_offset != 0
@@ -2746,7 +3524,6 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     pps_flags.set_slice_segment_header_extension_present_flag(bool_to_u32(
         parsed_pps.slice_segment_header_extension_present_flag,
     ));
-
     let std_pps = StdVideoH265PictureParameterSet {
         flags: pps_flags,
         pps_pic_parameter_set_id: parsed_pps.pps_pic_parameter_set_id,
@@ -2790,14 +3567,15 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         vps: [std_vps],
         sps: [std_sps],
         pps: [std_pps],
-        profile_tier_level,
-        dec_pic_buf_mgr,
-        short_term_ref_pic_sets,
-        long_term_ref_pics_sps,
+        profile_tier_level: Box::new(profile_tier_level),
+        dec_pic_buf_mgr: Box::new(dec_pic_buf_mgr),
+        short_term_ref_pic_sets: short_term_ref_pic_sets.into_boxed_slice(),
+        long_term_ref_pics_sps: long_term_ref_pics_sps.map(Box::new),
+        sequence_parameter_set_vui: sequence_parameter_set_vui.map(Box::new),
     };
 
-    let profile_ptr = &storage.profile_tier_level as *const StdVideoH265ProfileTierLevel;
-    let dec_pic_buf_mgr_ptr = &storage.dec_pic_buf_mgr as *const StdVideoH265DecPicBufMgr;
+    let profile_ptr = storage.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
+    let dec_pic_buf_mgr_ptr = storage.dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
     storage.vps[0].pProfileTierLevel = profile_ptr;
     storage.vps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
     storage.sps[0].pProfileTierLevel = profile_ptr;
@@ -2812,17 +3590,160 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         .long_term_ref_pics_sps
         .as_ref()
         .map_or(std::ptr::null(), |long_term| {
-            long_term as *const StdVideoH265LongTermRefPicsSps
+            long_term.as_ref() as *const StdVideoH265LongTermRefPicsSps
+        });
+    storage.sps[0].pSequenceParameterSetVui = storage
+        .sequence_parameter_set_vui
+        .as_ref()
+        .map_or(std::ptr::null(), |vui| {
+            vui.as_ref() as *const StdVideoH265SequenceParameterSetVui
         });
 
     Ok(storage)
 }
 
+fn build_std_sequence_parameter_set_vui(
+    sps: &SpsRbsp,
+) -> Result<Option<StdVideoH265SequenceParameterSetVui>, String> {
+    let Some(vui) = &sps.vui_parameters else {
+        return Ok(None);
+    };
+
+    let mut flags = empty_sps_vui_flags();
+    let (aspect_ratio_idc, sar_width, sar_height, aspect_ratio_present) =
+        match &vui.aspect_ratio_info {
+            AspectRatioInfo::Predefined(aspect_ratio_idc) => {
+                let present = *aspect_ratio_idc != AspectRatioIdc::Unspecified;
+                (u32::from(aspect_ratio_idc.0), 0, 0, present)
+            }
+            AspectRatioInfo::ExtendedSar {
+                sar_width,
+                sar_height,
+            } => (
+                u32::from(AspectRatioIdc::ExtendedSar.0),
+                *sar_width,
+                *sar_height,
+                true,
+            ),
+        };
+    flags.set_aspect_ratio_info_present_flag(bool_to_u32(aspect_ratio_present));
+    flags.set_overscan_info_present_flag(bool_to_u32(vui.overscan_appropriate_flag.is_some()));
+    flags
+        .set_overscan_appropriate_flag(bool_to_u32(vui.overscan_appropriate_flag.unwrap_or(false)));
+
+    let video_signal_present = vui.video_signal_type.video_format.0 != 5
+        || vui.video_signal_type.video_full_range_flag
+        || vui.video_signal_type.colour_primaries != 2
+        || vui.video_signal_type.transfer_characteristics != 2
+        || vui.video_signal_type.matrix_coeffs != 2;
+    flags.set_video_signal_type_present_flag(bool_to_u32(video_signal_present));
+    flags.set_video_full_range_flag(bool_to_u32(vui.video_signal_type.video_full_range_flag));
+    flags.set_colour_description_present_flag(bool_to_u32(
+        video_signal_present
+            && (vui.video_signal_type.colour_primaries != 2
+                || vui.video_signal_type.transfer_characteristics != 2
+                || vui.video_signal_type.matrix_coeffs != 2),
+    ));
+
+    flags.set_chroma_loc_info_present_flag(bool_to_u32(vui.chroma_loc_info.is_some()));
+    flags.set_neutral_chroma_indication_flag(bool_to_u32(vui.neutral_chroma_indication_flag));
+    flags.set_field_seq_flag(bool_to_u32(vui.field_seq_flag));
+    flags.set_frame_field_info_present_flag(bool_to_u32(vui.frame_field_info_present_flag));
+    let default_display_window_present = vui.default_display_window.def_disp_win_left_offset != 0
+        || vui.default_display_window.def_disp_win_right_offset != 0
+        || vui.default_display_window.def_disp_win_top_offset != 0
+        || vui.default_display_window.def_disp_win_bottom_offset != 0;
+    flags.set_default_display_window_flag(bool_to_u32(default_display_window_present));
+
+    let timing_info = vui.vui_timing_info.as_ref();
+    flags.set_vui_timing_info_present_flag(bool_to_u32(timing_info.is_some()));
+    flags.set_vui_poc_proportional_to_timing_flag(bool_to_u32(
+        timing_info.is_some_and(|timing| timing.poc_proportional_to_timing_flag),
+    ));
+    flags.set_vui_hrd_parameters_present_flag(bool_to_u32(
+        timing_info.is_some_and(|timing| timing.hrd_parameters.is_some()),
+    ));
+
+    let bitstream_restriction_present = vui
+        .bitstream_restriction
+        .restricted_ref_pic_lists_flag
+        .is_some();
+    flags.set_bitstream_restriction_flag(bool_to_u32(bitstream_restriction_present));
+    flags.set_tiles_fixed_structure_flag(bool_to_u32(
+        vui.bitstream_restriction.tiles_fixed_structure_flag,
+    ));
+    flags.set_motion_vectors_over_pic_boundaries_flag(bool_to_u32(
+        vui.bitstream_restriction
+            .motion_vectors_over_pic_boundaries_flag,
+    ));
+    flags.set_restricted_ref_pic_lists_flag(bool_to_u32(
+        vui.bitstream_restriction
+            .restricted_ref_pic_lists_flag
+            .unwrap_or(false),
+    ));
+
+    Ok(Some(StdVideoH265SequenceParameterSetVui {
+        flags,
+        aspect_ratio_idc,
+        sar_width,
+        sar_height,
+        video_format: vui.video_signal_type.video_format.0,
+        colour_primaries: vui.video_signal_type.colour_primaries,
+        transfer_characteristics: vui.video_signal_type.transfer_characteristics,
+        matrix_coeffs: vui.video_signal_type.matrix_coeffs,
+        chroma_sample_loc_type_top_field: if let Some(chroma) = &vui.chroma_loc_info {
+            narrow_u64_to_u8(chroma.top_field, "chroma_sample_loc_type_top_field")?
+        } else {
+            0
+        },
+        chroma_sample_loc_type_bottom_field: if let Some(chroma) = &vui.chroma_loc_info {
+            narrow_u64_to_u8(chroma.bottom_field, "chroma_sample_loc_type_bottom_field")?
+        } else {
+            0
+        },
+        reserved1: 0,
+        reserved2: 0,
+        def_disp_win_left_offset: narrow_u64_to_u16(
+            vui.default_display_window.def_disp_win_left_offset,
+            "def_disp_win_left_offset",
+        )?,
+        def_disp_win_right_offset: narrow_u64_to_u16(
+            vui.default_display_window.def_disp_win_right_offset,
+            "def_disp_win_right_offset",
+        )?,
+        def_disp_win_top_offset: narrow_u64_to_u16(
+            vui.default_display_window.def_disp_win_top_offset,
+            "def_disp_win_top_offset",
+        )?,
+        def_disp_win_bottom_offset: narrow_u64_to_u16(
+            vui.default_display_window.def_disp_win_bottom_offset,
+            "def_disp_win_bottom_offset",
+        )?,
+        vui_num_units_in_tick: timing_info.map_or(0, |timing| timing.num_units_in_tick.get()),
+        vui_time_scale: timing_info.map_or(0, |timing| timing.time_scale.get()),
+        vui_num_ticks_poc_diff_one_minus1: timing_info
+            .and_then(|timing| timing.num_ticks_poc_diff_one_minus1)
+            .unwrap_or(0),
+        min_spatial_segmentation_idc: vui.bitstream_restriction.min_spatial_segmentation_idc,
+        reserved3: 0,
+        max_bytes_per_pic_denom: vui.bitstream_restriction.max_bytes_per_pic_denom,
+        max_bits_per_min_cu_denom: vui.bitstream_restriction.max_bits_per_min_cu_denom,
+        log2_max_mv_length_horizontal: vui.bitstream_restriction.log2_max_mv_length_horizontal,
+        log2_max_mv_length_vertical: vui.bitstream_restriction.log2_max_mv_length_vertical,
+        pHrdParameters: std::ptr::null(),
+    }))
+}
+
 fn build_std_short_term_ref_pic_sets(
+    sps_nalu: &[u8],
     sps: &SpsRbsp,
 ) -> Result<Vec<StdVideoH265ShortTermRefPicSet>, String> {
     let short_term = &sps.short_term_ref_pic_sets;
     let set_count = short_term.num_delta_pocs.len();
+    let prediction_metadata = parse_hevc_sps_short_term_ref_pic_set_prediction_metadata(
+        sps_nalu, sps,
+    )
+    .unwrap_or_else(|_| vec![HevcSpsShortTermRefPicSetPredictionMetadata::default(); set_count]);
     let mut sets = Vec::with_capacity(set_count);
 
     for set_index in 0..set_count {
@@ -2893,16 +3814,25 @@ fn build_std_short_term_ref_pic_sets(
         let used_by_curr_pic_s0_flag = bools_to_u16_mask(used_s0, "used_by_curr_pic_s0")?;
         let used_by_curr_pic_s1_flag = bools_to_u16_mask(used_s1, "used_by_curr_pic_s1")?;
 
+        let metadata = prediction_metadata
+            .get(set_index)
+            .copied()
+            .unwrap_or_default();
         let mut flags = empty_short_term_ref_pic_set_flags();
-        flags.set_inter_ref_pic_set_prediction_flag(0);
-        flags.set_delta_rps_sign(0);
+        flags.set_inter_ref_pic_set_prediction_flag(bool_to_u32(
+            metadata.inter_ref_pic_set_prediction_flag,
+        ));
+        flags.set_delta_rps_sign(bool_to_u32(metadata.delta_rps_sign));
 
         sets.push(StdVideoH265ShortTermRefPicSet {
             flags,
-            delta_idx_minus1: 0,
-            use_delta_flag: 0,
-            abs_delta_rps_minus1: 0,
-            used_by_curr_pic_flag: 0,
+            delta_idx_minus1: metadata.delta_idx_minus1,
+            use_delta_flag: metadata.use_delta_flag,
+            abs_delta_rps_minus1: narrow_u32_to_u16(
+                metadata.abs_delta_rps_minus1,
+                "abs_delta_rps_minus1",
+            )?,
+            used_by_curr_pic_flag: metadata.used_by_curr_pic_flag,
             used_by_curr_pic_s0_flag,
             used_by_curr_pic_s1_flag,
             reserved1: 0,
@@ -2916,6 +3846,230 @@ fn build_std_short_term_ref_pic_sets(
     }
 
     Ok(sets)
+}
+
+fn parse_hevc_sps_short_term_ref_pic_set_prediction_metadata(
+    sps_nalu: &[u8],
+    sps: &SpsRbsp,
+) -> Result<Vec<HevcSpsShortTermRefPicSetPredictionMetadata>, String> {
+    let rbsp = nalu_payload_to_rbsp(sps_nalu)?;
+    let mut reader = RbspBitReader::new(&rbsp);
+
+    let _sps_video_parameter_set_id = reader.read_bits(4)?;
+    let sps_max_sub_layers_minus1 = usize::try_from(reader.read_bits(3)?)
+        .map_err(|_| "sps_max_sub_layers_minus1 conversion failed".to_string())?;
+    let _sps_temporal_id_nesting_flag = reader.read_flag()?;
+    skip_hevc_profile_tier_level(&mut reader, sps_max_sub_layers_minus1)?;
+
+    let _sps_seq_parameter_set_id = reader.read_ue()?;
+    let chroma_format_idc = reader.read_ue()?;
+    if chroma_format_idc == 3 {
+        let _separate_colour_plane_flag = reader.read_flag()?;
+    }
+    let _pic_width_in_luma_samples = reader.read_ue()?;
+    let _pic_height_in_luma_samples = reader.read_ue()?;
+    if reader.read_flag()? {
+        let _conf_win_left_offset = reader.read_ue()?;
+        let _conf_win_right_offset = reader.read_ue()?;
+        let _conf_win_top_offset = reader.read_ue()?;
+        let _conf_win_bottom_offset = reader.read_ue()?;
+    }
+    let _bit_depth_luma_minus8 = reader.read_ue()?;
+    let _bit_depth_chroma_minus8 = reader.read_ue()?;
+    let _log2_max_pic_order_cnt_lsb_minus4 = reader.read_ue()?;
+
+    let sps_sub_layer_ordering_info_present_flag = reader.read_flag()?;
+    let ordering_start = if sps_sub_layer_ordering_info_present_flag {
+        0
+    } else {
+        sps_max_sub_layers_minus1
+    };
+    for _ in ordering_start..=sps_max_sub_layers_minus1 {
+        let _sps_max_dec_pic_buffering_minus1 = reader.read_ue()?;
+        let _sps_max_num_reorder_pics = reader.read_ue()?;
+        let _sps_max_latency_increase_plus1 = reader.read_ue()?;
+    }
+
+    let _log2_min_luma_coding_block_size_minus3 = reader.read_ue()?;
+    let _log2_diff_max_min_luma_coding_block_size = reader.read_ue()?;
+    let _log2_min_luma_transform_block_size_minus2 = reader.read_ue()?;
+    let _log2_diff_max_min_luma_transform_block_size = reader.read_ue()?;
+    let _max_transform_hierarchy_depth_inter = reader.read_ue()?;
+    let _max_transform_hierarchy_depth_intra = reader.read_ue()?;
+
+    if reader.read_flag()? {
+        let sps_scaling_list_data_present_flag = reader.read_flag()?;
+        if sps_scaling_list_data_present_flag {
+            skip_hevc_scaling_list_data(&mut reader)?;
+        }
+    }
+
+    let _amp_enabled_flag = reader.read_flag()?;
+    let _sample_adaptive_offset_enabled_flag = reader.read_flag()?;
+    if reader.read_flag()? {
+        let _pcm_sample_bit_depth_luma_minus1 = reader.read_bits(4)?;
+        let _pcm_sample_bit_depth_chroma_minus1 = reader.read_bits(4)?;
+        let _log2_min_pcm_luma_coding_block_size_minus3 = reader.read_ue()?;
+        let _log2_diff_max_min_pcm_luma_coding_block_size = reader.read_ue()?;
+        let _pcm_loop_filter_disabled_flag = reader.read_flag()?;
+    }
+
+    let num_short_term_ref_pic_sets = usize::try_from(reader.read_ue()?)
+        .map_err(|_| "num_short_term_ref_pic_sets conversion failed".to_string())?;
+    let expected_count = sps.short_term_ref_pic_sets.num_delta_pocs.len();
+    if num_short_term_ref_pic_sets != expected_count {
+        return Err(format!(
+            "SPS ST-RPS count mismatch: raw={num_short_term_ref_pic_sets}, parsed={expected_count}"
+        ));
+    }
+
+    let mut metadata = Vec::with_capacity(num_short_term_ref_pic_sets);
+    for st_rps_idx in 0..num_short_term_ref_pic_sets {
+        metadata.push(parse_hevc_sps_st_ref_pic_set_prediction_metadata(
+            &mut reader,
+            st_rps_idx,
+            num_short_term_ref_pic_sets,
+            sps,
+        )?);
+    }
+    Ok(metadata)
+}
+
+fn skip_hevc_profile_tier_level(
+    reader: &mut RbspBitReader<'_>,
+    max_sub_layers_minus1: usize,
+) -> Result<(), String> {
+    let _general_profile_space_tier_profile_idc = reader.read_bits(8)?;
+    let _general_profile_compatibility_flags = reader.read_bits(32)?;
+    let _general_constraint_indicator_flags_hi = reader.read_bits(32)?;
+    let _general_constraint_indicator_flags_lo = reader.read_bits(16)?;
+    let _general_level_idc = reader.read_bits(8)?;
+
+    let mut sub_layer_profile_present = [false; 7];
+    let mut sub_layer_level_present = [false; 7];
+    for i in 0..max_sub_layers_minus1 {
+        sub_layer_profile_present[i] = reader.read_flag()?;
+        sub_layer_level_present[i] = reader.read_flag()?;
+    }
+    if max_sub_layers_minus1 > 0 {
+        for _ in max_sub_layers_minus1..8 {
+            let _reserved_zero_2bits = reader.read_bits(2)?;
+        }
+    }
+    for i in 0..max_sub_layers_minus1 {
+        if sub_layer_profile_present[i] {
+            let _sub_layer_profile_space_tier_profile_idc = reader.read_bits(8)?;
+            let _sub_layer_profile_compatibility_flags = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_hi = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_lo = reader.read_bits(16)?;
+        }
+        if sub_layer_level_present[i] {
+            let _sub_layer_level_idc = reader.read_bits(8)?;
+        }
+    }
+    Ok(())
+}
+
+fn skip_hevc_scaling_list_data(reader: &mut RbspBitReader<'_>) -> Result<(), String> {
+    for size_id in 0..4 {
+        let matrix_count = if size_id == 3 { 2 } else { 6 };
+        for _ in 0..matrix_count {
+            let scaling_list_pred_mode_flag = reader.read_flag()?;
+            if !scaling_list_pred_mode_flag {
+                let _scaling_list_pred_matrix_id_delta = reader.read_ue()?;
+                continue;
+            }
+            let coef_num = 64_usize.min(1_usize << (4 + (size_id << 1)));
+            if size_id > 1 {
+                let _scaling_list_dc_coef_minus8 = reader.read_se()?;
+            }
+            for _ in 0..coef_num {
+                let _scaling_list_delta_coef = reader.read_se()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_hevc_sps_st_ref_pic_set_prediction_metadata(
+    reader: &mut RbspBitReader<'_>,
+    st_rps_idx: usize,
+    num_short_term_ref_pic_sets: usize,
+    sps: &SpsRbsp,
+) -> Result<HevcSpsShortTermRefPicSetPredictionMetadata, String> {
+    let inter_ref_pic_set_prediction_flag = if st_rps_idx == 0 {
+        false
+    } else {
+        reader.read_flag()?
+    };
+    if !inter_ref_pic_set_prediction_flag {
+        let num_negative_pics = usize::try_from(reader.read_ue()?)
+            .map_err(|_| "num_negative_pics conversion failed".to_string())?;
+        let num_positive_pics = usize::try_from(reader.read_ue()?)
+            .map_err(|_| "num_positive_pics conversion failed".to_string())?;
+        for _ in 0..num_negative_pics {
+            let _delta_poc_s0_minus1 = reader.read_ue()?;
+            let _used_by_curr_pic_s0_flag = reader.read_flag()?;
+        }
+        for _ in 0..num_positive_pics {
+            let _delta_poc_s1_minus1 = reader.read_ue()?;
+            let _used_by_curr_pic_s1_flag = reader.read_flag()?;
+        }
+        return Ok(HevcSpsShortTermRefPicSetPredictionMetadata::default());
+    }
+
+    let delta_idx_minus1 = if st_rps_idx == num_short_term_ref_pic_sets {
+        reader.read_ue()?
+    } else {
+        0
+    };
+    let ref_rps_idx = st_rps_idx
+        .checked_sub(usize::try_from(delta_idx_minus1).unwrap_or(usize::MAX).saturating_add(1))
+        .ok_or_else(|| {
+            format!(
+                "SPS predicted short-term RPS index underflow: st_rps_idx={st_rps_idx}, delta_idx_minus1={delta_idx_minus1}"
+            )
+        })?;
+    let delta_rps_sign = reader.read_flag()?;
+    let abs_delta_rps_minus1 = reader.read_ue()?;
+    let ref_num_delta_pocs = sps
+        .short_term_ref_pic_sets
+        .num_delta_pocs
+        .get(ref_rps_idx)
+        .copied()
+        .ok_or_else(|| format!("SPS predicted ST-RPS ref index {ref_rps_idx} missing"))?;
+    let ref_num_delta_pocs = usize::try_from(ref_num_delta_pocs)
+        .map_err(|_| "ref_num_delta_pocs conversion failed".to_string())?;
+
+    let mut used_by_curr_pic_flag = 0_u16;
+    let mut use_delta_flag = 0_u16;
+    for index in 0..=ref_num_delta_pocs {
+        let used = reader.read_flag()?;
+        if used {
+            used_by_curr_pic_flag |= 1_u16
+                .checked_shl(u32::try_from(index).unwrap_or(u32::MAX))
+                .unwrap_or(0);
+            use_delta_flag |= 1_u16
+                .checked_shl(u32::try_from(index).unwrap_or(u32::MAX))
+                .unwrap_or(0);
+        } else {
+            let use_delta = reader.read_flag()?;
+            if use_delta {
+                use_delta_flag |= 1_u16
+                    .checked_shl(u32::try_from(index).unwrap_or(u32::MAX))
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    Ok(HevcSpsShortTermRefPicSetPredictionMetadata {
+        inter_ref_pic_set_prediction_flag,
+        delta_idx_minus1,
+        delta_rps_sign,
+        abs_delta_rps_minus1,
+        used_by_curr_pic_flag,
+        use_delta_flag,
+    })
 }
 
 fn build_std_long_term_ref_pics_sps(
@@ -3181,7 +4335,9 @@ fn parse_hevc_slice_header(
             pic_order_cnt_lsb: None,
             slice_type: None,
             short_term_ref_pic_set_idx: None,
-            inline_short_term_ref_pic_set_usage: None,
+            inline_short_term_ref_pic_set_pocs: None,
+            num_bits_for_st_ref_pic_set_in_slice: 0,
+            num_delta_pocs_of_ref_rps_idx: 0,
         });
     }
 
@@ -3205,31 +4361,65 @@ fn parse_hevc_slice_header(
             "slice_pic_order_cnt_lsb",
         )?)
     };
-    let (short_term_ref_pic_set_idx, inline_short_term_ref_pic_set_usage) = if is_hevc_idr_nal_type(
-        nal_unit_type,
-    ) {
-        (None, None)
+    let (
+        short_term_ref_pic_set_idx,
+        inline_short_term_ref_pic_set_pocs,
+        num_bits_for_st_ref_pic_set_in_slice,
+        num_delta_pocs_of_ref_rps_idx,
+    ) = if is_hevc_idr_nal_type(nal_unit_type) {
+        (None, None, 0_u16, 0_u8)
     } else {
         let short_term_ref_pic_set_count = sps.short_term_ref_pic_sets.num_delta_pocs.len();
+        // Per HEVC spec 7.4.7.1: NumBitsForSTRefPicSetInSlice counts only the bits of
+        // st_ref_pic_set() (sps_flag=0) or short_term_ref_pic_set_idx (sps_flag=1, count>1).
+        // The 1-bit short_term_ref_pic_set_sps_flag is NOT included.  Capture bits_before
+        // AFTER reading the sps_flag so the measured delta excludes it.
+        let current_poc = pic_order_cnt_lsb.map(i32::from).unwrap_or(0);
         if short_term_ref_pic_set_count == 0 {
-            (
-                None,
-                parse_hevc_inline_short_term_ref_pic_set_usage(&mut reader, 0, sps)?,
-            )
+            // num_short_term_ref_pic_sets==0: sps_flag is still transmitted (always 0).
+            let _sps_flag_always_zero = reader.read_flag()?;
+            let bits_before = reader.bit_offset;
+            let result =
+                parse_hevc_inline_short_term_ref_pic_set_usage(&mut reader, 0, sps, current_poc)?;
+            let bits_after = reader.bit_offset;
+            let num_bits =
+                u16::try_from(bits_after.saturating_sub(bits_before)).unwrap_or(u16::MAX);
+            match result {
+                Some(pocs) => (
+                    None,
+                    Some(pocs),
+                    num_bits,
+                    u8::try_from(pocs.num_delta_pocs_of_ref_rps_idx).unwrap_or(u8::MAX),
+                ),
+                None => (None, None, 0, 0),
+            }
         } else {
             let short_term_ref_pic_set_sps_flag = reader.read_flag()?;
             if !short_term_ref_pic_set_sps_flag {
-                (
-                    None,
-                    parse_hevc_inline_short_term_ref_pic_set_usage(
-                        &mut reader,
-                        short_term_ref_pic_set_count,
-                        sps,
-                    )?,
-                )
+                let bits_before = reader.bit_offset;
+                let result = parse_hevc_inline_short_term_ref_pic_set_usage(
+                    &mut reader,
+                    short_term_ref_pic_set_count,
+                    sps,
+                    current_poc,
+                )?;
+                let bits_after = reader.bit_offset;
+                let num_bits =
+                    u16::try_from(bits_after.saturating_sub(bits_before)).unwrap_or(u16::MAX);
+                match result {
+                    Some(pocs) => (
+                        None,
+                        Some(pocs),
+                        num_bits,
+                        u8::try_from(pocs.num_delta_pocs_of_ref_rps_idx).unwrap_or(u8::MAX),
+                    ),
+                    None => (None, None, 0, 0),
+                }
             } else if short_term_ref_pic_set_count == 1 {
-                (Some(0), None)
+                // sps_flag=1, exactly one SPS RPS → no index field → NumBitsForSTRefPicSetInSlice=0.
+                (Some(0), None, 0, 0)
             } else {
+                let bits_before = reader.bit_offset;
                 let index_bit_count =
                     bit_width_for_index_range(short_term_ref_pic_set_count.saturating_sub(1));
                 let parsed_index =
@@ -3241,7 +4431,10 @@ fn parse_hevc_slice_header(
                         "short_term_ref_pic_set_idx {parsed_index} exceeds SPS short-term set count {short_term_ref_pic_set_count}"
                     ));
                 }
-                (Some(parsed_index), None)
+                let bits_after = reader.bit_offset;
+                let num_bits =
+                    u16::try_from(bits_after.saturating_sub(bits_before)).unwrap_or(u16::MAX);
+                (Some(parsed_index), None, num_bits, 0)
             }
         }
     };
@@ -3253,7 +4446,9 @@ fn parse_hevc_slice_header(
         pic_order_cnt_lsb,
         slice_type: Some(slice_type),
         short_term_ref_pic_set_idx,
-        inline_short_term_ref_pic_set_usage,
+        inline_short_term_ref_pic_set_pocs,
+        num_bits_for_st_ref_pic_set_in_slice,
+        num_delta_pocs_of_ref_rps_idx,
     })
 }
 
@@ -3271,7 +4466,9 @@ fn parse_hevc_inline_short_term_ref_pic_set_usage(
     reader: &mut RbspBitReader<'_>,
     st_rps_idx: usize,
     sps: &SpsRbsp,
-) -> Result<Option<(usize, usize)>, String> {
+    current_poc: i32,
+) -> Result<Option<HevcInlineRefPicSetPocs>, String> {
+    let max_poc_lsb = i32::try_from(sps.max_pic_order_cnt_lsb()).unwrap_or(i32::MAX / 2);
     let inter_ref_pic_set_prediction_flag = if st_rps_idx == 0 {
         false
     } else {
@@ -3313,9 +4510,9 @@ fn parse_hevc_inline_short_term_ref_pic_set_usage(
             delta_rps_magnitude
         };
 
-        let mut before_count = 0_usize;
-        let mut after_count = 0_usize;
-        for delta_index in 0..=ref_num_delta_pocs {
+        let mut before_deltas: Vec<i64> = Vec::new();
+        let mut after_deltas: Vec<i64> = Vec::new();
+        for delta_index in 0..ref_num_delta_pocs {
             let used_by_curr_pic_flag = reader.read_flag()?;
             if !used_by_curr_pic_flag {
                 let _use_delta_flag = reader.read_flag()?;
@@ -3323,42 +4520,175 @@ fn parse_hevc_inline_short_term_ref_pic_set_usage(
             }
             let base_delta = if delta_index < ref_delta_poc_s0.len() {
                 ref_delta_poc_s0[delta_index]
-            } else if delta_index < ref_num_delta_pocs {
-                ref_delta_poc_s1[delta_index - ref_delta_poc_s0.len()]
             } else {
-                0
+                ref_delta_poc_s1[delta_index - ref_delta_poc_s0.len()]
             };
             let candidate_delta = base_delta.saturating_add(delta_rps);
             if candidate_delta < 0 {
-                before_count = before_count.saturating_add(1);
+                before_deltas.push(candidate_delta);
             } else if candidate_delta > 0 {
-                after_count = after_count.saturating_add(1);
+                after_deltas.push(candidate_delta);
             }
         }
-        return Ok(Some((before_count, after_count)));
+        // RefPicSetStCurrBefore: most-recent first (largest poc < current → delta closest to 0 → descending).
+        before_deltas.sort_by(|a, b| b.cmp(a));
+        // RefPicSetStCurrAfter: nearest first (smallest poc > current → delta closest to 0 → ascending).
+        after_deltas.sort();
+        let mut pocs = HevcInlineRefPicSetPocs {
+            num_delta_pocs_of_ref_rps_idx: ref_num_delta_pocs,
+            ..Default::default()
+        };
+        for delta in before_deltas.iter().take(HEVC_REF_PIC_SET_LIST_SIZE) {
+            let abs_poc =
+                (i64::from(current_poc).saturating_add(*delta)).rem_euclid(i64::from(max_poc_lsb));
+            pocs.before[pocs.before_count] = i32::try_from(abs_poc).unwrap_or(i32::MIN);
+            pocs.before_count += 1;
+        }
+        for delta in after_deltas.iter().take(HEVC_REF_PIC_SET_LIST_SIZE) {
+            let abs_poc =
+                (i64::from(current_poc).saturating_add(*delta)).rem_euclid(i64::from(max_poc_lsb));
+            pocs.after[pocs.after_count] = i32::try_from(abs_poc).unwrap_or(i32::MIN);
+            pocs.after_count += 1;
+        }
+        return Ok(Some(pocs));
     }
 
+    // Non-predicted inline RPS.  num_negative_pics and num_positive_pics are read first, then
+    // the per-picture (delta, used) pairs are interleaved within each set.
+    // Delta POC values accumulate: DeltaPocS0[i] = DeltaPocS0[i-1] - (delta_poc_s0_minus1[i] + 1),
+    // with DeltaPocS0[0] = -(delta_poc_s0_minus1[0] + 1).  Entry 0 is the most recent before-ref
+    // (smallest magnitude negative delta), matching RefPicSetStCurrBefore ordering.
+    // DeltaPocS1 accumulates positively; entry 0 is the nearest after-ref.
     let num_negative_pics = usize::try_from(reader.read_ue()?)
         .map_err(|_| "num_negative_pics conversion to usize failed".to_string())?;
     let num_positive_pics = usize::try_from(reader.read_ue()?)
         .map_err(|_| "num_positive_pics conversion to usize failed".to_string())?;
-    let mut before_count = 0_usize;
-    let mut after_count = 0_usize;
+    let mut pocs = HevcInlineRefPicSetPocs::default();
+    let mut cumulative_s0: i64 = 0;
     for _ in 0..num_negative_pics {
-        let _delta_poc_s0_minus1 = reader.read_ue()?;
+        let delta_minus1 = i64::from(reader.read_ue()?);
+        cumulative_s0 -= delta_minus1 + 1;
         let used_by_curr_pic_s0_flag = reader.read_flag()?;
-        if used_by_curr_pic_s0_flag {
-            before_count = before_count.saturating_add(1);
+        if used_by_curr_pic_s0_flag && pocs.before_count < HEVC_REF_PIC_SET_LIST_SIZE {
+            let abs_poc =
+                (i64::from(current_poc) + cumulative_s0).rem_euclid(i64::from(max_poc_lsb));
+            pocs.before[pocs.before_count] = i32::try_from(abs_poc).unwrap_or(i32::MIN);
+            pocs.before_count += 1;
         }
     }
+    let mut cumulative_s1: i64 = 0;
     for _ in 0..num_positive_pics {
-        let _delta_poc_s1_minus1 = reader.read_ue()?;
+        let delta_minus1 = i64::from(reader.read_ue()?);
+        cumulative_s1 += delta_minus1 + 1;
         let used_by_curr_pic_s1_flag = reader.read_flag()?;
-        if used_by_curr_pic_s1_flag {
-            after_count = after_count.saturating_add(1);
+        if used_by_curr_pic_s1_flag && pocs.after_count < HEVC_REF_PIC_SET_LIST_SIZE {
+            let abs_poc =
+                (i64::from(current_poc) + cumulative_s1).rem_euclid(i64::from(max_poc_lsb));
+            pocs.after[pocs.after_count] = i32::try_from(abs_poc).unwrap_or(i32::MIN);
+            pocs.after_count += 1;
         }
     }
-    Ok(Some((before_count, after_count)))
+    // Non-predicted inline RPS: NumDeltaPocsOfRefRpsIdx = 0 (already default).
+    Ok(Some(pocs))
+}
+
+/// Returns the H.265 temporal identifier (0-based) from byte 1 of the NAL unit header.
+///
+/// Per spec: `nuh_temporal_id_plus1 = nalu[1] & 0x07`; temporal_id = nuh_temporal_id_plus1 - 1.
+/// VCL NAL units always have `nuh_temporal_id_plus1 >= 1`, so saturating_sub is safe.
+fn hevc_nalu_temporal_id(nalu: &[u8]) -> u8 {
+    nalu.get(1).map_or(0, |&b| (b & 0x07).saturating_sub(1))
+}
+
+/// POC unwrapper implementing H.265 spec section 8.3.1.
+///
+/// Maintains the `prevTid0PicOrderCntMsb` / `prevTid0PicOrderCntLsb` state variables and
+/// computes the full (unwrapped) `PicOrderCntVal` for each picture in decode order.
+struct HevcPocUnwrapper {
+    max_poc_lsb: i32,
+    prev_tid0_poc_lsb: i32,
+    prev_tid0_poc_msb: i32,
+}
+
+impl HevcPocUnwrapper {
+    fn new(log2_max_pic_order_cnt_lsb_minus4: u8) -> Self {
+        Self {
+            max_poc_lsb: 1_i32 << (i32::from(log2_max_pic_order_cnt_lsb_minus4) + 4),
+            prev_tid0_poc_lsb: 0,
+            prev_tid0_poc_msb: 0,
+        }
+    }
+
+    /// Advances unwrapper state and returns the full (unwrapped) POC for the current picture.
+    fn advance(&mut self, poc_lsb: Option<u16>, nal_unit_type: u8, temporal_id: u8) -> i32 {
+        // IDR and BLA pictures always start a new POC sequence at 0.
+        let is_idr = matches!(nal_unit_type, 19 | 20);
+        let is_bla = matches!(nal_unit_type, 16..=18);
+        if is_idr || is_bla {
+            if temporal_id == 0 {
+                self.prev_tid0_poc_lsb = 0;
+                self.prev_tid0_poc_msb = 0;
+            }
+            return 0;
+        }
+
+        let poc_lsb = i32::from(poc_lsb.unwrap_or(0));
+        let max = self.max_poc_lsb;
+        let prev_lsb = self.prev_tid0_poc_lsb;
+        let prev_msb = self.prev_tid0_poc_msb;
+
+        // H.265 spec 8.3.1: PicOrderCntMsb derivation.
+        let poc_msb = if (poc_lsb < prev_lsb) && ((prev_lsb - poc_lsb) >= max / 2) {
+            prev_msb + max
+        } else if (poc_lsb > prev_lsb) && ((poc_lsb - prev_lsb) > max / 2) {
+            prev_msb - max
+        } else {
+            prev_msb
+        };
+        let poc_full = poc_msb + poc_lsb;
+
+        // Update prevTid0 state: temporal_id == 0 and not RASL/RADL/sub-layer non-reference.
+        let is_rasl_or_radl = matches!(nal_unit_type, 6..=9);
+        let is_sublayer_non_ref = matches!(nal_unit_type, 0 | 2 | 4 | 10 | 12 | 14);
+        if temporal_id == 0 && !is_rasl_or_radl && !is_sublayer_non_ref {
+            self.prev_tid0_poc_lsb = poc_lsb;
+            self.prev_tid0_poc_msb = poc_msb;
+        }
+        poc_full
+    }
+}
+
+/// Converts inline RPS absolute POCs from LSB-space to full (unwrapped) POC space in-place.
+///
+/// `parse_hevc_inline_short_term_ref_pic_set_usage` always applies `rem_euclid(max_poc_lsb)`,
+/// producing POC values in `[0, max_poc_lsb)`.  After POC unwrapping, the DPB stores full POCs,
+/// so the inline RPS target POCs must be adjusted to the same domain.
+///
+/// Before-references have `full_poc < current_poc_full`; after-references have
+/// `full_poc > current_poc_full`.  The before/after classification resolves the ambiguity
+/// in which epoch each LSB-space value belongs to.
+fn adjust_inline_rps_pocs_to_full_poc(
+    pocs: &mut HevcInlineRefPicSetPocs,
+    current_poc_full: i32,
+    max_poc_lsb: i32,
+) {
+    let poc_msb = current_poc_full - current_poc_full.rem_euclid(max_poc_lsb);
+    for p in pocs.before[..pocs.before_count].iter_mut() {
+        let candidate = poc_msb + *p;
+        *p = if candidate < current_poc_full {
+            candidate
+        } else {
+            candidate - max_poc_lsb
+        };
+    }
+    for p in pocs.after[..pocs.after_count].iter_mut() {
+        let candidate = poc_msb + *p;
+        *p = if candidate > current_poc_full {
+            candidate
+        } else {
+            candidate + max_poc_lsb
+        };
+    }
 }
 
 fn is_hevc_idr_nal_type(nal_unit_type: u8) -> bool {
@@ -3461,9 +4791,54 @@ fn select_hevc_references_for_ref_pic_set(
     selected
 }
 
+/// Selects DPB slots by exact POC match from an inline RPS.
+///
+/// Before-references are returned first (in the order they appear in `inline_pocs.before`),
+/// followed by after-references.  Missing POCs are skipped with a warning so that a stale or
+/// incomplete DPB does not panic; the caller will produce a shorter-than-expected list which the
+/// driver will likely reject, making the failure visible.
+fn select_hevc_references_by_inline_poc(
+    active_slots: &[HevcActiveReferenceSlot],
+    inline_pocs: &HevcInlineRefPicSetPocs,
+) -> Vec<HevcActiveReferenceSlot> {
+    let mut selected = Vec::new();
+    for &target_poc in inline_pocs.before[..inline_pocs.before_count].iter() {
+        match active_slots
+            .iter()
+            .find(|s| s.pic_order_cnt_val == target_poc)
+        {
+            Some(&slot) => selected.push(slot),
+            None => eprintln!(
+                "vulkan_hevc: inline RPS before-ref poc={target_poc} not found in DPB (active: {:?})",
+                active_slots
+                    .iter()
+                    .map(|s| s.pic_order_cnt_val)
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+    for &target_poc in inline_pocs.after[..inline_pocs.after_count].iter() {
+        match active_slots
+            .iter()
+            .find(|s| s.pic_order_cnt_val == target_poc)
+        {
+            Some(&slot) => selected.push(slot),
+            None => eprintln!(
+                "vulkan_hevc: inline RPS after-ref poc={target_poc} not found in DPB (active: {:?})",
+                active_slots
+                    .iter()
+                    .map(|s| s.pic_order_cnt_val)
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+    selected
+}
+
 fn build_hevc_ref_pic_set_lists(
-    reference_picture_order_cnt_values: &[i32],
+    references: &[HevcActiveReferenceSlot],
     current_pic_order_cnt_val: i32,
+    max_poc_lsb: i32,
 ) -> (
     [u8; HEVC_REF_PIC_SET_LIST_SIZE],
     [u8; HEVC_REF_PIC_SET_LIST_SIZE],
@@ -3473,19 +4848,25 @@ fn build_hevc_ref_pic_set_lists(
     let mut short_term_after = [HEVC_NO_REFERENCE_PICTURE; HEVC_REF_PIC_SET_LIST_SIZE];
     let mut before_count = 0_usize;
     let mut after_count = 0_usize;
-    for (reference_list_index, reference_pic_order_cnt_val) in
-        reference_picture_order_cnt_values.iter().enumerate()
-    {
-        let Ok(reference_list_index_u8) = u8::try_from(reference_list_index) else {
-            break;
-        };
-        if *reference_pic_order_cnt_val < current_pic_order_cnt_val {
+    for reference in references {
+        // `RefPicSetStCurrBefore` and `RefPicSetStCurrAfter` must hold **DPB slot indices**,
+        // not indices into the `pReferenceSlots` array.  The spec (VkVideoDecodeH265PictureInfoKHR)
+        // states: "each element … identifies an active reference picture using its DPB slot index".
+        let slot_u8 = u8::try_from(reference.slot).unwrap_or(u8::MAX);
+        // Use modular circular distance so that classification remains correct after POC
+        // LSB wraparound. A reference is "before" the current picture when the shortest
+        // arc distance on the circular POC space is in the past half.
+        let d = (reference.pic_order_cnt_val - current_pic_order_cnt_val)
+            .rem_euclid(max_poc_lsb.max(1));
+        if d > max_poc_lsb / 2 {
+            // Past reference (before current).
             if before_count < HEVC_REF_PIC_SET_LIST_SIZE {
-                short_term_before[before_count] = reference_list_index_u8;
+                short_term_before[before_count] = slot_u8;
                 before_count = before_count.saturating_add(1);
             }
-        } else if after_count < HEVC_REF_PIC_SET_LIST_SIZE {
-            short_term_after[after_count] = reference_list_index_u8;
+        } else if d > 0 && after_count < HEVC_REF_PIC_SET_LIST_SIZE {
+            // Future reference (after current); d == 0 means same POC (self), excluded.
+            short_term_after[after_count] = slot_u8;
             after_count = after_count.saturating_add(1);
         }
     }
@@ -3580,6 +4961,14 @@ fn empty_sps_flags() -> StdVideoH265SpsFlags {
     }
 }
 
+fn empty_sps_vui_flags() -> StdVideoH265SpsVuiFlags {
+    StdVideoH265SpsVuiFlags {
+        _bitfield_align_1: [],
+        _bitfield_1: Default::default(),
+        __bindgen_padding_0: 0,
+    }
+}
+
 fn empty_pps_flags() -> StdVideoH265PpsFlags {
     StdVideoH265PpsFlags {
         _bitfield_align_1: [],
@@ -3617,6 +5006,10 @@ fn narrow_u64_to_u8(value: u64, field_name: &str) -> Result<u8, String> {
 
 fn narrow_u64_to_u32(value: u64, field_name: &str) -> Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{field_name}={value} exceeds u32 range"))
+}
+
+fn narrow_u64_to_u16(value: u64, field_name: &str) -> Result<u16, String> {
+    u16::try_from(value).map_err(|_| format!("{field_name}={value} exceeds u16 range"))
 }
 
 fn narrow_u32_to_u8(value: u32, field_name: &str) -> Result<u8, String> {
@@ -3788,7 +5181,11 @@ fn query_hevc_decode_output_formats(
     let profiles = [profile];
     let mut profile_list = vk::VideoProfileListInfoKHR::default().profiles(&profiles);
     let format_info = vk::PhysicalDeviceVideoFormatInfoKHR::default()
-        .image_usage(vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR)
+        .image_usage(
+            vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+        )
         .push_next(&mut profile_list);
 
     let mut property_count = 0_u32;
@@ -3978,6 +5375,7 @@ fn create_hevc_decode_device(
         vk::KHR_VIDEO_QUEUE_NAME.as_ptr(),
         vk::KHR_VIDEO_DECODE_QUEUE_NAME.as_ptr(),
         vk::KHR_VIDEO_DECODE_H265_NAME.as_ptr(),
+        vk::KHR_SYNCHRONIZATION2_NAME.as_ptr(),
     ];
     let mut synchronization2_features =
         vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
@@ -4199,20 +5597,94 @@ mod tests {
             &parameter_sets,
             &bitstream,
             MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS,
+            1,
+            1,
         )
         .expect("submit probe payload should be built from parsed parameter sets");
-        assert!(payload.bytes.starts_with(&[0, 0, 0, 1]));
+        // First AU starts at offset 0 with alignment=1; first bytes are the Annex B start code.
+        assert!(payload.bytes.starts_with(&[0, 0, 1]));
         assert_eq!(
             payload.access_units.len(),
             MAX_HEVC_SUBMIT_PROBE_ACCESS_UNITS
         );
-        assert!(
-            usize::try_from(payload.access_units[0].slice_segment_offset)
-                .is_ok_and(|offset| offset < payload.bytes.len())
-        );
+        let au0 = &payload.access_units[0];
+        // slice_segment_offset stores the normalized RBSP offset from buffer_offset.
+        assert_eq!(au0.slice_segment_offset, 5);
+        // Absolute position (buffer_offset + 5) must lie within the buffer.
+        let abs_offset0 = usize::try_from(au0.buffer_offset)
+            .ok()
+            .and_then(|o| o.checked_add(usize::try_from(au0.slice_segment_offset).ok()?));
+        assert!(abs_offset0.is_some_and(|o| o < payload.bytes.len()));
+
+        // AU1 must also have slice_segment_offset==5 (relative) and a non-zero buffer_offset.
+        if payload.access_units.len() > 1 {
+            let au1 = &payload.access_units[1];
+            assert_eq!(
+                au1.slice_segment_offset, 5,
+                "slice_segment_offset must point to the RBSP payload for all AUs"
+            );
+            assert!(
+                au1.buffer_offset > 0,
+                "AU1 must start at a non-zero buffer offset"
+            );
+            // The normalized RBSP offset should resolve to a valid byte inside the shared upload.
+            let rbsp_abs = au1
+                .buffer_offset
+                .checked_add(u64::from(au1.slice_segment_offset))
+                .and_then(|v| usize::try_from(v).ok());
+            assert!(
+                rbsp_abs.is_some_and(|o| o < payload.bytes.len()),
+                "RBSP offset (buffer_offset+5) for AU1 must be within buffer"
+            );
+        }
+
         assert_eq!(
             payload.access_units[0].header.pps_id,
             payload.parsed_pps.pps_pic_parameter_set_id
+        );
+    }
+
+    #[test]
+    fn hevc_slice_segment_offset_mode_defaults_to_annexb_start_code() {
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x10DE, None),
+            HevcSliceSegmentOffsetMode::AnnexBStartCode
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, None),
+            HevcSliceSegmentOffsetMode::AnnexBStartCode
+        );
+    }
+
+    #[test]
+    fn hevc_slice_segment_offset_mode_override_takes_precedence() {
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x10DE, Some("rbsp")),
+            HevcSliceSegmentOffsetMode::RbspPayload
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("nalu")),
+            HevcSliceSegmentOffsetMode::NaluHeader
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("startcode")),
+            HevcSliceSegmentOffsetMode::AnnexBStartCode
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("global")),
+            HevcSliceSegmentOffsetMode::GlobalRbspPayload
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("memory")),
+            HevcSliceSegmentOffsetMode::MemoryBindingAbsolute
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("5")),
+            HevcSliceSegmentOffsetMode::Fixed(5)
+        );
+        assert_eq!(
+            hevc_slice_segment_offset_mode_from_override(0x8086, Some("unknown")),
+            HevcSliceSegmentOffsetMode::AnnexBStartCode
         );
     }
 
@@ -4232,6 +5704,8 @@ mod tests {
             &parameter_sets,
             &bitstream,
             access_unit_headers.len(),
+            1,
+            1,
         )
         .expect("extended submit payload should be built");
         assert_eq!(payload.access_units.len(), access_unit_headers.len());
@@ -4394,6 +5868,11 @@ mod tests {
 
     #[test]
     fn parse_hevc_inline_short_term_ref_pic_set_usage_reads_used_counts() {
+        // Manually encoded non-predicted inline RPS with current_poc=10:
+        //   num_negative_pics=1, num_positive_pics=2
+        //   negative[0]: delta_poc_s0_minus1=0, used=1  → DeltaPocS0[0]=-1  → abs_poc=9
+        //   positive[0]: delta_poc_s1_minus1=0, used=0  (not used by current picture)
+        //   positive[1]: delta_poc_s1_minus1=1, used=1  → DeltaPocS1[1]=3   → abs_poc=13
         let rbsp = [0x4f_u8, 0x94_u8];
         let mut reader = RbspBitReader::new(&rbsp);
         let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4404,13 +5883,19 @@ mod tests {
         let bitstream = std::fs::read(sample_path).expect("sample-10s.h265 should be readable");
         let parameter_sets = extract_hevc_parameter_sets_annexb(&bitstream)
             .expect("repository HEVC sample should contain VPS/SPS/PPS");
-        let usage = parse_hevc_inline_short_term_ref_pic_set_usage(
+        let pocs = parse_hevc_inline_short_term_ref_pic_set_usage(
             &mut reader,
             0,
             &parameter_sets.parsed_sps,
+            10,
         )
-        .expect("inline short-term RPS usage should parse");
-        assert_eq!(usage, Some((1, 1)));
+        .expect("inline short-term RPS usage should parse")
+        .expect("result should be Some");
+        assert_eq!(pocs.before_count, 1, "one before-reference");
+        assert_eq!(pocs.after_count, 1, "one after-reference");
+        assert_eq!(pocs.before[0], 9, "before-ref poc = 10 + (-1)");
+        assert_eq!(pocs.after[0], 13, "after-ref poc = 10 + 3");
+        assert_eq!(pocs.num_delta_pocs_of_ref_rps_idx, 0, "non-predicted → 0");
     }
 
     #[test]
@@ -4474,19 +5959,51 @@ mod tests {
         push_ue(&mut bits, 0); // delta_idx_minus1
         bits.push(false); // delta_rps_sign
         push_ue(&mut bits, 0); // abs_delta_rps_minus1
-        for _ in 0..=ref_num_delta_pocs {
+        for _ in 0..ref_num_delta_pocs {
             bits.push(false); // used_by_curr_pic_flag
             bits.push(false); // use_delta_flag
         }
         let rbsp = bits_to_bytes(&bits);
         let mut reader = RbspBitReader::new(&rbsp);
-        let usage = parse_hevc_inline_short_term_ref_pic_set_usage(
+        let pocs = parse_hevc_inline_short_term_ref_pic_set_usage(
             &mut reader,
             short_term_count,
             &parameter_sets.parsed_sps,
+            0,
         )
-        .expect("predicted short-term RPS usage should parse");
-        assert_eq!(usage, Some((0, 0)));
+        .expect("predicted short-term RPS usage should parse")
+        .expect("result should be Some");
+        assert_eq!(pocs.before_count, 0, "all entries unused → no before-refs");
+        assert_eq!(pocs.after_count, 0, "all entries unused → no after-refs");
+        assert_eq!(pocs.num_delta_pocs_of_ref_rps_idx, ref_num_delta_pocs);
+    }
+
+    #[test]
+    fn select_hevc_references_by_inline_poc_picks_exact_poc() {
+        // Regression: DPB contains poc=0, poc=4, poc=2 in insertion order.
+        // Inline RPS requests poc=4 as a before-reference.
+        // Must select poc=4, not poc=2 (most recently inserted before-reference).
+        let active = vec![
+            HevcActiveReferenceSlot {
+                slot: 1,
+                pic_order_cnt_val: 0,
+            },
+            HevcActiveReferenceSlot {
+                slot: 2,
+                pic_order_cnt_val: 4,
+            },
+            HevcActiveReferenceSlot {
+                slot: 3,
+                pic_order_cnt_val: 2,
+            },
+        ];
+        let mut inline_pocs = HevcInlineRefPicSetPocs::default();
+        inline_pocs.before[0] = 4;
+        inline_pocs.before_count = 1;
+        let selected = select_hevc_references_by_inline_poc(&active, &inline_pocs);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pic_order_cnt_val, 4);
+        assert_eq!(selected[0].slot, 2);
     }
 
     #[test]
@@ -4545,20 +6062,56 @@ mod tests {
     }
 
     #[test]
-    fn build_hevc_ref_pic_set_lists_assigns_before_and_after_indices() {
-        let references = vec![12_i32, 8, 16];
-        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 10);
-        assert_eq!(before[0], 1);
+    fn build_hevc_ref_pic_set_lists_assigns_before_and_after_ref_pic_set_indices() {
+        // `RefPicSetStCurrBefore/After` must hold **DPB slot indices** (the `.slot` field of
+        // each HevcActiveReferenceSlot), NOT positions in the `pReferenceSlots` array.
+        // Spec (VkVideoDecodeH265PictureInfoKHR): "each element … identifies an active reference
+        // picture using its DPB slot index".  Using slot values that differ from their array
+        // positions verifies this.
+        let references = vec![
+            HevcActiveReferenceSlot {
+                slot: 5,
+                pic_order_cnt_val: 12,
+            }, // index=0, after (poc 12 > 10)
+            HevcActiveReferenceSlot {
+                slot: 3,
+                pic_order_cnt_val: 8,
+            }, // index=1, before (poc 8 < 10)
+            HevcActiveReferenceSlot {
+                slot: 7,
+                pic_order_cnt_val: 16,
+            }, // index=2, after (poc 16 > 10)
+        ];
+        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 10, 256);
+        assert_eq!(before[0], 3); // DPB slot of poc=8 (the before reference)
         assert_eq!(before[1], HEVC_NO_REFERENCE_PICTURE);
-        assert_eq!(after[0], 0);
-        assert_eq!(after[1], 2);
+        assert_eq!(after[0], 5); // DPB slot of poc=12 (first after reference)
+        assert_eq!(after[1], 7); // DPB slot of poc=16 (second after reference)
         assert_eq!(count, 3);
     }
 
     #[test]
+    fn build_hevc_ref_pic_set_lists_excludes_equal_poc_entries() {
+        let references = vec![
+            HevcActiveReferenceSlot {
+                slot: 2,
+                pic_order_cnt_val: 10,
+            }, // equal, excluded
+            HevcActiveReferenceSlot {
+                slot: 3,
+                pic_order_cnt_val: 8,
+            }, // before
+        ];
+        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 10, 256);
+        assert_eq!(before[0], 3); // DPB slot 3 (poc=8, the before reference)
+        assert_eq!(after[0], HEVC_NO_REFERENCE_PICTURE);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn build_hevc_ref_pic_set_lists_marks_empty_entries_as_no_reference() {
-        let references = Vec::<i32>::new();
-        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 0);
+        let references = Vec::<HevcActiveReferenceSlot>::new();
+        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 0, 256);
         assert_eq!(
             before,
             [HEVC_NO_REFERENCE_PICTURE; HEVC_REF_PIC_SET_LIST_SIZE]
@@ -4671,5 +6224,113 @@ mod tests {
         assert_eq!(cached.coded_width, 1920);
         assert_eq!(cached.coded_height, 1080);
         assert!(lookup_hevc_decode_bootstrap_cache(uncapped_key).is_none());
+    }
+
+    #[test]
+    fn build_hevc_ref_pic_set_lists_classifies_correctly_after_poc_wraparound() {
+        // After POC LSB wraparound (max=256): current poc=4 (true poc=260),
+        // references at poc_lsb=253 (true poc=253, one before wraparound) must be
+        // classified as "before" using modular circular distance.
+        let references = vec![
+            HevcActiveReferenceSlot {
+                slot: 1,
+                pic_order_cnt_val: 253, // d=(253-4).rem_euclid(256)=249 > 128 → before
+            },
+            HevcActiveReferenceSlot {
+                slot: 2,
+                pic_order_cnt_val: 3, // d=(3-4).rem_euclid(256)=255 > 128 → before
+            },
+            HevcActiveReferenceSlot {
+                slot: 3,
+                pic_order_cnt_val: 6, // d=(6-4).rem_euclid(256)=2 ≤ 128 → after
+            },
+        ];
+        let (before, after, count) = build_hevc_ref_pic_set_lists(&references, 4, 256);
+        assert_eq!(
+            before[0], 1,
+            "DPB slot 1 (poc=253) should be classified as before-reference"
+        );
+        assert_eq!(
+            before[1], 2,
+            "DPB slot 2 (poc=3) should be classified as before-reference"
+        );
+        assert_eq!(
+            after[0], 3,
+            "DPB slot 3 (poc=6) should be classified as after-reference"
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn inline_rps_abs_poc_wraps_correctly_after_max_poc_lsb() {
+        // Regression: foreman stream has CRA at poc_lsb=250 followed by frames crossing
+        // the max_poc_lsb=256 boundary. At current_poc=4 (true=260), the RPS delta=-7
+        // should yield abs_poc=253 (not -3).
+        fn push_ue(bits: &mut Vec<bool>, value: u32) {
+            let code_num = value.saturating_add(1);
+            let bit_len = u32::BITS.saturating_sub(code_num.leading_zeros()) as usize;
+            for _ in 0..bit_len.saturating_sub(1) {
+                bits.push(false);
+            }
+            for bit_index in (0..bit_len).rev() {
+                bits.push(((code_num >> bit_index) & 1) != 0);
+            }
+        }
+        fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity((bits.len().saturating_add(7)) / 8);
+            let mut current = 0_u8;
+            for (index, bit) in bits.iter().enumerate() {
+                current = (current << 1) | u8::from(*bit);
+                if index % 8 == 7 {
+                    bytes.push(current);
+                    current = 0;
+                }
+            }
+            let remaining = bits.len() % 8;
+            if remaining != 0 {
+                current <<= 8 - remaining;
+                bytes.push(current);
+            }
+            bytes
+        }
+
+        // Build a non-predicted inline RPS: 1 negative pic (delta_minus1=6 → delta=-7).
+        // inter_ref_pic_set_prediction_flag is not read when st_rps_idx=0 (hardcoded false).
+        let mut bits = Vec::new();
+        push_ue(&mut bits, 1); // num_negative_pics = 1
+        push_ue(&mut bits, 0); // num_positive_pics = 0
+        push_ue(&mut bits, 6); // delta_poc_s0_minus1[0] = 6 → cumulative=-7
+        bits.push(true); // used_by_curr_pic_s0_flag = true
+        let rbsp = bits_to_bytes(&bits);
+        let mut reader = RbspBitReader::new(&rbsp);
+
+        let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.h265");
+        let bitstream = std::fs::read(sample_path).expect("sample-10s.h265 should be readable");
+        let parameter_sets = extract_hevc_parameter_sets_annexb(&bitstream)
+            .expect("repository HEVC sample should contain VPS/SPS/PPS");
+        assert_eq!(
+            parameter_sets.parsed_sps.max_pic_order_cnt_lsb(),
+            256,
+            "sample must have max_poc_lsb=256 for this test to be meaningful"
+        );
+
+        // current_poc=4, delta=-7 → raw = 4+(-7) = -3 → with rem_euclid(256) = 253
+        let pocs = parse_hevc_inline_short_term_ref_pic_set_usage(
+            &mut reader,
+            0,
+            &parameter_sets.parsed_sps,
+            4,
+        )
+        .expect("inline RPS should parse without error")
+        .expect("result should be Some");
+        assert_eq!(pocs.before_count, 1, "should have one before-reference");
+        assert_eq!(
+            pocs.before[0], 253,
+            "abs_poc should be 253 (not -3) after wraparound: 4 + (-7) rem_euclid 256 = 253"
+        );
     }
 }

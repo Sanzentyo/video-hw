@@ -215,22 +215,21 @@ impl VulkanDecoderAdapter {
         };
         let pts_step = decode_pts_step(self.config.fps);
         let mut next_slot = 0_usize;
-        let frames = access_unit_headers
+        // Build frames paired with their full picture order count for display-order sort.
+        let frames_with_poc: Vec<(i32, Frame)> = access_unit_headers
             .into_iter()
             .take(frame_count)
             .enumerate()
             .map(|(index, access_unit)| {
+                let poc = access_unit.poc_full;
                 let is_idr = access_unit.nal_unit_type == 19 || access_unit.nal_unit_type == 20;
                 if is_idr {
                     next_slot = 0;
                 }
                 let slot = next_slot % dpb_slot_count;
                 next_slot = next_slot.saturating_add(1);
-                let pts_90k = Some(
-                    self.next_pts_90k
-                        .saturating_add(usize_to_i64(index) * pts_step),
-                );
-                let mut frame = metadata_only_frame(width, height, pts_90k);
+                // PTS is assigned after POC sort so output uses display-order PTS.
+                let mut frame = metadata_only_frame(width, height, None);
                 let probe_covered = index < probe_covered_access_units;
                 frame.decode_info_flags = Some(build_hevc_metadata_decode_info_flags(
                     slot,
@@ -241,10 +240,15 @@ impl VulkanDecoderAdapter {
                     frame.argb = Some(argb_frames[index].clone());
                 }
                 frame.force_keyframe = is_idr;
-                frame
+                (poc, frame)
             })
-            .collect::<Vec<_>>();
-        Ok(frames)
+            .collect();
+        // Sort by full picture order count for display-order output.
+        Ok(sort_hevc_display_order_frames(
+            frames_with_poc,
+            self.next_pts_90k,
+            pts_step,
+        ))
     }
 }
 
@@ -982,6 +986,23 @@ fn usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+fn sort_hevc_display_order_frames(
+    mut frames_with_poc: Vec<(i32, Frame)>,
+    start_pts_90k: i64,
+    pts_step: i64,
+) -> Vec<Frame> {
+    frames_with_poc.sort_by_key(|(poc, _)| *poc);
+    frames_with_poc
+        .into_iter()
+        .enumerate()
+        .map(|(display_idx, (_, mut frame))| {
+            frame.pts_90k =
+                Some(start_pts_90k.saturating_add(usize_to_i64(display_idx) * pts_step));
+            frame
+        })
+        .collect()
+}
+
 fn i64_to_u64(value: i64) -> Option<u64> {
     u64::try_from(value).ok()
 }
@@ -1121,5 +1142,38 @@ mod tests {
     fn hevc_metadata_mode_ignores_probe_coverage_limit() {
         ensure_hevc_non_metadata_probe_coverage(true, 303, 0, 0, 0, 0)
             .expect("metadata mode should not require probe coverage");
+    }
+
+    #[test]
+    fn hevc_display_order_sorting_assigns_pts_in_display_order() {
+        let mut poc30 = metadata_only_frame(2, 2, None);
+        poc30.decode_info_flags = Some(30);
+        let mut poc10 = metadata_only_frame(2, 2, None);
+        poc10.decode_info_flags = Some(10);
+        let mut poc20 = metadata_only_frame(2, 2, None);
+        poc20.decode_info_flags = Some(20);
+
+        let frames = sort_hevc_display_order_frames(
+            vec![(30, poc30), (10, poc10), (20, poc20)],
+            9_000,
+            3_000,
+        );
+
+        let pts_and_markers: Vec<(i64, u32)> = frames
+            .into_iter()
+            .map(|frame| {
+                (
+                    frame
+                        .pts_90k
+                        .expect("display-order frames should receive pts"),
+                    frame.decode_info_flags.expect("test marker should be kept"),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            pts_and_markers,
+            vec![(9_000, 10), (12_000, 20), (15_000, 30)]
+        );
     }
 }
