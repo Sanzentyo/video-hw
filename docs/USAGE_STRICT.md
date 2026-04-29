@@ -84,11 +84,26 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - Vulkan HEVC decode は probe ベースで、`VK_KHR_video_queue` / `VK_KHR_video_decode_queue` / `VK_KHR_video_decode_h265` と `VIDEO_DECODE_KHR` 対応 queue family を前提にする
 - `DecodeOutputMode::Metadata` が基本。`DecodeOutputMode::Nv12` / `Rgb24` は bootstrap / submit / readback probe が通る場合のみ返せる
 - 非 metadata 出力は現状 `G8_B8R8_2PLANE_420_UNORM` readback と偶数の coded extent を前提にし、stream が probe で覆える access unit 数を超えると `UnsupportedConfig` になる
+- Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は実験段階。フレーム内容の正確性を必要とする用途では H.264 の Vulkan decode、または NVIDIA / Intel / VideoToolbox などの安定 backend を優先する
+- Vulkan HEVC encode は未実装で、`UnsupportedConfig` を返す
 - 同一 bitstream の bootstrap 結果は `submit_probe_access_unit_limit` と合わせてキャッシュされ、Metadata / Nv12 / Rgb24 の連続実行で毎回 device/session を作り直さない
 - 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけで、`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
 - decode 失敗時の blocker message には `session bootstrap probe` / `decode_submit_skeleton` / `decode_submit_execution` が出る。`experimental_dpb_mode` / `experimental_dpb_status`、readback 統計、`submitted_access_units` もここにまとまる
 - `VIDEO_HW_VULKAN_HEVC_DEBUG_READBACK_SUMS=1` は内部診断用で、readback の Y-plane 集計を `stderr` に出す
 - そのほかの `VIDEO_HW_VULKAN_HEVC_*` 環境変数は、`vulkan_hevc_decode` 内の probe / fault-injection 用の内部スイッチで、strict usage ではサポート対象にしない
+
+### 2.4 検証コマンド
+
+- encoder / decoder の出力品質を確認する場合は、Rust script の `cargo +nightly -Zscript scripts/quality_check.rs` を使う
+- Windows で FFmpeg が `PATH` にない場合は `FFMPEG_PATH` を明示する:
+
+```powershell
+$env:FFMPEG_PATH = '<path-to-ffmpeg.exe>'
+cargo +nightly -Zscript scripts/quality_check.rs
+```
+
+- Intel decode の `Loader::new_session: NotFound` は oneVPL runtime/driver が見つからない状態を示す。画質劣化ではなく runtime availability の問題として扱う
+- fMP4 reader の性能を見る場合は、open/index 時間、`sample_at_pts`、`keyframe_before`、`read_sample`、GOP 範囲の `iter_encoded` を分けて測る。payload は on-demand read なので、metadata-only 操作と payload read を同じ指標に混ぜない
 
 #### Intel backend トラブルシュート（Windows）
 
