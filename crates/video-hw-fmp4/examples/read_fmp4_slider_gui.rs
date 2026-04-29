@@ -111,6 +111,8 @@ struct DecodeAttempt {
     decode_backend: Backend,
     resolved_backend: BackendKind,
     output_mode: DecodeOutputMode,
+    fallback_used: bool,
+    fallback_reason: Option<String>,
     buffered_previews: Vec<(usize, DecodedPreview)>,
 }
 
@@ -809,25 +811,30 @@ fn run_smoke_test(
                 .with_context(|| format!("failed to decode checkpoint sample {target}"))?;
         let resolved_backend = attempt.resolved_backend.to_string();
         let output_mode = attempt.output_mode.to_string();
+        let fallback_reason = attempt.fallback_reason.as_deref().unwrap_or("none");
         match attempt.preview {
             Some(preview) => println!(
-                "smoke_decode sample={} requested_backend={} decode_backend={} resolved_backend={} mode={} frame={}x{} frames={}",
+                "smoke_decode sample={} requested_backend={} decode_backend={} resolved_backend={} mode={} fallback_used={} fallback_reason={} frame={}x{} frames={}",
                 target,
                 backend,
                 attempt.decode_backend,
                 resolved_backend,
                 output_mode,
+                attempt.fallback_used,
+                fallback_reason,
                 preview.width,
                 preview.height,
                 attempt.frame_count
             ),
             None => println!(
-                "smoke_decode sample={} requested_backend={} decode_backend={} resolved_backend={} mode={} preview=none frames={}",
+                "smoke_decode sample={} requested_backend={} decode_backend={} resolved_backend={} mode={} fallback_used={} fallback_reason={} preview=none frames={}",
                 target,
                 backend,
                 attempt.decode_backend,
                 resolved_backend,
                 output_mode,
+                attempt.fallback_used,
+                fallback_reason,
                 attempt.frame_count
             ),
         }
@@ -1062,6 +1069,34 @@ fn decode_attempt_for_mode(
             target_sample.sample_id
         )
     })?;
+    #[cfg(any(
+        feature = "backend-vt",
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        feature = "backend-vulkan"
+    ))]
+    let fallback_used = decoded.diagnostics.fallback_used;
+    #[cfg(not(any(
+        feature = "backend-vt",
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        feature = "backend-vulkan"
+    )))]
+    let fallback_used = false;
+    #[cfg(any(
+        feature = "backend-vt",
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        feature = "backend-vulkan"
+    ))]
+    let fallback_reason = decoded.diagnostics.fallback_reason.clone();
+    #[cfg(not(any(
+        feature = "backend-vt",
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        feature = "backend-vulkan"
+    )))]
+    let fallback_reason = None;
     let resolved_backend = decoded.resolved_backend;
     let frame_count = decoded.frames.len();
     let target_frame_index = decoded.target_frame_index;
@@ -1095,6 +1130,8 @@ fn decode_attempt_for_mode(
         decode_backend,
         resolved_backend,
         output_mode,
+        fallback_used,
+        fallback_reason,
         buffered_previews,
     })
 }

@@ -22,7 +22,8 @@ pub use fmp4_reader::{
     FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult,
     FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode, MediaTime,
     Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady, SampleId,
-    SampleLookup, SampleLookupMatch, SampleMeta, SampleRange, SyncReading, TrackId, TrackKind,
+    SampleLookup, SampleLookupMatch, SampleMeta, SampleRange, SampleReadStats, SyncReading,
+    TrackId, TrackKind, TrackReadStats,
 };
 pub use fmp4_writer::{
     ArgbFrame, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,

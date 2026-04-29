@@ -136,6 +136,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - 既定は `IndexMode::Eager` です。`IndexMode::Lazy` は `next_sample` や `read_sample` で必要分だけ metadata index を延長し、`samples(track)` のような完全な slice を返す API では EOF まで index 化します。
 - `sample_at_pts_with_delta` は `SampleLookupMatch::{Exact,Previous,FirstAfter}` で完全一致/近傍一致を返します。長い区間は `decode_range_iter`、中心sample周辺の短窓は `decode_window` を使えます。
 - `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
+- `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由を返します。
 
 ライトな確認だけ行う場合:
 
@@ -147,6 +148,13 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 
 ```bash
 cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nvidia backend-intel backend-vulkan' -- sample-videos/sample-10s.mp4 --backend nvidia --smoke-test
+```
+
+Lazy/Eager index と任意の decode smoke をまとめて見る場合:
+
+```bash
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4 --decode-features 'backend-nvidia backend-intel backend-vulkan' --decode-backend auto
 ```
 
 - headless camera record

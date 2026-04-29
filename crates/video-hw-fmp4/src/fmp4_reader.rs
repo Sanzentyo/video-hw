@@ -8,7 +8,7 @@ mod state;
 pub use config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
     Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, SampleId, SampleLookup, SampleLookupMatch,
-    SampleMeta, SampleRange, TrackId,
+    SampleMeta, SampleRange, SampleReadStats, TrackId, TrackReadStats,
 };
 pub use core::EncodedSampleIter;
 pub use decode::{

@@ -213,24 +213,9 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
-        let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
-            format!(
-                "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
-                request.backend, codec, fps, request.require_hardware
-            )
-        })?;
-        let mut session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
-            .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
-
-        let diagnostics = DecodeDiagnostics {
-            requested_backend: request.backend,
-            resolved_backend,
-            require_hardware: request.require_hardware,
-            output_mode: request.output_mode,
-            fps,
-            fallback_used: false,
-            fallback_reason: None,
-        };
+        let (mut session, diagnostics) = create_decode_session(request.backend, config)
+            .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
+        let resolved_backend = diagnostics.resolved_backend;
         let mut frames = VecDeque::new();
         let mut target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
@@ -293,14 +278,9 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
-        let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
-            format!(
-                "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
-                request.backend, codec, fps, request.require_hardware
-            )
-        })?;
-        let mut session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
-            .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
+        let (mut session, diagnostics) = create_decode_session(request.backend, config)
+            .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
+        let resolved_backend = diagnostics.resolved_backend;
         let (wanted_sample_ids, end_pts) = {
             let samples = samples_in_range(self.reader, request.range)?;
             let wanted_sample_ids = samples
@@ -359,15 +339,6 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
-        let diagnostics = DecodeDiagnostics {
-            requested_backend: request.backend,
-            resolved_backend,
-            require_hardware: request.require_hardware,
-            output_mode: request.output_mode,
-            fps,
-            fallback_used: false,
-            fallback_reason: None,
-        };
         Ok(FrameDecodeRangeResult {
             range: request.range,
             diagnostics,
@@ -398,14 +369,8 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
-        let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
-            format!(
-                "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
-                request.backend, codec, fps, request.require_hardware
-            )
-        })?;
-        let session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
-            .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
+        let (session, diagnostics) = create_decode_session(request.backend, config)
+            .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let (wanted_sample_ids, end_pts) = {
             let samples = samples_in_range(self.reader, request.range)?;
             let wanted_sample_ids = samples
@@ -438,15 +403,7 @@ impl<'a> FrameDecoder<'a> {
         let decode_samples = self.reader.iter_encoded(decode_segment)?;
         Ok(DecodedFrameIter {
             range: request.range,
-            diagnostics: DecodeDiagnostics {
-                requested_backend: request.backend,
-                resolved_backend,
-                require_hardware: request.require_hardware,
-                output_mode: request.output_mode,
-                fps,
-                fallback_used: false,
-                fallback_reason: None,
-            },
+            diagnostics,
             track,
             session,
             decode_samples,
@@ -550,6 +507,60 @@ impl Iterator for DecodedFrameIter<'_> {
                 }
             }
         }
+    }
+}
+
+fn create_decode_session(
+    requested_backend: Backend,
+    config: DecoderConfig,
+) -> Result<(AnyDecodeSession, DecodeDiagnostics)> {
+    let resolved_backend = requested_backend.resolve_decoder(&config).with_context(|| {
+        format!(
+            "failed to resolve decoder backend: requested={}, codec={}, fps={}, require_hardware={}",
+            requested_backend, config.codec, config.fps, config.require_hardware
+        )
+    })?;
+    match AnyDecodeSession::with_backend_kind(resolved_backend, config.clone()) {
+        Ok(session) => Ok((
+            session,
+            DecodeDiagnostics {
+                requested_backend,
+                resolved_backend,
+                require_hardware: config.require_hardware,
+                output_mode: config.output_mode,
+                fps: config.fps,
+                fallback_used: false,
+                fallback_reason: None,
+            },
+        )),
+        Err(primary_err) if requested_backend != Backend::Auto && !config.require_hardware => {
+            let fallback_backend = Backend::Auto
+                .resolve_decoder(&config)
+                .context("failed to resolve fallback auto decoder backend")?;
+            let fallback_reason =
+                format!("requested backend {resolved_backend} failed: {primary_err}");
+            let session = AnyDecodeSession::with_backend_kind(fallback_backend, config.clone())
+                .with_context(|| {
+                    format!(
+                        "fallback backend {fallback_backend} also failed after {resolved_backend}"
+                    )
+                })?;
+            Ok((
+                session,
+                DecodeDiagnostics {
+                    requested_backend,
+                    resolved_backend: fallback_backend,
+                    require_hardware: config.require_hardware,
+                    output_mode: config.output_mode,
+                    fps: config.fps,
+                    fallback_used: fallback_backend != resolved_backend,
+                    fallback_reason: Some(fallback_reason),
+                },
+            ))
+        }
+        Err(err) => Err(anyhow!(err).context(format!(
+            "failed to create decoder session with {resolved_backend}"
+        ))),
     }
 }
 

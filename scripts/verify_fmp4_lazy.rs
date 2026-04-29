@@ -11,16 +11,24 @@ video-hw-fmp4 = { path = "../crates/video-hw-fmp4" }
 use anyhow::{Context, Result, anyhow};
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 use video_hw_fmp4::{
     Fmp4Reader, Fmp4ReaderConfig, IndexMode, SampleId, SampleLookupMatch, TrackKind,
 };
 
-fn main() -> Result<()> {
-    let input_path = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("sample-videos/sample-10s.mp4"));
+#[derive(Debug)]
+struct Args {
+    input_path: PathBuf,
+    decode_features: Option<String>,
+    decode_backend: String,
+    require_hardware: bool,
+}
 
+fn main() -> Result<()> {
+    let args = parse_args()?;
+    let input_path = args.input_path.clone();
+
+    verify_eager(&input_path)?;
     let mut config = Fmp4ReaderConfig::new(input_path.clone());
     config.index_mode = IndexMode::Lazy;
     let mut reader = Fmp4Reader::new(config)
@@ -126,6 +134,116 @@ fn main() -> Result<()> {
     reader.clear_cache();
     println!("cache_after_clear={}", reader.status().cache_resident_bytes);
 
+    run_optional_decode_smoke(&input_path, &args)?;
+
     println!("verify_fmp4_lazy=ok");
+    Ok(())
+}
+
+fn parse_args() -> Result<Args> {
+    let mut input_path = None;
+    let mut decode_features = None;
+    let mut decode_backend = String::from("auto");
+    let mut require_hardware = false;
+    let mut iter = env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--decode-features" => {
+                decode_features = Some(
+                    iter.next()
+                        .context("--decode-features requires a feature list")?,
+                );
+            }
+            "--decode-backend" => {
+                decode_backend = iter.next().context("--decode-backend requires a backend")?;
+            }
+            "--require-hardware" => {
+                require_hardware = true;
+            }
+            "-h" | "--help" => {
+                println!(
+                    "usage: cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs [input.mp4] [--decode-features FEATURES] [--decode-backend BACKEND] [--require-hardware]"
+                );
+                std::process::exit(0);
+            }
+            value if value.starts_with('-') => {
+                return Err(anyhow!("unknown option {value}"));
+            }
+            value => {
+                if input_path.replace(PathBuf::from(value)).is_some() {
+                    return Err(anyhow!("multiple input paths were provided"));
+                }
+            }
+        }
+    }
+    Ok(Args {
+        input_path: input_path.unwrap_or_else(|| PathBuf::from("sample-videos/sample-10s.mp4")),
+        decode_features,
+        decode_backend,
+        require_hardware,
+    })
+}
+
+fn verify_eager(input_path: &PathBuf) -> Result<()> {
+    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.clone()))
+        .into_sync_session()
+        .with_context(|| format!("failed to eager-open {}", input_path.display()))?;
+    let video_track = reader
+        .tracks()
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .context("input has no video track")?
+        .track_id;
+    let sample_count = reader.samples(video_track)?.len();
+    let status = reader.status();
+    println!(
+        "eager_indexed={} track={} samples={}",
+        status.samples_indexed, video_track, sample_count
+    );
+    if sample_count == 0 {
+        return Err(anyhow!("eager reader found no video samples"));
+    }
+    if status.samples_indexed < sample_count as u64 {
+        return Err(anyhow!(
+            "eager reader indexed fewer samples than the video track exposes"
+        ));
+    }
+    Ok(())
+}
+
+fn run_optional_decode_smoke(input_path: &PathBuf, args: &Args) -> Result<()> {
+    let Some(features) = &args.decode_features else {
+        println!("decode_smoke=skipped");
+        return Ok(());
+    };
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "-p",
+        "video-hw-fmp4",
+        "--example",
+        "read_fmp4_slider_gui",
+        "--features",
+        features,
+        "--",
+    ]);
+    command.arg(input_path);
+    command.args([
+        "--backend",
+        args.decode_backend.as_str(),
+        "--smoke-test",
+    ]);
+    if args.require_hardware {
+        command.arg("--require-hardware");
+    }
+    println!(
+        "decode_smoke=running features=\"{}\" backend={} require_hardware={}",
+        features, args.decode_backend, args.require_hardware
+    );
+    let status = command.status().context("failed to spawn decode smoke test")?;
+    if !status.success() {
+        return Err(anyhow!("decode smoke test failed with status {status}"));
+    }
+    println!("decode_smoke=ok");
     Ok(())
 }

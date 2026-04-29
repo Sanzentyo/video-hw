@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroU32, path::PathBuf};
+use std::{collections::HashMap, fmt, num::NonZeroU32, path::PathBuf};
 
 use anyhow::Context;
 use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
@@ -223,6 +223,18 @@ pub struct RangeCacheStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrackReadStats {
+    pub samples_read: u64,
+    pub bytes_read: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SampleReadStats {
+    pub reads: u64,
+    pub bytes_read: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Fmp4ReaderStatus {
     pub samples_indexed: u64,
     pub samples_read: u64,
@@ -232,6 +244,8 @@ pub struct Fmp4ReaderStatus {
     pub cache_evictions: u64,
     pub cache_resident_bytes: usize,
     pub range_cache_config: RangeCacheConfig,
+    pub track_reads: HashMap<TrackId, TrackReadStats>,
+    pub sample_reads: HashMap<SampleId, SampleReadStats>,
 }
 
 pub(crate) fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<Codec> {

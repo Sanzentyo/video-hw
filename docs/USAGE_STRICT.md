@@ -103,10 +103,10 @@ cargo +nightly -Zscript scripts/quality_check.rs
 ```
 
 - Intel decode の `Loader::new_session: NotFound` は oneVPL runtime/driver が見つからない状態を示す。画質劣化ではなく runtime availability の問題として扱う
-- fMP4 reader の性能を見る場合は、open/index 時間、`sample_at_pts`、`keyframe_before`、`read_sample`、GOP 範囲の `iter_encoded` を分けて測る。payload は on-demand read なので、metadata-only 操作と payload read を同じ指標に混ぜない
-- fMP4 reader の `IndexMode::Lazy` を確認する場合は `cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4` を使う。通常 MP4 / fMP4 の両方を確認する場合は `sample-videos/foreman_cif_fmp4.mp4` でも実行する
+- fMP4 reader の性能を見る場合は、open/index 時間、`sample_at_pts`、`keyframe_before`、`read_sample`、GOP 範囲の `iter_encoded` を分けて測る。payload は on-demand read なので、metadata-only 操作と payload read を同じ指標に混ぜない。payload read の実績は `status().track_reads` / `status().sample_reads` / `cache_stats()` を記録する
+- fMP4 reader の `IndexMode::Eager` / `IndexMode::Lazy` を確認する場合は `cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4` を使う。通常 MP4 / fMP4 の両方を確認する場合は `sample-videos/foreman_cif_fmp4.mp4` でも実行する。decode checkpoint まで確認する場合は `--decode-features "backend-vulkan"` のように backend feature を渡す
 - PTS seek の厳密性が必要な場合は `sample_at_pts_with_delta` を使い、`SampleLookupMatch::Exact` / `Previous` / `FirstAfter` を記録する。完全一致かどうかを bool 推定しない
-- 長い decode 区間は `decode_range_iter` で逐次処理し、中心sample周辺の短窓は `decode_window` を使う。decode結果には `DecodeDiagnostics` を保存する
+- 長い decode 区間は `decode_range_iter` で逐次処理し、中心sample周辺の短窓は `decode_window` を使う。decode結果には `DecodeDiagnostics` を保存し、`requested_backend`、`resolved_backend`、`fallback_used`、`fallback_reason` を区別する
 
 #### Intel backend トラブルシュート（Windows）
 

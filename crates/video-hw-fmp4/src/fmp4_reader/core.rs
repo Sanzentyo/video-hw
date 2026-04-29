@@ -413,6 +413,12 @@ impl ReaderCore {
         let data = self.store.read_range(meta.offset, size)?;
         self.status.samples_read = self.status.samples_read.saturating_add(1);
         self.status.bytes_read = self.status.bytes_read.saturating_add(u64::from(meta.size));
+        let track_stats = self.status.track_reads.entry(meta.track_id).or_default();
+        track_stats.samples_read = track_stats.samples_read.saturating_add(1);
+        track_stats.bytes_read = track_stats.bytes_read.saturating_add(u64::from(meta.size));
+        let sample_stats = self.status.sample_reads.entry(sample).or_default();
+        sample_stats.reads = sample_stats.reads.saturating_add(1);
+        sample_stats.bytes_read = sample_stats.bytes_read.saturating_add(u64::from(meta.size));
         apply_cache_status(&mut self.status, &self.store);
         let kind = self
             .tracks
@@ -1077,6 +1083,19 @@ mod tests {
         core.read_sample(first_sample)
             .expect("on-demand sample read should succeed");
         let after = core.cache_stats();
+        let status = core.status();
+        let track_stats = status
+            .track_reads
+            .get(&video_track)
+            .expect("track read stats should be recorded");
+        assert_eq!(track_stats.samples_read, 1);
+        assert_eq!(track_stats.bytes_read, status.bytes_read);
+        let sample_stats = status
+            .sample_reads
+            .get(&first_sample)
+            .expect("sample read stats should be recorded");
+        assert_eq!(sample_stats.reads, 1);
+        assert_eq!(sample_stats.bytes_read, status.bytes_read);
 
         assert!(after.misses >= before.misses);
         assert!(after.resident_bytes >= before.resident_bytes);
