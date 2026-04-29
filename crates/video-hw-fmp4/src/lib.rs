@@ -18,8 +18,9 @@ mod tests;
 
 pub use fmp4_reader::{
     DecodedSampleFrame, EncodedSample, Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig,
-    Fmp4ReaderStatus, Fmp4Track, FrameDecodeRequest, FrameDecodeResult, FrameDecoder, GopSegment,
-    IndexMode, MediaTime, RangeCacheConfig, ReaderReady as Fmp4ReaderReady, SampleId, SampleMeta,
+    Fmp4ReaderStatus, Fmp4Track, FrameDecodeRangeRequest, FrameDecodeRangeResult,
+    FrameDecodeRequest, FrameDecodeResult, FrameDecoder, GopCursor, GopSegment, IndexMode,
+    MediaTime, RangeCacheConfig, ReaderReady as Fmp4ReaderReady, SampleId, SampleMeta, SampleRange,
     SyncReading, TrackId, TrackKind,
 };
 pub use fmp4_writer::{

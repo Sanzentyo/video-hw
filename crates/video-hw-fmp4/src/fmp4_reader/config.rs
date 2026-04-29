@@ -125,6 +125,13 @@ pub struct GopSegment {
     pub end_pts: MediaTime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleRange {
+    pub track_id: TrackId,
+    pub start_sample: SampleId,
+    pub end_sample_exclusive: SampleId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedSample {
     pub meta: SampleMeta,

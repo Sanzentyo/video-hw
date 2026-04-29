@@ -7,10 +7,13 @@ mod state;
 
 pub use config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, GopSegment, IndexMode, MediaTime,
-    RangeCacheConfig, SampleId, SampleMeta, TrackId,
+    RangeCacheConfig, SampleId, SampleMeta, SampleRange, TrackId,
 };
 pub use core::EncodedSampleIter;
-pub use decode::{DecodedSampleFrame, FrameDecodeRequest, FrameDecodeResult, FrameDecoder};
+pub use decode::{
+    DecodedSampleFrame, FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest,
+    FrameDecodeResult, FrameDecoder, GopCursor,
+};
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;
 pub use shiguredo_mp4::TrackKind;
