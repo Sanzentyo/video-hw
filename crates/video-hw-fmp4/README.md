@@ -73,12 +73,12 @@ fn main() -> Result<()> {
     ))
     .into_sync_session()?;
 
-    for track in reader.tracks() {
+    let tracks = reader.tracks().to_vec();
+    for track in &tracks {
         println!("track={} samples={}", track.track_id, reader.samples(track.track_id)?.len());
     }
 
-    let Some(video_track) = reader
-        .tracks()
+    let Some(video_track) = tracks
         .iter()
         .find(|track| track.kind == TrackKind::Video)
         .map(|track| track.track_id)
@@ -133,6 +133,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - 通常 MP4（non-fragmented）も読めます（例: `sample-videos/sample-10s.mp4`）。
 - GOP replay + decode submit/reap は crate 側の `FrameDecoder` が担当し、example 側は preview/cache 方針だけを持ちます。
 - 人物検出、HISDF 解釈、bbox crop、tracking、検証 artifact 保存は `video-hw-fmp4` の責務外です。上位層は `sample_at_pts`、`GopCursor`、`decode_range`、`cache_stats` を組み合わせて必要な frame/window を取得します。
+- 既定は `IndexMode::Eager` です。`IndexMode::Lazy` は `next_sample` や `read_sample` で必要分だけ metadata index を延長し、`samples(track)` のような完全な slice を返す API では EOF まで index 化します。
 
 ライトな確認だけ行う場合:
 

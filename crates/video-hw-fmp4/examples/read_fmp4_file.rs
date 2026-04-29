@@ -16,7 +16,8 @@ fn main() -> Result<()> {
     let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(cli.input));
     let mut reader = reader.into_sync_session()?;
     println!("tracks={}", reader.tracks().len());
-    for track in reader.tracks() {
+    let tracks = reader.tracks().to_vec();
+    for track in &tracks {
         println!(
             "track id={} kind={:?} duration={} timescale={}",
             track.track_id, track.kind, track.duration, track.timescale
@@ -41,16 +42,14 @@ fn main() -> Result<()> {
         .sample_id
         .map(SampleId)
         .or_else(|| {
-            reader
-                .tracks()
+            tracks
                 .iter()
                 .find(|track| track.kind == TrackKind::Video)
                 .and_then(|track| reader.samples(track.track_id).ok()?.first().cloned())
                 .map(|sample| sample.sample_id)
         })
         .or_else(|| {
-            reader
-                .tracks()
+            tracks
                 .first()
                 .and_then(|track| reader.samples(track.track_id).ok()?.first().cloned())
                 .map(|sample| sample.sample_id)

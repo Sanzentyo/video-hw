@@ -93,14 +93,17 @@ pub struct GopCursor {
 }
 
 impl GopCursor {
-    pub fn new(reader: &Fmp4Reader<SyncReading>, range: SampleRange) -> Result<Self> {
-        let samples = samples_in_range(reader, range)?;
-        let Some(first) = samples.first() else {
-            anyhow::bail!("sample range is empty");
+    pub fn new(reader: &mut Fmp4Reader<SyncReading>, range: SampleRange) -> Result<Self> {
+        let first_sample = {
+            let samples = samples_in_range(reader, range)?;
+            let Some(first) = samples.first() else {
+                anyhow::bail!("sample range is empty");
+            };
+            first.sample_id
         };
         let decode_start_sample = reader
-            .keyframe_before(first.sample_id)
-            .with_context(|| format!("no keyframe before sample {}", first.sample_id))?;
+            .keyframe_before(first_sample)
+            .with_context(|| format!("no keyframe before sample {}", first_sample))?;
         Ok(Self {
             range,
             decode_start_sample,
@@ -141,8 +144,10 @@ impl<'a> FrameDecoder<'a> {
         let codec = track
             .codec()
             .with_context(|| format!("track {} has no supported video codec", track.track_id))?;
-        let samples = self.reader.samples(request.track_id)?;
-        let fps = request.fps.unwrap_or_else(|| estimate_fps(samples)).max(1);
+        let fps = {
+            let samples = self.reader.samples(request.track_id)?;
+            request.fps.unwrap_or_else(|| estimate_fps(samples)).max(1)
+        };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
         let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
@@ -193,7 +198,6 @@ impl<'a> FrameDecoder<'a> {
             target_frame_index,
         })
     }
-
     pub fn decode_range(
         &mut self,
         request: FrameDecodeRangeRequest,
@@ -209,8 +213,10 @@ impl<'a> FrameDecoder<'a> {
         let codec = track
             .codec()
             .with_context(|| format!("track {} has no supported video codec", track.track_id))?;
-        let samples = self.reader.samples(request.range.track_id)?;
-        let fps = request.fps.unwrap_or_else(|| estimate_fps(samples)).max(1);
+        let fps = {
+            let samples = self.reader.samples(request.range.track_id)?;
+            request.fps.unwrap_or_else(|| estimate_fps(samples)).max(1)
+        };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
         let resolved_backend = request.backend.resolve_decoder(&config).with_context(|| {
@@ -221,10 +227,23 @@ impl<'a> FrameDecoder<'a> {
         })?;
         let mut session = AnyDecodeSession::with_backend_kind(resolved_backend, config)
             .with_context(|| format!("failed to create decoder session with {resolved_backend}"))?;
-        let wanted_sample_ids = samples_in_range(self.reader, request.range)?
-            .iter()
-            .map(|sample| sample.sample_id)
-            .collect::<HashSet<_>>();
+        let (wanted_sample_ids, end_pts) = {
+            let samples = samples_in_range(self.reader, request.range)?;
+            let wanted_sample_ids = samples
+                .iter()
+                .map(|sample| sample.sample_id)
+                .collect::<HashSet<_>>();
+            let end_pts = samples
+                .last()
+                .map(|sample| {
+                    MediaTime::new(
+                        sample.pts.ticks.saturating_add(u64::from(sample.duration)),
+                        sample.pts.timescale,
+                    )
+                })
+                .context("sample range is empty")?;
+            (wanted_sample_ids, end_pts)
+        };
         let mut frames = Vec::new();
         let mut ignored_target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
@@ -237,15 +256,7 @@ impl<'a> FrameDecoder<'a> {
                 .sample_meta(cursor.decode_start_sample)
                 .context("decode start sample disappeared")?
                 .pts,
-            end_pts: samples_in_range(self.reader, request.range)?
-                .last()
-                .map(|sample| {
-                    MediaTime::new(
-                        sample.pts.ticks.saturating_add(u64::from(sample.duration)),
-                        sample.pts.timescale,
-                    )
-                })
-                .context("sample range is empty")?,
+            end_pts,
         };
 
         let decode_samples = self.reader.iter_encoded(decode_segment)?;
@@ -353,7 +364,10 @@ struct DecodeCollectState<'a> {
     filter_sample_ids: Option<&'a HashSet<SampleId>>,
 }
 
-fn samples_in_range(reader: &Fmp4Reader<SyncReading>, range: SampleRange) -> Result<&[SampleMeta]> {
+fn samples_in_range(
+    reader: &mut Fmp4Reader<SyncReading>,
+    range: SampleRange,
+) -> Result<&[SampleMeta]> {
     let samples = reader.samples(range.track_id)?;
     let start = samples
         .iter()
@@ -439,7 +453,7 @@ mod tests {
             .join("..")
             .join("sample-videos")
             .join("sample-10s.mp4");
-        let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path))
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path))
             .into_sync_session()
             .expect("sample should open");
         let video_track = reader
@@ -459,7 +473,7 @@ mod tests {
             start_sample: start,
             end_sample_exclusive: SampleId(u64::MAX),
         };
-        let cursor = GopCursor::new(&reader, range).expect("cursor should resolve");
+        let cursor = GopCursor::new(&mut reader, range).expect("cursor should resolve");
 
         assert_eq!(cursor.range, range);
         assert_eq!(

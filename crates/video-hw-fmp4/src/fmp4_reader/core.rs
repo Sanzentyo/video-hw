@@ -211,13 +211,17 @@ impl SampleStore {
 #[derive(Debug)]
 pub(crate) struct ReaderCore {
     store: SampleStore,
+    demuxer: ReaderDemuxer,
     tracks: Vec<Fmp4Track>,
     samples_by_track: HashMap<TrackId, Vec<SampleMeta>>,
     sample_pts_order: HashMap<TrackId, Vec<SampleId>>,
     sample_lookup: HashMap<SampleId, (TrackId, usize)>,
     sample_entries: HashMap<SampleId, SampleEntry>,
+    current_entries: HashMap<TrackId, SampleEntry>,
     sample_order: Vec<SampleId>,
+    next_sample_id: u64,
     next_sample_index: usize,
+    index_complete: bool,
     status: Fmp4ReaderStatus,
 }
 
@@ -230,7 +234,7 @@ impl ReaderCore {
             Mp4FileKind::Mp4 => ReaderDemuxer::Mp4(Mp4FileDemuxer::new()),
         };
         feed_required_inputs(&mut store, &mut demuxer)?;
-        let mut tracks = demuxer
+        let tracks = demuxer
             .tracks()
             .context("failed to initialize MP4 demuxer")?
             .iter()
@@ -243,79 +247,28 @@ impl ReaderCore {
             })
             .collect::<Vec<_>>();
 
-        let mut current_entries = HashMap::<TrackId, SampleEntry>::new();
-        let mut samples_by_track = HashMap::<TrackId, Vec<SampleMeta>>::new();
-        let mut sample_lookup = HashMap::<SampleId, (TrackId, usize)>::new();
-        let mut sample_entries = HashMap::<SampleId, SampleEntry>::new();
-        let mut sample_order = Vec::new();
-        let mut next_sample_id = 0_u64;
-
-        match config.index_mode {
-            IndexMode::Eager => {
-                while let Some(sample) = read_next_demux_sample(&mut store, &mut demuxer)? {
-                    let sample_id = SampleId(next_sample_id);
-                    next_sample_id = next_sample_id.saturating_add(1);
-                    let track_id = TrackId(sample.track.track_id);
-                    if let Some(sample_entry) = sample.sample_entry.clone() {
-                        current_entries.insert(track_id, sample_entry.clone());
-                        if let Some(track) =
-                            tracks.iter_mut().find(|track| track.track_id == track_id)
-                            && track.sample_entry.is_none()
-                        {
-                            track.sample_entry = Some(sample_entry);
-                        }
-                    }
-                    if let Some(sample_entry) = current_entries.get(&track_id).cloned() {
-                        sample_entries.insert(sample_id, sample_entry);
-                    }
-                    let meta = sample_to_meta(sample_id, sample)?;
-                    let track_samples = samples_by_track.entry(track_id).or_default();
-                    let index = track_samples.len();
-                    track_samples.push(meta);
-                    sample_lookup.insert(sample_id, (track_id, index));
-                    sample_order.push(sample_id);
-                }
-            }
-            IndexMode::Lazy => {
-                anyhow::bail!(
-                    "IndexMode::Lazy is reserved for future moof-extended indexing; use IndexMode::Eager"
-                );
-            }
-        }
-
-        let sample_pts_order = samples_by_track
-            .iter()
-            .map(|(track_id, samples)| {
-                let mut ordered = samples
-                    .iter()
-                    .map(|sample| sample.sample_id)
-                    .collect::<Vec<_>>();
-                ordered.sort_by_key(|sample_id| {
-                    sample_lookup
-                        .get(sample_id)
-                        .and_then(|(track_id, index)| samples_by_track.get(track_id)?.get(*index))
-                        .map_or(0, |sample| sample.pts.ticks)
-                });
-                (*track_id, ordered)
-            })
-            .collect::<HashMap<_, _>>();
-
-        let mut status = Fmp4ReaderStatus {
-            samples_indexed: sample_order.len() as u64,
-            ..Fmp4ReaderStatus::default()
-        };
-        apply_cache_status(&mut status, &store);
-        Ok(Self {
+        let mut core = Self {
             store,
+            demuxer,
             tracks,
-            samples_by_track,
-            sample_pts_order,
-            sample_lookup,
-            sample_entries,
-            sample_order,
+            samples_by_track: HashMap::new(),
+            sample_pts_order: HashMap::new(),
+            sample_lookup: HashMap::new(),
+            sample_entries: HashMap::new(),
+            current_entries: HashMap::new(),
+            sample_order: Vec::new(),
+            next_sample_id: 0,
             next_sample_index: 0,
-            status,
-        })
+            index_complete: false,
+            status: Fmp4ReaderStatus::default(),
+        };
+        if matches!(config.index_mode, IndexMode::Eager) {
+            core.index_to_end()?;
+        }
+        let mut status = core.status.clone();
+        apply_cache_status(&mut status, &core.store);
+        core.status = status;
+        Ok(core)
     }
 
     pub(crate) fn tracks(&self) -> &[Fmp4Track] {
@@ -332,30 +285,35 @@ impl ReaderCore {
         self.store.cache_stats()
     }
 
-    pub(crate) fn samples(&self, track: TrackId) -> Result<&[SampleMeta]> {
+    pub(crate) fn samples(&mut self, track: TrackId) -> Result<&[SampleMeta]> {
+        self.index_to_end()?;
         self.samples_by_track
             .get(&track)
             .map(Vec::as_slice)
             .ok_or_else(|| anyhow!("unknown track id {}", track.0))
     }
 
-    pub(crate) fn sample_meta(&self, sample: SampleId) -> Option<&SampleMeta> {
+    pub(crate) fn sample_meta(&mut self, sample: SampleId) -> Option<&SampleMeta> {
+        self.ensure_sample_indexed(sample).ok()?;
         let (track_id, index) = self.sample_lookup.get(&sample).copied()?;
         self.samples_by_track.get(&track_id)?.get(index)
     }
 
-    pub(crate) fn iter_samples(&self, track: TrackId) -> Result<std::slice::Iter<'_, SampleMeta>> {
+    pub(crate) fn iter_samples(
+        &mut self,
+        track: TrackId,
+    ) -> Result<std::slice::Iter<'_, SampleMeta>> {
         Ok(self.samples(track)?.iter())
     }
 
-    pub(crate) fn sample_at_pts(&self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+    pub(crate) fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+        self.index_to_end().ok()?;
         let ordered = self.sample_pts_order.get(&track)?;
         if ordered.is_empty() {
             return None;
         }
         match ordered.binary_search_by_key(&pts.ticks, |sample_id| {
-            self.sample_meta(*sample_id)
-                .map_or(0, |sample| sample.pts.ticks)
+            self.indexed_sample_pts(*sample_id).unwrap_or(0)
         }) {
             Ok(index) => Some(ordered[index]),
             Err(0) => Some(ordered[0]),
@@ -363,7 +321,8 @@ impl ReaderCore {
         }
     }
 
-    pub(crate) fn keyframe_before(&self, sample: SampleId) -> Option<SampleId> {
+    pub(crate) fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
+        self.ensure_sample_indexed(sample).ok()?;
         let (track_id, index) = self.sample_lookup.get(&sample).copied()?;
         self.samples_by_track
             .get(&track_id)?
@@ -373,11 +332,17 @@ impl ReaderCore {
             .find_map(|meta| meta.keyframe.then_some(meta.sample_id))
     }
 
-    pub(crate) fn gop_for_sample(&self, sample: SampleId) -> Option<GopSegment> {
+    pub(crate) fn gop_for_sample(&mut self, sample: SampleId) -> Option<GopSegment> {
+        self.ensure_sample_indexed(sample).ok()?;
         let (track_id, index) = self.sample_lookup.get(&sample).copied()?;
+        self.ensure_track_sample_after(track_id, index).ok()?;
         let samples = self.samples_by_track.get(&track_id)?;
-        let keyframe_sample = self.keyframe_before(sample)?;
-        let keyframe_meta = self.sample_meta(keyframe_sample)?;
+        let keyframe_sample = samples
+            .get(..=index)?
+            .iter()
+            .rev()
+            .find_map(|meta| meta.keyframe.then_some(meta.sample_id))?;
+        let keyframe_meta = samples.get(self.sample_lookup.get(&keyframe_sample)?.1)?;
         let target = samples.get(index)?;
         let end_sample_exclusive = samples
             .get(index.saturating_add(1))
@@ -396,6 +361,7 @@ impl ReaderCore {
     }
 
     pub(crate) fn read_sample(&mut self, sample: SampleId) -> Result<EncodedSample> {
+        self.ensure_sample_indexed(sample)?;
         let meta = self
             .sample_meta(sample)
             .cloned()
@@ -420,6 +386,9 @@ impl ReaderCore {
     }
 
     pub(crate) fn next_sample(&mut self) -> Result<Option<EncodedSample>> {
+        if self.next_sample_index >= self.sample_order.len() && !self.index_complete {
+            self.index_next_sample()?;
+        }
         let Some(sample_id) = self.sample_order.get(self.next_sample_index).copied() else {
             return Ok(None);
         };
@@ -442,6 +411,7 @@ impl ReaderCore {
     }
 
     pub(crate) fn encoded_iter(&mut self, segment: GopSegment) -> Result<EncodedSampleIter<'_>> {
+        self.index_to_end()?;
         let samples = self.samples(segment.track_id)?;
         let start = samples
             .iter()
@@ -461,6 +431,126 @@ impl ReaderCore {
             sample_ids,
             next_index: 0,
         })
+    }
+
+    fn index_to_end(&mut self) -> Result<()> {
+        while !self.index_complete {
+            if self.index_next_sample()?.is_none() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_sample_indexed(&mut self, sample: SampleId) -> Result<()> {
+        while !self.sample_lookup.contains_key(&sample) && !self.index_complete {
+            if self.index_next_sample()?.is_none() {
+                break;
+            }
+        }
+        anyhow::ensure!(
+            self.sample_lookup.contains_key(&sample),
+            "unknown sample id {}",
+            sample.0
+        );
+        Ok(())
+    }
+
+    fn ensure_track_sample_after(&mut self, track: TrackId, index: usize) -> Result<()> {
+        while self
+            .samples_by_track
+            .get(&track)
+            .is_none_or(|samples| samples.len() <= index.saturating_add(1))
+            && !self.index_complete
+        {
+            if self.index_next_sample()?.is_none() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn index_next_sample(&mut self) -> Result<Option<SampleId>> {
+        if self.index_complete {
+            return Ok(None);
+        }
+        let Some(sample) = read_next_demux_sample(&mut self.store, &mut self.demuxer)? else {
+            self.index_complete = true;
+            self.rebuild_sample_pts_order();
+            apply_cache_status(&mut self.status, &self.store);
+            return Ok(None);
+        };
+        let sample_id = SampleId(self.next_sample_id);
+        self.next_sample_id = self.next_sample_id.saturating_add(1);
+        let track_id = TrackId(sample.track.track_id);
+        if let Some(sample_entry) = sample.sample_entry.clone() {
+            self.current_entries.insert(track_id, sample_entry.clone());
+            if let Some(track) = self
+                .tracks
+                .iter_mut()
+                .find(|track| track.track_id == track_id)
+                && track.sample_entry.is_none()
+            {
+                track.sample_entry = Some(sample_entry);
+            }
+        }
+        if let Some(sample_entry) = self.current_entries.get(&track_id).cloned() {
+            self.sample_entries.insert(sample_id, sample_entry);
+        }
+        let meta = sample_to_meta(sample_id, sample)?;
+        let pts_ticks = meta.pts.ticks;
+        let track_samples = self.samples_by_track.entry(track_id).or_default();
+        let index = track_samples.len();
+        track_samples.push(meta);
+        self.sample_lookup.insert(sample_id, (track_id, index));
+        self.sample_order.push(sample_id);
+        let insert_index = self
+            .sample_pts_order
+            .get(&track_id)
+            .map(|ordered| {
+                ordered.partition_point(|existing| {
+                    self.indexed_sample_pts(*existing)
+                        .is_some_and(|existing_pts| existing_pts <= pts_ticks)
+                })
+            })
+            .unwrap_or(0);
+        self.sample_pts_order
+            .entry(track_id)
+            .or_default()
+            .insert(insert_index, sample_id);
+        self.status.samples_indexed = self.sample_order.len() as u64;
+        apply_cache_status(&mut self.status, &self.store);
+        Ok(Some(sample_id))
+    }
+
+    fn indexed_sample_pts(&self, sample: SampleId) -> Option<u64> {
+        let (track_id, index) = self.sample_lookup.get(&sample).copied()?;
+        self.samples_by_track
+            .get(&track_id)?
+            .get(index)
+            .map(|sample| sample.pts.ticks)
+    }
+
+    fn rebuild_sample_pts_order(&mut self) {
+        self.sample_pts_order = self
+            .samples_by_track
+            .iter()
+            .map(|(track_id, samples)| {
+                let mut ordered = samples
+                    .iter()
+                    .map(|sample| sample.sample_id)
+                    .collect::<Vec<_>>();
+                ordered.sort_by_key(|sample_id| {
+                    self.sample_lookup
+                        .get(sample_id)
+                        .and_then(|(track_id, index)| {
+                            self.samples_by_track.get(track_id)?.get(*index)
+                        })
+                        .map_or(0, |sample| sample.pts.ticks)
+                });
+                (*track_id, ordered)
+            })
+            .collect();
     }
 }
 
@@ -629,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn lazy_index_mode_is_explicitly_reserved() {
+    fn lazy_index_mode_advances_metadata_on_demand() {
         let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -637,11 +727,33 @@ mod tests {
             .join("sample-10s.mp4");
         let mut config = Fmp4ReaderConfig::new(input_path);
         config.index_mode = IndexMode::Lazy;
-        let err = ReaderCore::open(&config).expect_err("lazy mode should fail explicitly");
+        let mut core = ReaderCore::open(&config).expect("lazy mode should open");
+        assert_eq!(core.status().samples_indexed, 0);
+
+        let first = core
+            .next_sample()
+            .expect("lazy next_sample should index and read")
+            .expect("sample should exist");
+        assert_eq!(first.meta.sample_id, SampleId(0));
+        assert!(core.status().samples_indexed >= 1);
+
+        let tenth = core
+            .read_sample(SampleId(10))
+            .expect("lazy read_sample should index through the requested sample");
+        assert_eq!(tenth.meta.sample_id, SampleId(10));
         assert!(
-            err.to_string().contains("IndexMode::Lazy"),
-            "unexpected error: {err:#}"
+            core.status().samples_indexed < 303,
+            "point sample read should not force full video-track indexing"
         );
+
+        let video_track = core
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        assert_eq!(core.samples(video_track).expect("video samples").len(), 303);
+        assert!(core.status().samples_indexed >= 303);
     }
 
     #[test]
@@ -720,9 +832,10 @@ mod tests {
         assert!(samples.iter().all(|sample| sample.size > 0));
         let first_sample_id = samples[0].sample_id;
         let first_sample_size = samples[0].size as usize;
+        let inter_sample_id = samples[4].sample_id;
 
         let gop = core
-            .gop_for_sample(samples[4].sample_id)
+            .gop_for_sample(inter_sample_id)
             .expect("inter frame should produce GOP segment");
         assert_eq!(gop.keyframe_sample, first_sample_id);
 

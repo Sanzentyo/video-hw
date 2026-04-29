@@ -845,20 +845,26 @@ fn run_smoke_test(
 }
 
 fn load_video_samples(input_path: PathBuf) -> Result<LoadedVideo> {
-    let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.clone()))
+    let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.clone()))
         .into_sync_session()
         .with_context(|| format!("failed to open {}", input_path.display()))?;
 
-    let track = reader
+    let track_id = reader
         .tracks()
         .iter()
         .find(|track| track.kind == TrackKind::Video)
-        .cloned()
-        .context("failed to find video track in input")?;
+        .context("failed to find video track in input")?
+        .track_id;
     let samples = reader
-        .samples(track.track_id)
-        .with_context(|| format!("failed to get samples for track {}", track.track_id))?
+        .samples(track_id)
+        .with_context(|| format!("failed to get samples for track {}", track_id))?
         .to_vec();
+    let track = reader
+        .tracks()
+        .iter()
+        .find(|track| track.track_id == track_id)
+        .cloned()
+        .context("video track disappeared after indexing samples")?;
     let _finished = reader.finish();
 
     anyhow::ensure!(

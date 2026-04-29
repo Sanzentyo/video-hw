@@ -39,10 +39,11 @@ pub enum IndexMode {
     /// Build the full metadata index while opening the reader.
     #[default]
     Eager,
-    /// Reserved for future moof-by-moof index extension.
+    /// Extend the metadata index on demand.
     ///
-    /// Opening a reader with this mode currently returns an explicit error
-    /// instead of silently falling back to eager indexing.
+    /// APIs that return complete metadata slices, such as `samples`, still scan
+    /// to EOF before returning. Point lookups and `next_sample` advance only as
+    /// far as needed.
     Lazy,
 }
 

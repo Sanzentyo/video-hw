@@ -119,11 +119,11 @@ pub struct RangeCacheConfig {
 impl Mp4Reader {
     pub fn open(config: Mp4ReaderConfig) -> Result<Self>;
     pub fn tracks(&self) -> &[Mp4Track];
-    pub fn samples(&self, track: TrackId) -> Result<&[SampleMeta]>;
-    pub fn sample_at_pts(&self, track: TrackId, pts: MediaTime) -> Option<SampleId>;
-    pub fn sample_meta(&self, sample: SampleId) -> Option<&SampleMeta>;
-    pub fn keyframe_before(&self, sample: SampleId) -> Option<SampleId>;
-    pub fn gop_for_sample(&self, sample: SampleId) -> Option<GopSegment>;
+    pub fn samples(&mut self, track: TrackId) -> Result<&[SampleMeta]>;
+    pub fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId>;
+    pub fn sample_meta(&mut self, sample: SampleId) -> Option<&SampleMeta>;
+    pub fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId>;
+    pub fn gop_for_sample(&mut self, sample: SampleId) -> Option<GopSegment>;
     pub fn read_sample(&mut self, sample: SampleId) -> Result<EncodedSample>;
     pub fn iter_gop_for_sample(&mut self, sample: SampleId) -> Result<EncodedSampleIter<'_>>;
     pub fn read_gop(&mut self, sample: SampleId) -> Result<Vec<EncodedSample>>;
@@ -131,9 +131,11 @@ impl Mp4Reader {
 ```
 
 `IndexMode::Eager` should be the default. It scans metadata at open time and
-keeps random access and seek operations cheap. `IndexMode::Lazy` is reserved
-for extending the metadata index on moof boundaries in very large fragmented
-files where open latency matters more than immediate random access.
+keeps random access and seek operations cheap. `IndexMode::Lazy` keeps the
+demuxer alive and extends the metadata index on demand. APIs that promise a
+complete metadata slice, such as `samples(track)`, scan to EOF before returning;
+point lookups and sequential `next_sample()` only advance far enough to satisfy
+the request.
 
 ## Range Cache
 

@@ -73,27 +73,27 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.tracks()
     }
 
-    pub fn samples(&self, track: TrackId) -> Result<&[SampleMeta]> {
+    pub fn samples(&mut self, track: TrackId) -> Result<&[SampleMeta]> {
         self.state.core.samples(track)
     }
 
-    pub fn sample_meta(&self, sample: SampleId) -> Option<&SampleMeta> {
+    pub fn sample_meta(&mut self, sample: SampleId) -> Option<&SampleMeta> {
         self.state.core.sample_meta(sample)
     }
 
-    pub fn iter_samples(&self, track: TrackId) -> Result<std::slice::Iter<'_, SampleMeta>> {
+    pub fn iter_samples(&mut self, track: TrackId) -> Result<std::slice::Iter<'_, SampleMeta>> {
         self.state.core.iter_samples(track)
     }
 
-    pub fn sample_at_pts(&self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+    pub fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
         self.state.core.sample_at_pts(track, pts)
     }
 
-    pub fn keyframe_before(&self, sample: SampleId) -> Option<SampleId> {
+    pub fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
         self.state.core.keyframe_before(sample)
     }
 
-    pub fn gop_for_sample(&self, sample: SampleId) -> Option<GopSegment> {
+    pub fn gop_for_sample(&mut self, sample: SampleId) -> Option<GopSegment> {
         self.state.core.gop_for_sample(sample)
     }
 
