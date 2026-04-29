@@ -109,6 +109,18 @@ cargo +nightly -Zscript scripts/setup_onevpl.rs --apply --force
 - 生成した `mfx.h` / `libvpl.dll` に合わせた `LIBVPL_INCLUDE_PATH` / `PATH` の設定例を出力する（`LIBVPL_LIBRARY_PATH` は通常不要）
 - setup 後の検証コマンド（`clippy` / `test`）も出力する
 
+### 8) fMP4 Lazy index 検証
+
+```bash
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
+cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/foreman_cif_fmp4.mp4
+```
+
+- `IndexMode::Lazy` が open 時に sample metadata を構築しないことを確認する。
+- `next_sample` と `read_sample(SampleId)` が必要な位置までだけ index を延長することを確認する。
+- `samples(track)` が完全な metadata slice を返すため EOF まで index 化することを確認する。
+- 通常 MP4 と fragmented MP4 の両方で使える。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること
