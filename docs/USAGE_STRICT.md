@@ -107,7 +107,7 @@ cargo +nightly -Zscript scripts/quality_check.rs
 - fMP4 reader の `IndexMode::Eager` / `IndexMode::Lazy` を確認する場合は `cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4` を使う。通常 MP4 / fMP4 の両方を確認する場合は `sample-videos/foreman_cif_fmp4.mp4` でも実行する。decode checkpoint まで確認する場合は `--decode-features "backend-vulkan"` のように backend feature を渡す
 - PTS seek の厳密性が必要な場合は `sample_at_pts_with_delta` を使い、`SampleLookupMatch::Exact` / `Previous` / `FirstAfter` を記録する。完全一致かどうかを bool 推定しない
 - 長い decode 区間は `decode_range_iter` で逐次処理し、中心sample周辺の短窓は `decode_window` を使う。decode結果には `DecodeDiagnostics` を保存し、`requested_backend`、`resolved_backend`、`fallback_used`、`fallback_reason` を区別する
-- fMP4 metadata/report を JSON 等へ保存する利用者は `video-hw-fmp4` の `serde` feature を有効化する。`SampleEntry` は外部 runtime 型なので serde 出力には含めず、deserialization 後は `sample_entry=None` として扱う。decode や `to_annexb()` が必要な場合は元ファイルを reader で開き直して `read_sample()` する
+- fMP4 metadata/report を JSON 等へ保存する利用者は `video-hw-fmp4` の `serde` feature を有効化する。`SampleEntry` は外部 runtime 型なので serde 出力には含めず、deserialization 後は `sample_entry=None` として扱う。decode や `to_annexb()` が必要な場合は元ファイルを reader で開き直して `read_sample()` する。`DecodeDiagnostics` の `resolved_backend` を deserialize する場合は、保存時に使った backend feature を読み込み側でも有効化する
 
 #### Intel backend トラブルシュート（Windows）
 

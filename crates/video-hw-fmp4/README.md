@@ -25,6 +25,7 @@
 - `serde`
   - reader metadata/report 型の `Serialize` / `Deserialize` を有効化します
   - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
+  - `DecodeDiagnostics` は backend と output mode を文字列として serialize します。deserialize では有効化済み backend feature に含まれる `resolved_backend` だけを復元できます
 
 ## Writer Example
 

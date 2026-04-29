@@ -11,6 +11,97 @@ use super::{
     SampleRange, SyncReading, TrackId, config::Fmp4Track,
 };
 
+#[cfg(feature = "serde")]
+mod serde_backend {
+    use std::str::FromStr;
+
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use video_hw::Backend;
+
+    pub fn serialize<S>(backend: &Backend, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&backend.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Backend, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Backend::from_str(&String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_backend_kind {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use video_hw::BackendKind;
+
+    pub fn serialize<S>(backend: &BackendKind, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&backend.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BackendKind, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+            "videotoolbox" | "vt" => Ok(BackendKind::VideoToolbox),
+            #[cfg(all(
+                feature = "backend-nvidia",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "nvidia" | "nv" => Ok(BackendKind::Nvidia),
+            #[cfg(all(
+                feature = "backend-intel",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "intel" | "qsv" => Ok(BackendKind::Intel),
+            #[cfg(all(
+                feature = "backend-vulkan",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            "vulkan" => Ok(BackendKind::Vulkan),
+            other => Err(de::Error::custom(format!(
+                "backend kind {other:?} is not available with the enabled features"
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_decode_output_mode {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use video_hw::DecodeOutputMode;
+
+    pub fn serialize<S>(mode: &DecodeOutputMode, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&mode.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DecodeOutputMode, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "metadata" => Ok(DecodeOutputMode::Metadata),
+            "nv12" => Ok(DecodeOutputMode::Nv12),
+            "rgb24" => Ok(DecodeOutputMode::Rgb24),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["metadata", "nv12", "rgb24"],
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FrameDecodeRequest {
     pub track_id: TrackId,
@@ -89,10 +180,14 @@ impl FrameDecodeWindowRequest {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DecodeDiagnostics {
+    #[cfg_attr(feature = "serde", serde(with = "serde_backend"))]
     pub requested_backend: Backend,
+    #[cfg_attr(feature = "serde", serde(with = "serde_backend_kind"))]
     pub resolved_backend: BackendKind,
     pub require_hardware: bool,
+    #[cfg_attr(feature = "serde", serde(with = "serde_decode_output_mode"))]
     pub output_mode: DecodeOutputMode,
     pub fps: i32,
     pub fallback_used: bool,
@@ -693,6 +788,21 @@ mod tests {
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};
+    #[cfg(all(
+        feature = "serde",
+        any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                any(
+                    feature = "backend-nvidia",
+                    feature = "backend-intel",
+                    feature = "backend-vulkan"
+                ),
+                any(target_os = "linux", target_os = "windows")
+            )
+        )
+    ))]
+    use video_hw::Codec;
 
     #[test]
     fn frame_decode_request_defaults_to_auto_rgb() {
@@ -783,5 +893,45 @@ mod tests {
             keyframe: true,
         };
         assert_eq!(sample_timestamp_to_90k(&meta), Some(Timestamp90k(45_000)));
+    }
+
+    #[cfg(all(
+        feature = "serde",
+        any(
+            all(target_os = "macos", feature = "backend-vt"),
+            all(
+                any(
+                    feature = "backend-nvidia",
+                    feature = "backend-intel",
+                    feature = "backend-vulkan"
+                ),
+                any(target_os = "linux", target_os = "windows")
+            )
+        )
+    ))]
+    #[test]
+    fn serde_roundtrips_decode_diagnostics() {
+        let resolved_backend = Backend::Auto
+            .resolve_decoder(&DecoderConfig::new(Codec::H264, 30, false))
+            .expect("a backend feature is enabled");
+        let diagnostics = DecodeDiagnostics {
+            requested_backend: Backend::Auto,
+            resolved_backend,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Rgb24,
+            fps: 30,
+            fallback_used: true,
+            fallback_reason: Some("primary backend failed".to_string()),
+        };
+        let json = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
+        assert!(json.contains("\"requested_backend\":\"auto\""));
+        assert!(json.contains("\"output_mode\":\"rgb24\""));
+        let roundtrip: DecodeDiagnostics =
+            serde_json::from_str(&json).expect("deserialize diagnostics");
+        assert_eq!(roundtrip.requested_backend, diagnostics.requested_backend);
+        assert_eq!(roundtrip.resolved_backend, diagnostics.resolved_backend);
+        assert_eq!(roundtrip.output_mode, diagnostics.output_mode);
+        assert_eq!(roundtrip.fallback_used, diagnostics.fallback_used);
+        assert_eq!(roundtrip.fallback_reason, diagnostics.fallback_reason);
     }
 }
