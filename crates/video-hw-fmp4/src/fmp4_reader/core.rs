@@ -258,7 +258,7 @@ impl ReaderCore {
         let mut next_sample_id = 0_u64;
 
         match config.index_mode {
-            IndexMode::Eager | IndexMode::Lazy => {
+            IndexMode::Eager => {
                 while let Some(sample) = read_next_demux_sample(&mut store, &mut demuxer)? {
                     let sample_id = SampleId(next_sample_id);
                     next_sample_id = next_sample_id.saturating_add(1);
@@ -282,6 +282,11 @@ impl ReaderCore {
                     sample_lookup.insert(sample_id, (track_id, index));
                     sample_order.push(sample_id);
                 }
+            }
+            IndexMode::Lazy => {
+                anyhow::bail!(
+                    "IndexMode::Lazy is reserved for future moof-extended indexing; use IndexMode::Eager"
+                );
             }
         }
 
@@ -624,6 +629,22 @@ mod tests {
             }
         }
         assert!(sample_count > 0, "no samples read from sample-10s.mp4");
+    }
+
+    #[test]
+    fn lazy_index_mode_is_explicitly_reserved() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("sample-10s.mp4");
+        let mut config = Fmp4ReaderConfig::new(input_path);
+        config.index_mode = IndexMode::Lazy;
+        let err = ReaderCore::open(&config).expect_err("lazy mode should fail explicitly");
+        assert!(
+            err.to_string().contains("IndexMode::Lazy"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

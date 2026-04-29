@@ -36,8 +36,13 @@ impl MediaTime {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IndexMode {
+    /// Build the full metadata index while opening the reader.
     #[default]
     Eager,
+    /// Reserved for future moof-by-moof index extension.
+    ///
+    /// Opening a reader with this mode currently returns an explicit error
+    /// instead of silently falling back to eager indexing.
     Lazy,
 }
 
