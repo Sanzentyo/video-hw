@@ -351,6 +351,7 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
+        assign_frames_by_presentation_order(&mut frames, &gop_sample_order);
         sort_frames_by_sample_order(&mut frames, &gop_sample_order);
         target_frame_index = find_frame_index(&frames, request.target_sample);
         finalize_decode_diagnostics(&mut diagnostics, &gop_sample_order, &frames);
@@ -411,15 +412,23 @@ impl<'a> FrameDecoder<'a> {
             end_pts,
         };
 
-        let decode_samples = self.reader.iter_encoded(decode_segment)?;
+        let decode_samples = self
+            .reader
+            .iter_encoded(decode_segment)?
+            .collect::<Result<Vec<_>>>()?;
+        let decode_sample_order = ordered_sample_ids_by_pts(
+            &decode_samples
+                .iter()
+                .map(|sample| sample.meta.clone())
+                .collect::<Vec<_>>(),
+        );
         for sample in decode_samples {
-            let sample = sample?;
             let mut collect = DecodeCollectState {
                 pts_to_sample: &mut pts_to_sample,
                 frames: &mut frames,
                 target_sample: request.range.start_sample,
                 target_frame_index: &mut ignored_target_frame_index,
-                filter_sample_ids: Some(&wanted_sample_ids),
+                filter_sample_ids: None,
             };
             submit_sample(&mut session, &track, sample, &mut collect)?;
         }
@@ -433,10 +442,12 @@ impl<'a> FrameDecoder<'a> {
                 frames: &mut frames,
                 target_sample: request.range.start_sample,
                 target_frame_index: &mut ignored_target_frame_index,
-                filter_sample_ids: Some(&wanted_sample_ids),
+                filter_sample_ids: None,
             };
             push_decoded_frame(frame, &mut collect);
         }
+        assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
+        retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
         finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
         Ok(FrameDecodeRangeResult {
@@ -594,18 +605,26 @@ impl<'a> FrameDecoder<'a> {
             start_pts: decode_start_pts,
             end_pts: decode_end_pts,
         };
-        let decode_samples = self.reader.iter_encoded(decode_segment)?;
+        let decode_samples = self
+            .reader
+            .iter_encoded(decode_segment)?
+            .collect::<Result<Vec<_>>>()?;
+        let decode_sample_order = ordered_sample_ids_by_pts(
+            &decode_samples
+                .iter()
+                .map(|sample| sample.meta.clone())
+                .collect::<Vec<_>>(),
+        );
         let mut frames = VecDeque::new();
         let mut target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
         for sample in decode_samples {
-            let sample = sample?;
             let mut collect = DecodeCollectState {
                 pts_to_sample: &mut pts_to_sample,
                 frames: &mut frames,
                 target_sample: request.center_sample,
                 target_frame_index: &mut target_frame_index,
-                filter_sample_ids: Some(&wanted_sample_ids),
+                filter_sample_ids: None,
             };
             submit_sample(&mut session, &track, sample, &mut collect)?;
         }
@@ -619,10 +638,12 @@ impl<'a> FrameDecoder<'a> {
                 frames: &mut frames,
                 target_sample: request.center_sample,
                 target_frame_index: &mut target_frame_index,
-                filter_sample_ids: Some(&wanted_sample_ids),
+                filter_sample_ids: None,
             };
             push_decoded_frame(frame, &mut collect);
         }
+        assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
+        retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
         finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
         Ok(FrameDecodeRangeResult {
@@ -902,6 +923,26 @@ fn sort_frames_by_sample_order(
     *frames = sorted.into();
 }
 
+fn assign_frames_by_presentation_order(
+    frames: &mut VecDeque<DecodedSampleFrame>,
+    sample_order: &[SampleId],
+) {
+    for (frame, sample_id) in frames.iter_mut().zip(sample_order.iter().copied()) {
+        frame.sample_id = Some(sample_id);
+    }
+}
+
+fn retain_requested_frames(
+    frames: &mut VecDeque<DecodedSampleFrame>,
+    wanted_sample_ids: &HashSet<SampleId>,
+) {
+    frames.retain(|frame| {
+        frame
+            .sample_id
+            .is_some_and(|sample_id| wanted_sample_ids.contains(&sample_id))
+    });
+}
+
 fn find_frame_index(
     frames: &VecDeque<DecodedSampleFrame>,
     target_sample: SampleId,
@@ -1129,6 +1170,78 @@ mod tests {
             decode_span_for_sample_ids(&samples, &wanted).expect("span should resolve"),
             (0, 5)
         );
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decode_window_returns_presentation_order_for_reordered_mp4() {
+        let input_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif.mp4");
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path))
+            .into_sync_session()
+            .expect("sample should open");
+        let video_track = reader
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let samples = reader.samples(video_track).expect("video samples");
+        assert_eq!(samples[0].sample_id, SampleId(0));
+        assert_eq!(samples[0].pts.ticks, 2_002);
+        assert_eq!(samples[1].sample_id, SampleId(1));
+        assert_eq!(samples[1].pts.ticks, 6_006);
+        assert_eq!(samples[2].sample_id, SampleId(2));
+        assert_eq!(samples[2].pts.ticks, 4_004);
+        assert_eq!(samples[3].sample_id, SampleId(3));
+        assert_eq!(samples[3].pts.ticks, 3_003);
+        assert_eq!(samples[4].sample_id, SampleId(4));
+        assert_eq!(samples[4].pts.ticks, 5_005);
+
+        let mut request = FrameDecodeWindowRequest::new(video_track, SampleId(2));
+        request.before = 2;
+        request.after = 1;
+        request.output_mode = DecodeOutputMode::Metadata;
+        let mut decoder = FrameDecoder::new(&mut reader);
+        let result = match decoder.decode_window(request) {
+            Ok(result) => result,
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping decode-window reorder test: {error}");
+                    return;
+                }
+                panic!("decode_window failed unexpectedly: {error}");
+            }
+        };
+        let returned = result
+            .frames
+            .iter()
+            .map(|frame| frame.sample_id.expect("decoded frame should map to sample"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            returned,
+            vec![SampleId(0), SampleId(3), SampleId(2), SampleId(4)]
+        );
+        assert_eq!(result.diagnostics.requested_sample_count, 4);
+        assert_eq!(result.diagnostics.returned_sample_count, 4);
+        assert!(result.diagnostics.missing_sample_ids.is_empty());
     }
 
     #[cfg(all(
