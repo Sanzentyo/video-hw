@@ -621,18 +621,8 @@ pub trait DecoderBackend: VideoDecoder {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", feature = "backend-vt"),
-    all(
-        any(
-            feature = "backend-nvidia",
-            feature = "backend-intel",
-            feature = "backend-vulkan"
-        ),
-        any(target_os = "linux", target_os = "windows")
-    )
-))]
 fn backend_supports_output_mode(kind: BackendKind, mode: DecodeOutputMode) -> bool {
+    let _ = mode;
     match kind {
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         BackendKind::VideoToolbox => {

@@ -160,6 +160,8 @@ cargo +nightly -Zscript scripts/quality_check.rs
 `DecodeOutputMode::Nv12` / `Rgb24` は backend が NV12 または ARGB payload を返す場合のみ変換出力できます。
 pixel payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。backend ごとの可否は `CapabilityReport::decode_output_modes` / `supports_decode_output_mode()` を確認してください。
 
+`video-hw-fmp4` の `FrameDecoder::decode_window()` は、`sample_at_pts_with_delta()` で得た sample を中心に、PTS/表示順で `before` / `after` の window を組みます。内部の復号入力は必要なDTS順segmentへ広げますが、返却される `DecodedSampleFrame` は表示順に並びます。欠落がある場合は `DecodeDiagnostics::missing_sample_ids` と `requested_sample_count` / `returned_sample_count` を確認してください。
+
 ## 4. Encode API
 
 - `EncodeSession::<ConcreteEncoder>::new(EncoderConfig)`

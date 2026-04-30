@@ -192,6 +192,9 @@ pub struct DecodeDiagnostics {
     pub fps: i32,
     pub fallback_used: bool,
     pub fallback_reason: Option<String>,
+    pub requested_sample_count: usize,
+    pub returned_sample_count: usize,
+    pub missing_sample_ids: Vec<SampleId>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,15 +311,22 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
-        let (mut session, diagnostics) = create_decode_session(request.backend, config)
+        let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let resolved_backend = diagnostics.resolved_backend;
         let mut frames = VecDeque::new();
         let mut target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
-        let gop_samples = self.reader.iter_gop_for_sample(request.target_sample)?;
+        let gop_samples = self
+            .reader
+            .iter_gop_for_sample(request.target_sample)?
+            .collect::<Result<Vec<_>>>()?;
+        let gop_metas = gop_samples
+            .iter()
+            .map(|sample| sample.meta.clone())
+            .collect::<Vec<_>>();
+        let gop_sample_order = ordered_sample_ids_by_pts(&gop_metas);
         for sample in gop_samples {
-            let sample = sample?;
             let mut collect = DecodeCollectState {
                 pts_to_sample: &mut pts_to_sample,
                 frames: &mut frames,
@@ -341,6 +351,9 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
+        sort_frames_by_sample_order(&mut frames, &gop_sample_order);
+        target_frame_index = find_frame_index(&frames, request.target_sample);
+        finalize_decode_diagnostics(&mut diagnostics, &gop_sample_order, &frames);
 
         Ok(FrameDecodeResult {
             target_sample: request.target_sample,
@@ -373,26 +386,16 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
-        let (mut session, diagnostics) = create_decode_session(request.backend, config)
+        let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let resolved_backend = diagnostics.resolved_backend;
-        let (wanted_sample_ids, end_pts) = {
-            let samples = samples_in_range(self.reader, request.range)?;
-            let wanted_sample_ids = samples
-                .iter()
-                .map(|sample| sample.sample_id)
-                .collect::<HashSet<_>>();
-            let end_pts = samples
-                .last()
-                .map(|sample| {
-                    MediaTime::new(
-                        sample.pts.ticks.saturating_add(u64::from(sample.duration)),
-                        sample.pts.timescale,
-                    )
-                })
-                .context("sample range is empty")?;
-            (wanted_sample_ids, end_pts)
-        };
+        let requested_samples = samples_in_range(self.reader, request.range)?.to_vec();
+        let wanted_sample_order = ordered_sample_ids_by_pts(&requested_samples);
+        let wanted_sample_ids = wanted_sample_order.iter().copied().collect::<HashSet<_>>();
+        let end_pts = requested_samples
+            .last()
+            .map(sample_end_pts)
+            .context("sample range is empty")?;
         let mut frames = VecDeque::new();
         let mut ignored_target_frame_index = None;
         let mut pts_to_sample = HashMap::<i64, SampleId>::new();
@@ -434,6 +437,8 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
+        sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
+        finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
         Ok(FrameDecodeRangeResult {
             range: request.range,
             diagnostics,
@@ -514,39 +519,118 @@ impl<'a> FrameDecoder<'a> {
         &mut self,
         request: FrameDecodeWindowRequest,
     ) -> Result<FrameDecodeRangeResult> {
-        let range = {
-            let samples = self.reader.samples(request.track_id)?;
-            let center_index = samples
-                .iter()
-                .position(|sample| sample.sample_id == request.center_sample)
-                .with_context(|| {
-                    format!(
-                        "center sample {} does not belong to track {}",
-                        request.center_sample, request.track_id
-                    )
-                })?;
-            let before =
-                usize::try_from(request.before).context("window before overflows usize")?;
-            let after = usize::try_from(request.after).context("window after overflows usize")?;
-            let start_index = center_index.saturating_sub(before);
-            let end_index = center_index
-                .saturating_add(after)
-                .saturating_add(1)
-                .min(samples.len());
-            SampleRange {
-                track_id: request.track_id,
-                start_sample: samples[start_index].sample_id,
-                end_sample_exclusive: samples
-                    .get(end_index)
-                    .map_or(SampleId(u64::MAX), |sample| sample.sample_id),
-            }
+        let samples = self.reader.samples(request.track_id)?.to_vec();
+        let center_decode_index = samples
+            .iter()
+            .position(|sample| sample.sample_id == request.center_sample)
+            .with_context(|| {
+                format!(
+                    "center sample {} does not belong to track {}",
+                    request.center_sample, request.track_id
+                )
+            })?;
+        let wanted_sample_order = presentation_window_sample_ids(
+            &samples,
+            request.center_sample,
+            request.before,
+            request.after,
+        )?;
+        let wanted_sample_ids = wanted_sample_order.iter().copied().collect::<HashSet<_>>();
+        let (decode_first_index, decode_end_index) =
+            decode_span_for_sample_ids(&samples, &wanted_sample_ids)?;
+        let decode_anchor_index = decode_first_index.min(center_decode_index);
+        let decode_start_sample = self
+            .reader
+            .keyframe_before(samples[decode_anchor_index].sample_id)
+            .with_context(|| {
+                format!(
+                    "no keyframe before sample {}",
+                    samples[decode_anchor_index].sample_id
+                )
+            })?;
+        let decode_end_exclusive = samples
+            .get(decode_end_index)
+            .map_or(SampleId(u64::MAX), |sample| sample.sample_id);
+        let decode_end_pts = samples
+            .get(decode_end_index.saturating_sub(1))
+            .map(sample_end_pts)
+            .context("decode window is empty")?;
+        let range = SampleRange {
+            track_id: request.track_id,
+            start_sample: *wanted_sample_order
+                .first()
+                .context("presentation window is empty")?,
+            end_sample_exclusive: wanted_sample_order
+                .last()
+                .and_then(|last| sample_after_in_pts_order(&samples, *last))
+                .unwrap_or(SampleId(u64::MAX)),
         };
-        self.decode_range(FrameDecodeRangeRequest {
+
+        let track = self
+            .reader
+            .tracks()
+            .iter()
+            .find(|track| track.track_id == request.track_id)
+            .cloned()
+            .with_context(|| format!("unknown track {}", request.track_id))?;
+        let codec = track
+            .codec()
+            .with_context(|| format!("track {} has no supported video codec", track.track_id))?;
+        let fps = request.fps.unwrap_or_else(|| estimate_fps(&samples)).max(1);
+        let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
+        config.output_mode = request.output_mode;
+        let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
+            .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
+        let resolved_backend = diagnostics.resolved_backend;
+        let decode_start_pts = self
+            .reader
+            .sample_meta(decode_start_sample)
+            .context("decode start sample disappeared")?
+            .pts;
+        let decode_segment = GopSegment {
+            track_id: request.track_id,
+            keyframe_sample: decode_start_sample,
+            end_sample_exclusive: decode_end_exclusive,
+            start_pts: decode_start_pts,
+            end_pts: decode_end_pts,
+        };
+        let decode_samples = self.reader.iter_encoded(decode_segment)?;
+        let mut frames = VecDeque::new();
+        let mut target_frame_index = None;
+        let mut pts_to_sample = HashMap::<i64, SampleId>::new();
+        for sample in decode_samples {
+            let sample = sample?;
+            let mut collect = DecodeCollectState {
+                pts_to_sample: &mut pts_to_sample,
+                frames: &mut frames,
+                target_sample: request.center_sample,
+                target_frame_index: &mut target_frame_index,
+                filter_sample_ids: Some(&wanted_sample_ids),
+            };
+            submit_sample(&mut session, &track, sample, &mut collect)?;
+        }
+        for frame in session
+            .flush()
+            .map_err(anyhow::Error::new)
+            .context("decoder flush failed")?
+        {
+            let mut collect = DecodeCollectState {
+                pts_to_sample: &mut pts_to_sample,
+                frames: &mut frames,
+                target_sample: request.center_sample,
+                target_frame_index: &mut target_frame_index,
+                filter_sample_ids: Some(&wanted_sample_ids),
+            };
+            push_decoded_frame(frame, &mut collect);
+        }
+        sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
+        finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
+        Ok(FrameDecodeRangeResult {
             range,
-            backend: request.backend,
-            require_hardware: request.require_hardware,
+            diagnostics,
+            resolved_backend,
             output_mode: request.output_mode,
-            fps: request.fps,
+            frames: frames.into_iter().collect(),
         })
     }
 }
@@ -626,6 +710,9 @@ fn create_decode_session(
                 fps: config.fps,
                 fallback_used: false,
                 fallback_reason: None,
+                requested_sample_count: 0,
+                returned_sample_count: 0,
+                missing_sample_ids: Vec::new(),
             },
         )),
         Err(primary_err) if requested_backend != Backend::Auto && !config.require_hardware => {
@@ -650,6 +737,9 @@ fn create_decode_session(
                     fps: config.fps,
                     fallback_used: fallback_backend != resolved_backend,
                     fallback_reason: Some(fallback_reason),
+                    requested_sample_count: 0,
+                    returned_sample_count: 0,
+                    missing_sample_ids: Vec::new(),
                 },
             ))
         }
@@ -729,6 +819,114 @@ struct DecodeCollectState<'a> {
     target_sample: SampleId,
     target_frame_index: &'a mut Option<usize>,
     filter_sample_ids: Option<&'a HashSet<SampleId>>,
+}
+
+fn ordered_sample_ids_by_pts(samples: &[SampleMeta]) -> Vec<SampleId> {
+    let mut ordered = samples.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|sample| (sample.pts.ticks, sample.sample_id));
+    ordered.into_iter().map(|sample| sample.sample_id).collect()
+}
+
+fn presentation_window_sample_ids(
+    samples: &[SampleMeta],
+    center_sample: SampleId,
+    before: u32,
+    after: u32,
+) -> Result<Vec<SampleId>> {
+    let ordered = ordered_sample_ids_by_pts(samples);
+    let center_index = ordered
+        .iter()
+        .position(|sample| *sample == center_sample)
+        .with_context(|| {
+            format!(
+                "center sample {} is not present in PTS order",
+                center_sample
+            )
+        })?;
+    let before = usize::try_from(before).context("window before overflows usize")?;
+    let after = usize::try_from(after).context("window after overflows usize")?;
+    let start = center_index.saturating_sub(before);
+    let end = center_index
+        .saturating_add(after)
+        .saturating_add(1)
+        .min(ordered.len());
+    Ok(ordered[start..end].to_vec())
+}
+
+fn decode_span_for_sample_ids(
+    samples: &[SampleMeta],
+    sample_ids: &HashSet<SampleId>,
+) -> Result<(usize, usize)> {
+    let mut positions = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| sample_ids.contains(&sample.sample_id).then_some(index));
+    let Some(first) = positions.next() else {
+        anyhow::bail!("decode sample set is empty");
+    };
+    let (min_index, max_index) = positions.fold((first, first), |(min_index, max_index), index| {
+        (min_index.min(index), max_index.max(index))
+    });
+    Ok((min_index, max_index.saturating_add(1)))
+}
+
+fn sample_after_in_pts_order(samples: &[SampleMeta], sample_id: SampleId) -> Option<SampleId> {
+    let ordered = ordered_sample_ids_by_pts(samples);
+    let index = ordered.iter().position(|sample| *sample == sample_id)?;
+    ordered.get(index.saturating_add(1)).copied()
+}
+
+fn sample_end_pts(sample: &SampleMeta) -> MediaTime {
+    MediaTime::new(
+        sample.pts.ticks.saturating_add(u64::from(sample.duration)),
+        sample.pts.timescale,
+    )
+}
+
+fn sort_frames_by_sample_order(
+    frames: &mut VecDeque<DecodedSampleFrame>,
+    sample_order: &[SampleId],
+) {
+    let order = sample_order
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| (*sample, index))
+        .collect::<HashMap<_, _>>();
+    let mut sorted = frames.drain(..).collect::<Vec<_>>();
+    sorted.sort_by_key(|frame| {
+        frame
+            .sample_id
+            .and_then(|sample| order.get(&sample).copied())
+            .unwrap_or(usize::MAX)
+    });
+    *frames = sorted.into();
+}
+
+fn find_frame_index(
+    frames: &VecDeque<DecodedSampleFrame>,
+    target_sample: SampleId,
+) -> Option<usize> {
+    frames
+        .iter()
+        .position(|frame| frame.sample_id == Some(target_sample))
+}
+
+fn finalize_decode_diagnostics(
+    diagnostics: &mut DecodeDiagnostics,
+    requested_sample_order: &[SampleId],
+    frames: &VecDeque<DecodedSampleFrame>,
+) {
+    let returned = frames
+        .iter()
+        .filter_map(|frame| frame.sample_id)
+        .collect::<HashSet<_>>();
+    diagnostics.requested_sample_count = requested_sample_order.len();
+    diagnostics.returned_sample_count = returned.len();
+    diagnostics.missing_sample_ids = requested_sample_order
+        .iter()
+        .copied()
+        .filter(|sample| !returned.contains(sample))
+        .collect();
 }
 
 fn samples_in_range(
@@ -895,6 +1093,44 @@ mod tests {
         assert_eq!(sample_timestamp_to_90k(&meta), Some(Timestamp90k(45_000)));
     }
 
+    #[test]
+    fn presentation_window_uses_pts_order_not_decode_order() {
+        let timescale = NonZeroU32::new(30_000).expect("timescale");
+        let samples = [
+            (0, 0, 2_002),
+            (1, 1_001, 6_006),
+            (2, 2_002, 4_004),
+            (3, 3_003, 3_003),
+            (4, 4_004, 5_005),
+        ]
+        .into_iter()
+        .map(|(sample_id, dts, pts)| SampleMeta {
+            sample_id: SampleId(sample_id),
+            track_id: TrackId(1),
+            offset: 0,
+            size: 0,
+            dts: MediaTime::new(dts, timescale),
+            pts: MediaTime::new(pts, timescale),
+            duration: 1_001,
+            composition_time_offset: None,
+            keyframe: sample_id == 0,
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            presentation_window_sample_ids(&samples, SampleId(2), 2, 1)
+                .expect("window should resolve"),
+            vec![SampleId(0), SampleId(3), SampleId(2), SampleId(4)]
+        );
+        let wanted = [SampleId(0), SampleId(3), SampleId(2), SampleId(4)]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            decode_span_for_sample_ids(&samples, &wanted).expect("span should resolve"),
+            (0, 5)
+        );
+    }
+
     #[cfg(all(
         feature = "serde",
         any(
@@ -922,6 +1158,9 @@ mod tests {
             fps: 30,
             fallback_used: true,
             fallback_reason: Some("primary backend failed".to_string()),
+            requested_sample_count: 3,
+            returned_sample_count: 2,
+            missing_sample_ids: vec![SampleId(42)],
         };
         let json = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
         assert!(json.contains("\"requested_backend\":\"auto\""));
@@ -933,5 +1172,6 @@ mod tests {
         assert_eq!(roundtrip.output_mode, diagnostics.output_mode);
         assert_eq!(roundtrip.fallback_used, diagnostics.fallback_used);
         assert_eq!(roundtrip.fallback_reason, diagnostics.fallback_reason);
+        assert_eq!(roundtrip.missing_sample_ids, diagnostics.missing_sample_ids);
     }
 }
