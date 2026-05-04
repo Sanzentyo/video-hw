@@ -155,6 +155,7 @@ cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs -- --input sampl
 ```
 
 - `decode_range_iter`、単発 `decode_sample`、`CachedFrameDecoder` を同じ入力で比較する。
+- 逆順 cold access と prefetch 方向差（`reverse_before` / `reverse_after`）も同じレポートで比較する。
 - FFmpeg RGB24 reference に対する max MSE / min PSNR も同じレポートへ記録する。
 - Windows/Linux の既定 features は `backend-nvidia backend-intel backend-vulkan`、macOS は `backend-vt`。
 - 詳細は `docs/benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md` を参照。

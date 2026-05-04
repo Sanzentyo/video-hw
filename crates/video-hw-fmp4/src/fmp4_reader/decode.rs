@@ -2630,6 +2630,278 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
+    #[test]
+    fn cached_frame_decoder_reuses_reverse_prefetch_window() {
+        let (mut reader, video_track, samples) = open_foreman_reader_with_samples();
+        let target = samples[8].sample_id;
+        let previous = samples[7].sample_id;
+        let mut cached = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: 16,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        );
+        let mut first_request = FrameDecodeWindowRequest::new(video_track, target);
+        first_request.before = 3;
+        first_request.output_mode = DecodeOutputMode::Rgb24;
+        if decode_sample_cached_or_skip(&mut cached, first_request).is_none() {
+            return;
+        }
+
+        let mut second_request = FrameDecodeWindowRequest::new(video_track, previous);
+        second_request.before = 3;
+        second_request.output_mode = DecodeOutputMode::Rgb24;
+        let second = cached
+            .decode_sample_cached(second_request)
+            .expect("reverse-neighbor decode should succeed");
+        assert_eq!(second.cache_stats_delta.hits, 1);
+        assert_eq!(second.cache_stats_delta.misses, 0);
+        assert_eq!(second.diagnostics.decoded_frame_count, 0);
+        assert_eq!(second.frames[0].sample_id, Some(previous));
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn cached_frame_decoder_after_prefetch_does_not_help_reverse_neighbor() {
+        let (mut reader, video_track, samples) = open_foreman_reader_with_samples();
+        let target = samples[8].sample_id;
+        let previous = samples[7].sample_id;
+        let mut cached = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: 16,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        );
+        let mut first_request = FrameDecodeWindowRequest::new(video_track, target);
+        first_request.after = 3;
+        first_request.output_mode = DecodeOutputMode::Rgb24;
+        if decode_sample_cached_or_skip(&mut cached, first_request).is_none() {
+            return;
+        }
+
+        let mut second_request = FrameDecodeWindowRequest::new(video_track, previous);
+        second_request.after = 3;
+        second_request.output_mode = DecodeOutputMode::Rgb24;
+        let second = cached
+            .decode_sample_cached(second_request)
+            .expect("reverse-neighbor decode should succeed");
+        assert_eq!(second.cache_stats_delta.hits, 0);
+        assert_eq!(second.cache_stats_delta.misses, 1);
+        assert!(second.diagnostics.decoded_frame_count > 0);
+        assert_eq!(second.frames[0].sample_id, Some(previous));
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn cached_frame_decoder_window_cached_requires_full_window() {
+        let (mut reader, video_track, samples) = open_foreman_reader_with_samples();
+        let target = samples[8].sample_id;
+        let mut cached = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: 16,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        );
+
+        let mut window_request = FrameDecodeWindowRequest::new(video_track, target);
+        window_request.before = 1;
+        window_request.after = 1;
+        window_request.output_mode = DecodeOutputMode::Rgb24;
+        if decode_window_cached_or_skip(&mut cached, window_request.clone()).is_none() {
+            return;
+        }
+        let second = cached
+            .decode_window_cached(window_request)
+            .expect("cached window should resolve");
+        assert_eq!(second.cache_stats_delta.hits, 3);
+        assert_eq!(second.cache_stats_delta.misses, 0);
+        assert_eq!(second.diagnostics.decoded_frame_count, 0);
+        assert_eq!(second.frames.len(), 3);
+
+        cached.clear_cache();
+        let mut partial_seed = FrameDecodeWindowRequest::new(video_track, target);
+        partial_seed.after = 1;
+        partial_seed.output_mode = DecodeOutputMode::Rgb24;
+        let _ = cached
+            .decode_sample_cached(partial_seed)
+            .expect("partial seed should decode");
+        let mut wider_window = FrameDecodeWindowRequest::new(video_track, target);
+        wider_window.after = 2;
+        wider_window.output_mode = DecodeOutputMode::Rgb24;
+        let partial = cached
+            .decode_window_cached(wider_window)
+            .expect("partial cached window should fallback to decode");
+        assert!(partial.cache_stats_delta.hits >= 1);
+        assert!(partial.cache_stats_delta.misses >= 1);
+        assert!(partial.diagnostics.decoded_frame_count > 0);
+        assert_eq!(partial.frames.len(), 3);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn cached_frame_decoder_zero_capacity_disables_reuse() {
+        let (mut reader, video_track, samples) = open_foreman_reader_with_samples();
+        let target = samples[8].sample_id;
+        let mut cached = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: 0,
+                max_bytes: DecodedFrameCacheConfig::default().max_bytes,
+            },
+        );
+        let mut request = FrameDecodeWindowRequest::new(video_track, target);
+        request.after = 2;
+        request.output_mode = DecodeOutputMode::Rgb24;
+        if decode_sample_cached_or_skip(&mut cached, request.clone()).is_none() {
+            return;
+        }
+        let second = cached
+            .decode_sample_cached(request)
+            .expect("second zero-capacity decode should succeed");
+        assert_eq!(second.cache_stats_delta.hits, 0);
+        assert_eq!(second.cache_stats_delta.misses, 1);
+        assert_eq!(second.cache_stats_delta.inserts, 0);
+        assert!(second.diagnostics.decoded_frame_count > 0);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn open_foreman_reader_with_samples() -> (Fmp4Reader<SyncReading>, TrackId, Vec<SampleMeta>) {
+        let input_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif.mp4");
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path))
+            .into_sync_session()
+            .expect("sample should open");
+        let video_track = reader
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let samples = reader.samples(video_track).expect("video samples").to_vec();
+        (reader, video_track, samples)
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn decode_sample_cached_or_skip(
+        cached: &mut CachedFrameDecoder<'_>,
+        request: FrameDecodeWindowRequest,
+    ) -> Option<CachedFrameDecodeResult> {
+        match cached.decode_sample_cached(request) {
+            Ok(result) => Some(result),
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping cached decode test: {error}");
+                    None
+                } else {
+                    panic!("cached decode failed unexpectedly: {error}");
+                }
+            }
+        }
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn decode_window_cached_or_skip(
+        cached: &mut CachedFrameDecoder<'_>,
+        request: FrameDecodeWindowRequest,
+    ) -> Option<CachedFrameDecodeResult> {
+        match cached.decode_window_cached(request) {
+            Ok(result) => Some(result),
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping cached window decode test: {error}");
+                    None
+                } else {
+                    panic!("cached window decode failed unexpectedly: {error}");
+                }
+            }
+        }
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     fn rgb24_window_payload(frames: &[DecodedSampleFrame]) -> (u32, u32, Vec<u8>) {
         let mut dims = None;
         let mut raw = Vec::new();

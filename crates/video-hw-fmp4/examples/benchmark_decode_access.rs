@@ -115,6 +115,14 @@ struct StatsInput<'a> {
     reference: &'a Option<HashMap<SampleId, RgbFrame>>,
 }
 
+struct WindowCacheCase<'a> {
+    sequence: &'a [SampleId],
+    prefetch_before: u32,
+    prefetch_after: u32,
+    name: &'static str,
+    notes: &'static str,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.frame_count == 0 {
@@ -133,6 +141,7 @@ fn main() -> Result<()> {
     let random_sequence =
         deterministic_random_sequence(&selected, args.random_count, args.random_stride);
     let ping_pong_sequence = ping_pong_sequence(&selected);
+    let reverse_sequence = reverse_sequence(&selected);
     let reference = build_reference(&args, track_id, &track_samples, width, height, backend)?;
 
     let reports = vec![
@@ -157,10 +166,14 @@ fn main() -> Result<()> {
             &args,
             backend,
             track_id,
-            &selected,
             &reference,
-            "cached_decode_sample_sequential",
-            "Library CachedFrameDecoder; misses decode a presentation window and retain nearby frames.",
+            WindowCacheCase {
+                sequence: &selected,
+                prefetch_before: args.cache_before,
+                prefetch_after: args.cache_after,
+                name: "cached_decode_sample_sequential",
+                notes: "Library CachedFrameDecoder; misses decode a presentation window and retain nearby frames.",
+            },
         )?,
         run_decode_sample_case(
             &args,
@@ -175,19 +188,62 @@ fn main() -> Result<()> {
             &args,
             backend,
             track_id,
-            &random_sequence,
             &reference,
-            "cached_decode_sample_random",
-            "Random access with library decoded-frame cache.",
+            WindowCacheCase {
+                sequence: &random_sequence,
+                prefetch_before: args.cache_before,
+                prefetch_after: args.cache_after,
+                name: "cached_decode_sample_random",
+                notes: "Random access with library decoded-frame cache.",
+            },
+        )?,
+        run_decode_sample_case(
+            &args,
+            backend,
+            track_id,
+            &reverse_sequence,
+            &reference,
+            "decode_sample_reverse_no_cache",
+            "Cold reverse sample order without decoded-frame cache.",
         )?,
         run_window_cache_case(
             &args,
             backend,
             track_id,
-            &ping_pong_sequence,
             &reference,
-            "cached_decode_sample_ping_pong",
-            "Forward then reverse access through the same span; shows cache reuse on revisits.",
+            WindowCacheCase {
+                sequence: &reverse_sequence,
+                prefetch_before: args.cache_after,
+                prefetch_after: 0,
+                name: "cached_decode_sample_reverse_before",
+                notes: "Cold reverse access with prefetch in the reverse direction.",
+            },
+        )?,
+        run_window_cache_case(
+            &args,
+            backend,
+            track_id,
+            &reference,
+            WindowCacheCase {
+                sequence: &reverse_sequence,
+                prefetch_before: 0,
+                prefetch_after: args.cache_after,
+                name: "cached_decode_sample_reverse_after",
+                notes: "Cold reverse access with forward prefetch as a direction-mismatch control.",
+            },
+        )?,
+        run_window_cache_case(
+            &args,
+            backend,
+            track_id,
+            &reference,
+            WindowCacheCase {
+                sequence: &ping_pong_sequence,
+                prefetch_before: args.cache_before,
+                prefetch_after: args.cache_after,
+                name: "cached_decode_sample_ping_pong",
+                notes: "Forward then reverse access through the same span; shows cache reuse on revisits.",
+            },
         )?,
     ];
 
@@ -263,6 +319,10 @@ fn ping_pong_sequence(selected: &[SampleId]) -> Vec<SampleId> {
         .copied()
         .chain(selected.iter().rev().copied())
         .collect()
+}
+
+fn reverse_sequence(selected: &[SampleId]) -> Vec<SampleId> {
+    selected.iter().rev().copied().collect()
 }
 
 fn build_reference(
@@ -434,10 +494,8 @@ fn run_window_cache_case(
     args: &Args,
     backend: Backend,
     track_id: TrackId,
-    sequence: &[SampleId],
     reference: &Option<HashMap<SampleId, RgbFrame>>,
-    name: &'static str,
-    notes: &'static str,
+    case: WindowCacheCase<'_>,
 ) -> Result<CaseReport> {
     let mut reader = open_reader(&args.input)?;
     reader.clear_cache();
@@ -457,13 +515,13 @@ fn run_window_cache_case(
                 ..DecodedFrameCacheConfig::default()
             },
         );
-        for sample_id in sequence {
+        for sample_id in case.sequence {
             let mut request = FrameDecodeWindowRequest::new(track_id, *sample_id);
             request.backend = backend;
             request.require_hardware = args.require_hardware;
             request.output_mode = DecodeOutputMode::Rgb24;
-            request.before = args.cache_before;
-            request.after = args.cache_after;
+            request.before = case.prefetch_before;
+            request.after = case.prefetch_after;
             let result = cached_decoder.decode_sample_cached(request)?;
             hits = hits.saturating_add(result.cache_stats_delta.hits as usize);
             misses = misses.saturating_add(result.cache_stats_delta.misses as usize);
@@ -478,11 +536,11 @@ fn run_window_cache_case(
     let seconds = start.elapsed().as_secs_f64();
     let after = reader.status();
     let mut report = CaseReport {
-        name,
-        notes,
+        name: case.name,
+        notes: case.notes,
         stats: stats_from_frames(StatsInput {
             seconds,
-            requested: sequence.len(),
+            requested: case.sequence.len(),
             cache_hits: hits,
             cache_misses: misses,
             before: &before,
@@ -720,6 +778,10 @@ fn write_report(
     writeln!(
         &mut text,
         "- `cached_decode_sample_*` uses the library `CachedFrameDecoder`; cache hits skip decoder calls entirely."
+    )?;
+    writeln!(
+        &mut text,
+        "- `cached_decode_sample_reverse_before` is the cold reverse case with reverse-direction prefetch; `cached_decode_sample_reverse_after` is the mismatched prefetch control."
     )?;
     fs::write(&path, text).with_context(|| format!("write report: {}", path.display()))?;
     Ok(path)

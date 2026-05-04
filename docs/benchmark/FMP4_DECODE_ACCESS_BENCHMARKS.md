@@ -41,8 +41,14 @@ output/benchmark-fmp4-decode-access-<epoch>.md
   - Sparse deterministic sample order without decoded-frame cache.
 - `cached_decode_sample_random`
   - Sparse deterministic sample order with library decoded-frame cache.
+- `decode_sample_reverse_no_cache`
+  - Cold reverse sample order without decoded-frame cache.
+- `cached_decode_sample_reverse_before`
+  - Cold reverse access with reverse-direction prefetch (`before > 0`).
+- `cached_decode_sample_reverse_after`
+  - Cold reverse access with forward prefetch as a direction-mismatch control.
 - `cached_decode_sample_ping_pong`
-  - Forward then reverse through the span to expose revisit reuse.
+  - Forward then reverse through the span to expose warm-cache revisit reuse.
 
 ## Correctness Columns
 
@@ -63,6 +69,10 @@ decode baseline, or `--reference none` for timing-only runs.
   `decode_sample`, the implementation is behaving as designed: efficient for
   long sequential ranges, while `CachedFrameDecoder` covers sparse/revisit
   access.
+- `cached_decode_sample_ping_pong` is a warm reverse case. The cold reverse
+  cases are `decode_sample_reverse_no_cache`,
+  `cached_decode_sample_reverse_before`, and
+  `cached_decode_sample_reverse_after`.
 
 ## Current Observation
 
@@ -81,6 +91,9 @@ Key numbers:
   requests, 190 encoded sample reads, 56 inserts, 6 evictions, same min PSNR.
 - `cached_decode_sample_ping_pong`: 48 decoded cache hits for 60 requests,
   showing expected reuse when recently decoded frames are revisited.
+- Reverse cold-access reports should compare `cached_decode_sample_reverse_before`
+  against `cached_decode_sample_reverse_after`; reverse-before is the intended
+  prefetch direction for backwards reads.
 
 The result matches the current implementation model: contiguous decode is
 efficient when callers use the streaming range API; exact-frame sparse access is
