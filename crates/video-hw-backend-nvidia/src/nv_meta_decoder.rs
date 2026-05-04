@@ -22,7 +22,7 @@ use nvidia_video_codec_sdk::sys::nvcuvid::{
 use crate::{BackendError, DecodeOutputMode, Frame, Nv12FramePayload};
 
 const PIXEL_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
-const MAX_DISPLAY_DELAY_FRAMES: u32 = 16;
+const MAX_DISPLAY_DELAY_FRAMES: u32 = 0;
 
 #[derive(Debug)]
 pub struct NvMetaDecoder {

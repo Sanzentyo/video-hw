@@ -207,6 +207,7 @@ pub struct DecodeDiagnostics {
     pub returned_sample_count: usize,
     pub frames_with_sample_metadata_count: usize,
     pub dropped_or_unmatched_frame_count: usize,
+    pub ambiguous_sample_association_count: usize,
     pub returned_frame_order: ReturnedFrameOrder,
     pub missing_sample_ids: Vec<SampleId>,
 }
@@ -373,7 +374,8 @@ impl<'a> FrameDecoder<'a> {
             };
             push_decoded_frame(frame, &mut collect);
         }
-        assign_frames_by_presentation_order(&mut frames, &gop_sample_order);
+        let ambiguous_sample_association_count =
+            align_frames_to_presentation_order(&mut frames, &gop_sample_order);
         sort_frames_by_sample_order(&mut frames, &gop_sample_order);
         let decoded_frame_count = frames.len();
         attach_sample_metadata(&mut frames, &gop_meta_by_id, &gop_sample_order);
@@ -382,6 +384,7 @@ impl<'a> FrameDecoder<'a> {
             &mut diagnostics,
             &gop_sample_order,
             decoded_frame_count,
+            ambiguous_sample_association_count,
             ReturnedFrameOrder::Presentation,
             &frames,
         );
@@ -483,7 +486,8 @@ impl<'a> FrameDecoder<'a> {
             push_decoded_frame(frame, &mut collect);
         }
         let decoded_frame_count = frames.len();
-        assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
+        let ambiguous_sample_association_count =
+            align_frames_to_presentation_order(&mut frames, &decode_sample_order);
         retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
         attach_sample_metadata(&mut frames, &requested_meta_by_id, &wanted_sample_order);
@@ -491,6 +495,7 @@ impl<'a> FrameDecoder<'a> {
             &mut diagnostics,
             &wanted_sample_order,
             decoded_frame_count,
+            ambiguous_sample_association_count,
             ReturnedFrameOrder::Presentation,
             &frames,
         );
@@ -707,7 +712,8 @@ impl<'a> FrameDecoder<'a> {
             push_decoded_frame(frame, &mut collect);
         }
         let decoded_frame_count = frames.len();
-        assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
+        let ambiguous_sample_association_count =
+            align_frames_to_presentation_order(&mut frames, &decode_sample_order);
         retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
         attach_sample_metadata(&mut frames, &sample_meta_by_id, &wanted_sample_order);
@@ -715,6 +721,7 @@ impl<'a> FrameDecoder<'a> {
             &mut diagnostics,
             &wanted_sample_order,
             decoded_frame_count,
+            ambiguous_sample_association_count,
             ReturnedFrameOrder::Presentation,
             &frames,
         );
@@ -812,6 +819,7 @@ fn create_decode_session(
                 returned_sample_count: 0,
                 frames_with_sample_metadata_count: 0,
                 dropped_or_unmatched_frame_count: 0,
+                ambiguous_sample_association_count: 0,
                 returned_frame_order: ReturnedFrameOrder::Unknown,
                 missing_sample_ids: Vec::new(),
             },
@@ -843,6 +851,7 @@ fn create_decode_session(
                     returned_sample_count: 0,
                     frames_with_sample_metadata_count: 0,
                     dropped_or_unmatched_frame_count: 0,
+                    ambiguous_sample_association_count: 0,
                     returned_frame_order: ReturnedFrameOrder::Unknown,
                     missing_sample_ids: Vec::new(),
                 },
@@ -1029,13 +1038,44 @@ fn sort_frames_by_sample_order(
     *frames = sorted.into();
 }
 
-fn assign_frames_by_presentation_order(
+fn align_frames_to_presentation_order(
     frames: &mut VecDeque<DecodedSampleFrame>,
     sample_order: &[SampleId],
-) {
+) -> usize {
+    let order = sample_order
+        .iter()
+        .enumerate()
+        .map(|(index, sample_id)| (*sample_id, index))
+        .collect::<HashMap<_, _>>();
+    let mapped_indices = frames
+        .iter()
+        .map(|frame| {
+            frame
+                .sample_id
+                .and_then(|sample_id| order.get(&sample_id).copied())
+        })
+        .collect::<Vec<_>>();
+    let all_frames_mapped = mapped_indices.iter().all(Option::is_some);
+    let mapped_sequence_is_presentation_order = mapped_indices
+        .iter()
+        .flatten()
+        .try_fold(0_usize, |previous, index| {
+            (*index >= previous).then_some(*index)
+        })
+        .is_some();
+
+    if all_frames_mapped && mapped_sequence_is_presentation_order {
+        return 0;
+    }
+
+    let mut ambiguous = 0;
     for (frame, sample_id) in frames.iter_mut().zip(sample_order.iter().copied()) {
+        if frame.sample_id != Some(sample_id) {
+            ambiguous += 1;
+        }
         frame.sample_id = Some(sample_id);
     }
+    ambiguous
 }
 
 fn retain_requested_frames(
@@ -1078,6 +1118,7 @@ fn finalize_decode_diagnostics(
     diagnostics: &mut DecodeDiagnostics,
     requested_sample_order: &[SampleId],
     decoded_frame_count: usize,
+    ambiguous_sample_association_count: usize,
     returned_frame_order: ReturnedFrameOrder,
     frames: &VecDeque<DecodedSampleFrame>,
 ) {
@@ -1093,6 +1134,7 @@ fn finalize_decode_diagnostics(
         .filter(|frame| frame.sample_meta.is_some())
         .count();
     diagnostics.dropped_or_unmatched_frame_count = decoded_frame_count.saturating_sub(frames.len());
+    diagnostics.ambiguous_sample_association_count = ambiguous_sample_association_count;
     diagnostics.returned_frame_order = returned_frame_order;
     diagnostics.missing_sample_ids = requested_sample_order
         .iter()
@@ -1397,11 +1439,80 @@ mod tests {
         assert_eq!(result.diagnostics.requested_sample_count, 4);
         assert_eq!(result.diagnostics.returned_sample_count, 4);
         assert_eq!(result.diagnostics.frames_with_sample_metadata_count, 4);
+        assert!(result.diagnostics.ambiguous_sample_association_count <= 4);
         assert!(matches!(
             result.diagnostics.returned_frame_order,
             ReturnedFrameOrder::Presentation
         ));
         assert!(result.diagnostics.missing_sample_ids.is_empty());
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decode_window_matches_synthetic_markers_for_bframe_and_no_bframe_inputs() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping synthetic marker alignment test: ffmpeg is not available");
+            return;
+        }
+
+        const WIDTH: u32 = 128;
+        const HEIGHT: u32 = 72;
+        const FRAMES: usize = 18;
+        const WINDOW_START: usize = 4;
+        const WINDOW_FRAMES: usize = 10;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "video-hw-fmp4-marker-alignment-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let source_rgb = make_marker_rgb(WIDTH as usize, HEIGHT as usize, FRAMES);
+        let source_raw = temp_dir.join("source.rgb");
+        let bframe_mp4 = temp_dir.join("bframes.mp4");
+        let no_bframe_mp4 = temp_dir.join("no-bframes.mp4");
+        fs::write(&source_raw, &source_rgb).expect("source raw should be written");
+
+        encode_marker_mp4(&source_raw, &bframe_mp4, WIDTH, HEIGHT, 2);
+        encode_marker_mp4(&source_raw, &no_bframe_mp4, WIDTH, HEIGHT, 0);
+
+        assert_decode_window_matches_markers(
+            &bframe_mp4,
+            WIDTH,
+            HEIGHT,
+            FRAMES,
+            WINDOW_START,
+            WINDOW_FRAMES,
+            true,
+        );
+        assert_decode_window_matches_markers(
+            &no_bframe_mp4,
+            WIDTH,
+            HEIGHT,
+            FRAMES,
+            WINDOW_START,
+            WINDOW_FRAMES,
+            false,
+        );
+
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[cfg(any(
@@ -1574,6 +1685,199 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
+    fn encode_marker_mp4(
+        source_raw: &std::path::Path,
+        output_mp4: &std::path::Path,
+        width: u32,
+        height: u32,
+        bframes: u32,
+    ) {
+        run_ffmpeg(&[
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            &format!("{width}x{height}"),
+            "-framerate",
+            "30",
+            "-i",
+            source_raw.to_str().expect("utf-8 source path"),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "18",
+            "-g",
+            "12",
+            "-bf",
+            &bframes.to_string(),
+            "-pix_fmt",
+            "yuv420p",
+            output_mp4.to_str().expect("utf-8 output path"),
+        ]);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn assert_decode_window_matches_markers(
+        input_path: &std::path::Path,
+        width: u32,
+        height: u32,
+        total_frames: usize,
+        window_start: usize,
+        window_frames: usize,
+        expect_reordered_samples: bool,
+    ) {
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.to_path_buf()))
+            .into_sync_session()
+            .expect("synthetic sample should open");
+        let video_track = reader
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let samples = reader.samples(video_track).expect("video samples").to_vec();
+        let sample_id_order = samples
+            .iter()
+            .map(|sample| sample.sample_id)
+            .collect::<Vec<_>>();
+        let pts_order = ordered_sample_ids_by_pts(&samples);
+        assert_eq!(samples.len(), total_frames);
+        if expect_reordered_samples {
+            assert_ne!(
+                sample_id_order, pts_order,
+                "synthetic B-frame input should have reordered PTS/sample order"
+            );
+        } else {
+            assert_eq!(
+                sample_id_order, pts_order,
+                "no-B-frame control should keep sample order in presentation order"
+            );
+        }
+
+        let mut request = FrameDecodeWindowRequest::new(video_track, pts_order[window_start]);
+        request.after = u32::try_from(window_frames - 1).expect("frame count fits u32");
+        request.output_mode = DecodeOutputMode::Rgb24;
+        let mut decoder = FrameDecoder::new(&mut reader);
+        let result = match decoder.decode_window(request) {
+            Ok(result) => result,
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping synthetic marker alignment test: {error}");
+                    return;
+                }
+                panic!("decode_window failed unexpectedly: {error}");
+            }
+        };
+        assert_eq!(result.frames.len(), window_frames);
+        for (index, frame) in result.frames.iter().enumerate() {
+            assert_eq!(frame.presentation_index, Some(index));
+            assert_eq!(
+                frame.sample_meta.as_ref().map(|sample| sample.sample_id),
+                frame.sample_id
+            );
+            assert_eq!(
+                frame.sample_meta.as_ref().map(|sample| sample.pts),
+                samples
+                    .iter()
+                    .find(|sample| sample.sample_id == pts_order[window_start + index])
+                    .map(|sample| sample.pts)
+            );
+        }
+
+        let (decoded_width, decoded_height, decoded_rgb) = rgb24_window_payload(&result.frames);
+        assert_eq!((decoded_width, decoded_height), (width, height));
+        let reference_raw = input_path.with_extension("reference.rgb");
+        run_ffmpeg(&[
+            "-y",
+            "-i",
+            input_path.to_str().expect("utf-8 input path"),
+            "-frames:v",
+            &total_frames.to_string(),
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            reference_raw.to_str().expect("utf-8 reference path"),
+        ]);
+        let reference_rgb = fs::read(&reference_raw).expect("reference raw should exist");
+        let frame_len = width as usize * height as usize * 3;
+        let reference_window =
+            &reference_rgb[window_start * frame_len..(window_start + window_frames) * frame_len];
+        assert_diagonal_best_match(reference_window, &decoded_rgb, frame_len, window_frames);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn make_marker_rgb(width: usize, height: usize, frames: usize) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(width * height * 3 * frames);
+        for frame in 0..frames {
+            let stripe_start = frame * width / frames;
+            let stripe_end = (frame + 1) * width / frames;
+            let base = [
+                (frame * 19 + 20) as u8,
+                235_u8.saturating_sub((frame * 17) as u8),
+                (frame * 11 + 40) as u8,
+            ];
+            for y in 0..height {
+                for x in 0..width {
+                    let in_stripe = x >= stripe_start && x < stripe_end;
+                    let bit_cell = (x / 16).saturating_add((y / 12) * 8);
+                    let bit = ((frame >> (bit_cell % 4)) & 1) != 0;
+                    let checker = ((x / 8) + (y / 8) + frame) % 2 == 0;
+                    let pixel = if in_stripe {
+                        [255, 255, 255]
+                    } else if bit {
+                        [base[0], 20, base[2]]
+                    } else if checker {
+                        base
+                    } else {
+                        [base[0] / 2, base[1] / 2, base[2] / 2]
+                    };
+                    rgb.extend_from_slice(&pixel);
+                }
+            }
+        }
+        rgb
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     fn run_ffmpeg(args: &[&str]) {
         let output = Command::new("ffmpeg")
             .args(args)
@@ -1688,6 +1992,7 @@ mod tests {
             returned_sample_count: 2,
             frames_with_sample_metadata_count: 2,
             dropped_or_unmatched_frame_count: 2,
+            ambiguous_sample_association_count: 1,
             returned_frame_order: ReturnedFrameOrder::Presentation,
             missing_sample_ids: vec![SampleId(42)],
         };
@@ -1705,6 +2010,10 @@ mod tests {
             roundtrip.returned_frame_order,
             ReturnedFrameOrder::Presentation
         ));
+        assert_eq!(
+            roundtrip.ambiguous_sample_association_count,
+            diagnostics.ambiguous_sample_association_count
+        );
         assert_eq!(roundtrip.missing_sample_ids, diagnostics.missing_sample_ids);
     }
 }

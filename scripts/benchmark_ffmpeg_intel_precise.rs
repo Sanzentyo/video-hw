@@ -114,7 +114,7 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Codec::H264)]
     codec: Codec,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     release: bool,
 
     #[arg(long, default_value_t = 2)]

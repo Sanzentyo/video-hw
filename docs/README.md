@@ -14,6 +14,7 @@
 - `status/BENCHMARK_2026-02-18.md`
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
+- `benchmark/BACKEND_FFMPEG_BENCHMARKS.md`（NV/Intel/Vulkan/VT と FFmpeg の統合 benchmark 手順）
 - `../scripts/README.md`（スクリプト実装方針）
 
 ## 計画
