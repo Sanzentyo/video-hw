@@ -15,7 +15,7 @@
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
 - `benchmark/BACKEND_FFMPEG_BENCHMARKS.md`（NV/Intel/Vulkan/VT と FFmpeg の統合 benchmark 手順）
-- `benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md`（連続/単発/ランダム decode と caller-side decoded-frame cache の benchmark 手順）
+- `benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md`（連続/単発/ランダム decode と `CachedFrameDecoder` の benchmark 手順）
 - `../scripts/README.md`（スクリプト実装方針）
 
 ## 計画

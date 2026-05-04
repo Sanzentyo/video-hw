@@ -238,6 +238,43 @@ pub struct FrameDecodeRangeResult {
     pub frames: Vec<DecodedSampleFrame>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DecodedFrameCacheConfig {
+    pub max_frames: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for DecodedFrameCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_frames: 64,
+            max_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DecodedFrameCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub inserts: u64,
+    pub evictions: u64,
+    pub resident_frames: usize,
+    pub resident_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedFrameDecodeResult {
+    pub range: SampleRange,
+    pub diagnostics: DecodeDiagnostics,
+    pub resolved_backend: BackendKind,
+    pub output_mode: DecodeOutputMode,
+    pub frames: Vec<DecodedSampleFrame>,
+    pub cache_stats_delta: DecodedFrameCacheStats,
+}
+
 #[derive(Debug, Clone)]
 pub struct GopCursor {
     pub range: SampleRange,
@@ -269,6 +306,80 @@ pub struct FrameDecoder<'a> {
     reader: &'a mut Fmp4Reader<SyncReading>,
 }
 
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+pub struct CachedFrameDecoder<'a> {
+    reader: &'a mut Fmp4Reader<SyncReading>,
+    cache: DecodedFrameCache,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DecodedFrameCacheKey {
+    track_id: TrackId,
+    sample_id: SampleId,
+    backend: String,
+    require_hardware: bool,
+    output_mode: String,
+    fps: i32,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+struct DecodedFrameCacheEntry {
+    frame: DecodedSampleFrame,
+    resolved_backend: BackendKind,
+    fallback_used: bool,
+    fallback_reason: Option<String>,
+    size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+struct DecodedFrameCache {
+    config: DecodedFrameCacheConfig,
+    entries: HashMap<DecodedFrameCacheKey, DecodedFrameCacheEntry>,
+    lru: VecDeque<DecodedFrameCacheKey>,
+    stats: DecodedFrameCacheStats,
+}
+
 pub struct DecodedFrameIter<'a> {
     range: SampleRange,
     diagnostics: DecodeDiagnostics,
@@ -291,6 +402,388 @@ impl DecodedFrameIter<'_> {
 
     pub fn range(&self) -> SampleRange {
         self.range
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+impl DecodedFrameCache {
+    fn new(config: DecodedFrameCacheConfig) -> Self {
+        Self {
+            config,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            stats: DecodedFrameCacheStats::default(),
+        }
+    }
+
+    fn stats(&self) -> DecodedFrameCacheStats {
+        let mut stats = self.stats.clone();
+        stats.resident_frames = self.entries.len();
+        stats
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.stats.resident_frames = 0;
+        self.stats.resident_bytes = 0;
+    }
+
+    fn get(
+        &mut self,
+        key: &DecodedFrameCacheKey,
+    ) -> Option<(DecodedSampleFrame, BackendKind, bool, Option<String>)> {
+        let entry = self.entries.get(key).cloned();
+        match entry {
+            Some(entry) => {
+                self.stats.hits = self.stats.hits.saturating_add(1);
+                self.touch(key.clone());
+                Some((
+                    entry.frame,
+                    entry.resolved_backend,
+                    entry.fallback_used,
+                    entry.fallback_reason,
+                ))
+            }
+            None => {
+                self.stats.misses = self.stats.misses.saturating_add(1);
+                None
+            }
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: DecodedFrameCacheKey,
+        frame: DecodedSampleFrame,
+        resolved_backend: BackendKind,
+        fallback_used: bool,
+        fallback_reason: Option<String>,
+    ) {
+        if self.config.max_frames == 0 || self.config.max_bytes == 0 {
+            return;
+        }
+
+        let size_bytes = decoded_frame_size_bytes(&frame.frame);
+        if let Some(existing) = self.entries.remove(&key) {
+            self.stats.resident_bytes = self
+                .stats
+                .resident_bytes
+                .saturating_sub(existing.size_bytes);
+            self.lru.retain(|existing_key| existing_key != &key);
+        }
+
+        self.stats.inserts = self.stats.inserts.saturating_add(1);
+        self.stats.resident_bytes = self.stats.resident_bytes.saturating_add(size_bytes);
+        self.entries.insert(
+            key.clone(),
+            DecodedFrameCacheEntry {
+                frame,
+                resolved_backend,
+                fallback_used,
+                fallback_reason,
+                size_bytes,
+            },
+        );
+        self.touch(key);
+        self.evict_to_budget();
+        self.stats.resident_frames = self.entries.len();
+    }
+
+    fn touch(&mut self, key: DecodedFrameCacheKey) {
+        self.lru.retain(|existing| existing != &key);
+        self.lru.push_back(key);
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.config.max_frames
+            || self.stats.resident_bytes > self.config.max_bytes
+        {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.stats.resident_bytes =
+                    self.stats.resident_bytes.saturating_sub(entry.size_bytes);
+                self.stats.evictions = self.stats.evictions.saturating_add(1);
+            }
+        }
+    }
+}
+
+impl<'a> CachedFrameDecoder<'a> {
+    pub fn new(reader: &'a mut Fmp4Reader<SyncReading>, config: DecodedFrameCacheConfig) -> Self {
+        Self {
+            reader,
+            cache: DecodedFrameCache::new(config),
+        }
+    }
+
+    pub fn cache_stats(&self) -> DecodedFrameCacheStats {
+        self.cache.stats()
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    pub fn decode_sample_cached(
+        &mut self,
+        request: FrameDecodeWindowRequest,
+    ) -> Result<CachedFrameDecodeResult> {
+        let samples = self.reader.samples(request.track_id)?.to_vec();
+        let fps = request.fps.unwrap_or_else(|| estimate_fps(&samples)).max(1);
+        let key = cache_key_for_request(
+            request.track_id,
+            request.center_sample,
+            request.backend,
+            request.require_hardware,
+            request.output_mode,
+            fps,
+        );
+        let stats_before = self.cache.stats();
+        if let Some((mut frame, resolved_backend, fallback_used, fallback_reason)) =
+            self.cache.get(&key)
+        {
+            frame.presentation_index = Some(0);
+            let range = single_sample_range(&samples, request.track_id, request.center_sample)?;
+            let frames = vec![frame];
+            let diagnostics = cached_decode_diagnostics(
+                &request,
+                resolved_backend,
+                fps,
+                fallback_used,
+                fallback_reason,
+                1,
+                &frames,
+            );
+            return Ok(CachedFrameDecodeResult {
+                range,
+                diagnostics,
+                resolved_backend,
+                output_mode: request.output_mode,
+                frames,
+                cache_stats_delta: cache_stats_delta(&stats_before, &self.cache.stats()),
+            });
+        }
+
+        let result = {
+            let mut decoder = FrameDecoder::new(self.reader);
+            decoder.decode_window(request.clone())?
+        };
+        let target_frame = result
+            .frames
+            .iter()
+            .find(|frame| frame.sample_id == Some(request.center_sample))
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "decode window did not return center sample {}",
+                    request.center_sample
+                )
+            })?;
+        self.cache_decoded_frames(&request, fps, &result);
+        let range = single_sample_range(&samples, request.track_id, request.center_sample)?;
+        let mut frames = vec![target_frame];
+        frames[0].presentation_index = Some(0);
+        Ok(CachedFrameDecodeResult {
+            range,
+            diagnostics: result.diagnostics,
+            resolved_backend: result.resolved_backend,
+            output_mode: result.output_mode,
+            frames,
+            cache_stats_delta: cache_stats_delta(&stats_before, &self.cache.stats()),
+        })
+    }
+
+    #[cfg(not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )))]
+    pub fn decode_sample_cached(
+        &mut self,
+        _request: FrameDecodeWindowRequest,
+    ) -> Result<CachedFrameDecodeResult> {
+        anyhow::bail!("no decoder backend feature is enabled")
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    pub fn decode_window_cached(
+        &mut self,
+        request: FrameDecodeWindowRequest,
+    ) -> Result<CachedFrameDecodeResult> {
+        let samples = self.reader.samples(request.track_id)?.to_vec();
+        let wanted_sample_order = presentation_window_sample_ids(
+            &samples,
+            request.center_sample,
+            request.before,
+            request.after,
+        )?;
+        let fps = request.fps.unwrap_or_else(|| estimate_fps(&samples)).max(1);
+        let stats_before = self.cache.stats();
+        let mut cached_frames = Vec::with_capacity(wanted_sample_order.len());
+        let mut cached_backend = None;
+        let mut cached_fallback_used = false;
+        let mut cached_fallback_reason = None;
+        let mut all_cached = true;
+        for (index, sample_id) in wanted_sample_order.iter().copied().enumerate() {
+            let key = cache_key_for_request(
+                request.track_id,
+                sample_id,
+                request.backend,
+                request.require_hardware,
+                request.output_mode,
+                fps,
+            );
+            if let Some((mut frame, resolved_backend, fallback_used, fallback_reason)) =
+                self.cache.get(&key)
+            {
+                frame.presentation_index = Some(index);
+                cached_backend.get_or_insert(resolved_backend);
+                cached_fallback_used |= fallback_used;
+                if cached_fallback_reason.is_none() {
+                    cached_fallback_reason = fallback_reason;
+                }
+                cached_frames.push(frame);
+            } else {
+                all_cached = false;
+                break;
+            }
+        }
+
+        if all_cached {
+            let resolved_backend = cached_backend.context("cached window is empty")?;
+            let range = window_range_from_order(&samples, request.track_id, &wanted_sample_order)?;
+            let diagnostics = cached_decode_diagnostics(
+                &request,
+                resolved_backend,
+                fps,
+                cached_fallback_used,
+                cached_fallback_reason,
+                wanted_sample_order.len(),
+                &cached_frames,
+            );
+            return Ok(CachedFrameDecodeResult {
+                range,
+                diagnostics,
+                resolved_backend,
+                output_mode: request.output_mode,
+                frames: cached_frames,
+                cache_stats_delta: cache_stats_delta(&stats_before, &self.cache.stats()),
+            });
+        }
+
+        let result = {
+            let mut decoder = FrameDecoder::new(self.reader);
+            decoder.decode_window(request.clone())?
+        };
+        self.cache_decoded_frames(&request, fps, &result);
+        Ok(CachedFrameDecodeResult {
+            range: result.range,
+            diagnostics: result.diagnostics,
+            resolved_backend: result.resolved_backend,
+            output_mode: result.output_mode,
+            frames: result.frames,
+            cache_stats_delta: cache_stats_delta(&stats_before, &self.cache.stats()),
+        })
+    }
+
+    #[cfg(not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )))]
+    pub fn decode_window_cached(
+        &mut self,
+        _request: FrameDecodeWindowRequest,
+    ) -> Result<CachedFrameDecodeResult> {
+        anyhow::bail!("no decoder backend feature is enabled")
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn cache_decoded_frames(
+        &mut self,
+        request: &FrameDecodeWindowRequest,
+        fps: i32,
+        result: &FrameDecodeRangeResult,
+    ) {
+        for frame in &result.frames {
+            let Some(sample_id) = frame.sample_id else {
+                continue;
+            };
+            let key = cache_key_for_request(
+                request.track_id,
+                sample_id,
+                request.backend,
+                request.require_hardware,
+                request.output_mode,
+                fps,
+            );
+            self.cache.insert(
+                key,
+                frame.clone(),
+                result.resolved_backend,
+                result.diagnostics.fallback_used,
+                result.diagnostics.fallback_reason.clone(),
+            );
+        }
     }
 }
 
@@ -1194,6 +1687,195 @@ fn estimate_fps(samples: &[SampleMeta]) -> i32 {
         .unwrap_or(30)
 }
 
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn cache_key_for_request(
+    track_id: TrackId,
+    sample_id: SampleId,
+    backend: Backend,
+    require_hardware: bool,
+    output_mode: DecodeOutputMode,
+    fps: i32,
+) -> DecodedFrameCacheKey {
+    DecodedFrameCacheKey {
+        track_id,
+        sample_id,
+        backend: backend.to_string(),
+        require_hardware,
+        output_mode: output_mode.to_string(),
+        fps,
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn decoded_frame_size_bytes(frame: &DecodedFrame) -> usize {
+    match frame {
+        DecodedFrame::Metadata { .. } => 0,
+        DecodedFrame::Nv12 { data, .. } | DecodedFrame::Rgb24 { data, .. } => data.len(),
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn cache_stats_delta(
+    before: &DecodedFrameCacheStats,
+    after: &DecodedFrameCacheStats,
+) -> DecodedFrameCacheStats {
+    DecodedFrameCacheStats {
+        hits: after.hits.saturating_sub(before.hits),
+        misses: after.misses.saturating_sub(before.misses),
+        inserts: after.inserts.saturating_sub(before.inserts),
+        evictions: after.evictions.saturating_sub(before.evictions),
+        resident_frames: after.resident_frames,
+        resident_bytes: after.resident_bytes,
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn cached_decode_diagnostics(
+    request: &FrameDecodeWindowRequest,
+    resolved_backend: BackendKind,
+    fps: i32,
+    fallback_used: bool,
+    fallback_reason: Option<String>,
+    requested_sample_count: usize,
+    frames: &[DecodedSampleFrame],
+) -> DecodeDiagnostics {
+    DecodeDiagnostics {
+        requested_backend: request.backend,
+        resolved_backend,
+        require_hardware: request.require_hardware,
+        output_mode: request.output_mode,
+        fps,
+        fallback_used,
+        fallback_reason,
+        requested_sample_count,
+        decoded_frame_count: 0,
+        returned_sample_count: frames.len(),
+        frames_with_sample_metadata_count: frames
+            .iter()
+            .filter(|frame| frame.sample_meta.is_some())
+            .count(),
+        dropped_or_unmatched_frame_count: 0,
+        ambiguous_sample_association_count: 0,
+        returned_frame_order: ReturnedFrameOrder::Presentation,
+        missing_sample_ids: Vec::new(),
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn single_sample_range(
+    samples: &[SampleMeta],
+    track_id: TrackId,
+    sample_id: SampleId,
+) -> Result<SampleRange> {
+    let start = samples
+        .iter()
+        .position(|sample| sample.sample_id == sample_id)
+        .with_context(|| format!("sample {sample_id} does not belong to track {track_id}"))?;
+    Ok(SampleRange {
+        track_id,
+        start_sample: sample_id,
+        end_sample_exclusive: samples
+            .get(start.saturating_add(1))
+            .map_or(SampleId(u64::MAX), |sample| sample.sample_id),
+    })
+}
+
+#[cfg_attr(
+    not(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    )),
+    allow(dead_code)
+)]
+fn window_range_from_order(
+    samples: &[SampleMeta],
+    track_id: TrackId,
+    sample_order: &[SampleId],
+) -> Result<SampleRange> {
+    let start_sample = *sample_order.first().context("cached window is empty")?;
+    let end_sample_exclusive = sample_order
+        .last()
+        .and_then(|last| sample_after_in_pts_order(samples, *last))
+        .unwrap_or(SampleId(u64::MAX));
+    Ok(SampleRange {
+        track_id,
+        start_sample,
+        end_sample_exclusive,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1205,21 +1887,6 @@ mod tests {
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};
-    #[cfg(all(
-        feature = "serde",
-        any(
-            all(target_os = "macos", feature = "backend-vt"),
-            all(
-                any(
-                    feature = "backend-nvidia",
-                    feature = "backend-intel",
-                    feature = "backend-vulkan"
-                ),
-                any(target_os = "linux", target_os = "windows")
-            )
-        )
-    ))]
-    use video_hw::Codec;
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
@@ -1231,7 +1898,8 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
-    use video_hw::DecodedFrame;
+    use video_hw::{Codec, DecoderConfig};
+    use video_hw::{DecodedFrame, Dimensions};
 
     #[test]
     fn frame_decode_request_defaults_to_auto_rgb() {
@@ -1267,6 +1935,244 @@ mod tests {
         assert_eq!(request.backend, Backend::Auto);
         assert_eq!(request.output_mode, DecodeOutputMode::Rgb24);
         assert!(!request.require_hardware);
+    }
+
+    #[test]
+    fn decoded_frame_cache_config_has_bounded_default() {
+        let config = DecodedFrameCacheConfig::default();
+        assert_eq!(config.max_frames, 64);
+        assert_eq!(config.max_bytes, 256 * 1024 * 1024);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decoded_frame_cache_tracks_hits_lru_and_frame_evictions() {
+        let backend = test_resolved_backend();
+        let mut cache = DecodedFrameCache::new(DecodedFrameCacheConfig {
+            max_frames: 2,
+            max_bytes: usize::MAX,
+        });
+        let key1 = test_cache_key(SampleId(1));
+        let key2 = test_cache_key(SampleId(2));
+        let key3 = test_cache_key(SampleId(3));
+        cache.insert(
+            key1.clone(),
+            test_decoded_frame(SampleId(1), 4),
+            backend,
+            false,
+            None,
+        );
+        cache.insert(
+            key2.clone(),
+            test_decoded_frame(SampleId(2), 4),
+            backend,
+            false,
+            None,
+        );
+        assert!(cache.get(&key1).is_some());
+        cache.insert(
+            key3.clone(),
+            test_decoded_frame(SampleId(3), 4),
+            backend,
+            false,
+            None,
+        );
+
+        assert!(cache.get(&key1).is_some(), "recent hit should protect key1");
+        assert!(cache.get(&key2).is_none(), "oldest key should be evicted");
+        assert!(cache.get(&key3).is_some());
+        let stats = cache.stats();
+        assert_eq!(stats.inserts, 3);
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(stats.resident_frames, 2);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decoded_frame_cache_enforces_byte_budget_and_clear() {
+        let backend = test_resolved_backend();
+        let mut cache = DecodedFrameCache::new(DecodedFrameCacheConfig {
+            max_frames: 10,
+            max_bytes: 12,
+        });
+        cache.insert(
+            test_cache_key(SampleId(1)),
+            test_decoded_frame(SampleId(1), 12),
+            backend,
+            false,
+            None,
+        );
+        cache.insert(
+            test_cache_key(SampleId(2)),
+            test_decoded_frame(SampleId(2), 12),
+            backend,
+            false,
+            None,
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(stats.resident_frames, 1);
+        assert_eq!(stats.resident_bytes, 12);
+
+        cache.clear();
+        let stats = cache.stats();
+        assert_eq!(stats.resident_frames, 0);
+        assert_eq!(stats.resident_bytes, 0);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decoded_frame_cache_key_separates_backend_mode_and_fps() {
+        let auto_rgb = cache_key_for_request(
+            TrackId(1),
+            SampleId(1),
+            Backend::Auto,
+            false,
+            DecodeOutputMode::Rgb24,
+            30,
+        );
+        let auto_nv12 = cache_key_for_request(
+            TrackId(1),
+            SampleId(1),
+            Backend::Auto,
+            false,
+            DecodeOutputMode::Nv12,
+            30,
+        );
+        let auto_rgb_60 = cache_key_for_request(
+            TrackId(1),
+            SampleId(1),
+            Backend::Auto,
+            false,
+            DecodeOutputMode::Rgb24,
+            60,
+        );
+        assert_ne!(auto_rgb, auto_nv12);
+        assert_ne!(auto_rgb, auto_rgb_60);
+
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        assert_ne!(
+            auto_rgb,
+            cache_key_for_request(
+                TrackId(1),
+                SampleId(1),
+                Backend::Nvidia,
+                false,
+                DecodeOutputMode::Rgb24,
+                30,
+            )
+        );
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        assert_ne!(
+            auto_rgb,
+            cache_key_for_request(
+                TrackId(1),
+                SampleId(1),
+                Backend::VideoToolbox,
+                false,
+                DecodeOutputMode::Rgb24,
+                30,
+            )
+        );
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn test_resolved_backend() -> BackendKind {
+        Backend::Auto
+            .resolve_decoder(&DecoderConfig::new(Codec::H264, 30, false))
+            .expect("a decoder backend should be available with enabled test features")
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn test_cache_key(sample_id: SampleId) -> DecodedFrameCacheKey {
+        cache_key_for_request(
+            TrackId(1),
+            sample_id,
+            Backend::Auto,
+            false,
+            DecodeOutputMode::Rgb24,
+            30,
+        )
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn test_decoded_frame(sample_id: SampleId, byte_len: usize) -> DecodedSampleFrame {
+        DecodedSampleFrame {
+            sample_id: Some(sample_id),
+            sample_meta: None,
+            presentation_index: None,
+            frame: DecodedFrame::Rgb24 {
+                dims: Dimensions {
+                    width: NonZeroU32::new(2).expect("non-zero width"),
+                    height: NonZeroU32::new(2).expect("non-zero height"),
+                },
+                pts_90k: None,
+                data: vec![sample_id.0 as u8; byte_len],
+            },
+        }
     }
 
     #[test]
@@ -1650,6 +2556,80 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
+    #[test]
+    fn cached_frame_decoder_reuses_decoded_target_frame() {
+        let input_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif.mp4");
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path))
+            .into_sync_session()
+            .expect("sample should open");
+        let video_track = reader
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let target_sample = reader
+            .samples(video_track)
+            .expect("video samples")
+            .get(2)
+            .expect("sample 2 should exist")
+            .sample_id;
+        let mut request = FrameDecodeWindowRequest::new(video_track, target_sample);
+        request.after = 2;
+        request.output_mode = DecodeOutputMode::Rgb24;
+        let mut cached = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: 8,
+                max_bytes: 32 * 1024 * 1024,
+            },
+        );
+        let first = match cached.decode_sample_cached(request.clone()) {
+            Ok(result) => result,
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping cached decode test: {error}");
+                    return;
+                }
+                panic!("cached decode failed unexpectedly: {error}");
+            }
+        };
+        let second = cached
+            .decode_sample_cached(request)
+            .expect("second decode should be served from cache");
+
+        assert_eq!(first.frames.len(), 1);
+        assert_eq!(second.frames.len(), 1);
+        assert_eq!(second.cache_stats_delta.hits, 1);
+        assert_eq!(second.cache_stats_delta.misses, 0);
+        assert_eq!(second.diagnostics.decoded_frame_count, 0);
+        assert_eq!(second.frames[0].sample_id, Some(target_sample));
+        assert_eq!(
+            rgb24_bytes(&first.frames[0]),
+            rgb24_bytes(&second.frames[0]),
+            "cached target frame should match the original decoded target"
+        );
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     fn rgb24_window_payload(frames: &[DecodedSampleFrame]) -> (u32, u32, Vec<u8>) {
         let mut dims = None;
         let mut raw = Vec::new();
@@ -1672,6 +2652,24 @@ mod tests {
         }
         let dims = dims.expect("at least one frame");
         (dims.width.get(), dims.height.get(), raw)
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn rgb24_bytes(frame: &DecodedSampleFrame) -> &[u8] {
+        let DecodedFrame::Rgb24 { data, .. } = &frame.frame else {
+            panic!("expected RGB24 frame");
+        };
+        data
     }
 
     #[cfg(any(

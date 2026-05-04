@@ -17,7 +17,8 @@ pub mod fmp4_writer;
 mod tests;
 
 pub use fmp4_reader::{
-    DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, EncodedSample,
+    CachedFrameDecodeResult, CachedFrameDecoder, DecodeDiagnostics, DecodedFrameCacheConfig,
+    DecodedFrameCacheStats, DecodedFrameIter, DecodedSampleFrame, EncodedSample,
     Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track,
     Fmp4TrackDescription, FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest,
     FrameDecodeResult, FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode,

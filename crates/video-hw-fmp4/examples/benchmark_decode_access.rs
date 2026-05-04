@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fmt::Write as _,
     fs,
     io::{Read, Seek, SeekFrom},
@@ -13,9 +13,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use video_hw::{Backend, DecodeOutputMode, DecodedFrame};
 use video_hw_fmp4::{
-    Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady, Fmp4ReaderStatus, FrameDecodeRangeRequest,
-    FrameDecodeRequest, FrameDecodeWindowRequest, FrameDecoder, IndexMode, SampleId, SampleMeta,
-    SampleRange, TrackId, TrackKind,
+    CachedFrameDecoder, DecodedFrameCacheConfig, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderReady,
+    Fmp4ReaderStatus, FrameDecodeRangeRequest, FrameDecodeRequest, FrameDecodeWindowRequest,
+    FrameDecoder, IndexMode, SampleId, SampleMeta, SampleRange, TrackId, TrackKind,
 };
 
 #[derive(Debug, Parser)]
@@ -83,6 +83,9 @@ struct AccessStats {
     returned: usize,
     cache_hits: usize,
     cache_misses: usize,
+    cache_inserts: u64,
+    cache_evictions: u64,
+    decoded_cache_resident_bytes: usize,
     samples_read: u64,
     bytes_read: u64,
     range_cache_hits: u64,
@@ -101,13 +104,6 @@ struct CaseReport {
     stats: AccessStats,
 }
 
-#[derive(Debug)]
-struct FrameCache {
-    capacity: usize,
-    entries: HashMap<SampleId, RgbFrame>,
-    lru: VecDeque<SampleId>,
-}
-
 struct StatsInput<'a> {
     seconds: f64,
     requested: usize,
@@ -117,42 +113,6 @@ struct StatsInput<'a> {
     after: &'a Fmp4ReaderStatus,
     frames: &'a [RgbFrame],
     reference: &'a Option<HashMap<SampleId, RgbFrame>>,
-}
-
-impl FrameCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: HashMap::new(),
-            lru: VecDeque::new(),
-        }
-    }
-
-    fn get(&mut self, sample_id: SampleId) -> Option<RgbFrame> {
-        let frame = self.entries.get(&sample_id).cloned()?;
-        self.touch(sample_id);
-        Some(frame)
-    }
-
-    fn insert(&mut self, frame: RgbFrame) {
-        if self.capacity == 0 {
-            return;
-        }
-        let sample_id = frame.sample_id;
-        self.entries.insert(sample_id, frame);
-        self.touch(sample_id);
-        while self.entries.len() > self.capacity {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
-            };
-            self.entries.remove(&oldest);
-        }
-    }
-
-    fn touch(&mut self, sample_id: SampleId) {
-        self.lru.retain(|existing| *existing != sample_id);
-        self.lru.push_back(sample_id);
-    }
 }
 
 fn main() -> Result<()> {
@@ -199,8 +159,8 @@ fn main() -> Result<()> {
             track_id,
             &selected,
             &reference,
-            "decode_window_sequential_lru",
-            "Caller-side LRU cache; misses decode a presentation window and retain nearby frames.",
+            "cached_decode_sample_sequential",
+            "Library CachedFrameDecoder; misses decode a presentation window and retain nearby frames.",
         )?,
         run_decode_sample_case(
             &args,
@@ -217,8 +177,8 @@ fn main() -> Result<()> {
             track_id,
             &random_sequence,
             &reference,
-            "decode_window_random_lru",
-            "Random access with caller-side window cache.",
+            "cached_decode_sample_random",
+            "Random access with library decoded-frame cache.",
         )?,
         run_window_cache_case(
             &args,
@@ -226,7 +186,7 @@ fn main() -> Result<()> {
             track_id,
             &ping_pong_sequence,
             &reference,
-            "decode_window_ping_pong_lru",
+            "cached_decode_sample_ping_pong",
             "Forward then reverse access through the same span; shows cache reuse on revisits.",
         )?,
     ];
@@ -483,39 +443,41 @@ fn run_window_cache_case(
     reader.clear_cache();
     let before = reader.status();
     let start = Instant::now();
-    let mut cache = FrameCache::new(args.cache_capacity);
     let mut hits = 0usize;
     let mut misses = 0usize;
+    let mut inserts = 0u64;
+    let mut evictions = 0u64;
+    let decoded_cache_resident_bytes;
     let mut frames = Vec::new();
-    for sample_id in sequence {
-        if let Some(frame) = cache.get(*sample_id) {
-            hits = hits.saturating_add(1);
-            frames.push(frame);
-            continue;
-        }
-        misses = misses.saturating_add(1);
-        let decoded = {
-            let mut decoder = FrameDecoder::new(&mut reader);
+    {
+        let mut cached_decoder = CachedFrameDecoder::new(
+            &mut reader,
+            DecodedFrameCacheConfig {
+                max_frames: args.cache_capacity,
+                ..DecodedFrameCacheConfig::default()
+            },
+        );
+        for sample_id in sequence {
             let mut request = FrameDecodeWindowRequest::new(track_id, *sample_id);
             request.backend = backend;
             request.require_hardware = args.require_hardware;
             request.output_mode = DecodeOutputMode::Rgb24;
             request.before = args.cache_before;
             request.after = args.cache_after;
-            decoder.decode_window(request)?.frames
-        };
-        for decoded_frame in decoded {
-            let frame = decoded_frame_to_rgb(decoded_frame)?;
-            let is_requested = frame.sample_id == *sample_id;
-            cache.insert(frame.clone());
-            if is_requested {
-                frames.push(frame);
+            let result = cached_decoder.decode_sample_cached(request)?;
+            hits = hits.saturating_add(result.cache_stats_delta.hits as usize);
+            misses = misses.saturating_add(result.cache_stats_delta.misses as usize);
+            inserts = inserts.saturating_add(result.cache_stats_delta.inserts);
+            evictions = evictions.saturating_add(result.cache_stats_delta.evictions);
+            for decoded_frame in result.frames {
+                frames.push(decoded_frame_to_rgb(decoded_frame)?);
             }
         }
+        decoded_cache_resident_bytes = cached_decoder.cache_stats().resident_bytes;
     }
     let seconds = start.elapsed().as_secs_f64();
     let after = reader.status();
-    Ok(CaseReport {
+    let mut report = CaseReport {
         name,
         notes,
         stats: stats_from_frames(StatsInput {
@@ -528,7 +490,11 @@ fn run_window_cache_case(
             frames: &frames,
             reference,
         }),
-    })
+    };
+    report.stats.cache_inserts = inserts;
+    report.stats.cache_evictions = evictions;
+    report.stats.decoded_cache_resident_bytes = decoded_cache_resident_bytes;
+    Ok(report)
 }
 
 fn decode_range_frames(
@@ -595,6 +561,9 @@ fn stats_from_frames(input: StatsInput<'_>) -> AccessStats {
         returned: input.frames.len(),
         cache_hits: input.cache_hits,
         cache_misses: input.cache_misses,
+        cache_inserts: 0,
+        cache_evictions: 0,
+        decoded_cache_resident_bytes: 0,
         samples_read: input
             .after
             .samples_read
@@ -702,23 +671,26 @@ fn write_report(
     writeln!(&mut text)?;
     writeln!(
         &mut text,
-        "| Case | seconds | requested | returned | app cache hit/miss | sample reads | bytes read | range hit/miss/evict | resident bytes | max MSE | min PSNR | compared |"
+        "| Case | seconds | requested | returned | decoded hit/miss/insert/evict | decoded resident bytes | sample reads | bytes read | range hit/miss/evict | range resident bytes | max MSE | min PSNR | compared |"
     )?;
     writeln!(
         &mut text,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     )?;
     for report in reports {
         let stats = &report.stats;
         writeln!(
             &mut text,
-            "| {} | {:.3} | {} | {} | {}/{} | {} | {} | {}/{}/{} | {} | {} | {} | {} |",
+            "| {} | {:.3} | {} | {} | {}/{}/{}/{} | {} | {} | {} | {}/{}/{} | {} | {} | {} | {} |",
             report.name,
             stats.seconds,
             stats.requested,
             stats.returned,
             stats.cache_hits,
             stats.cache_misses,
+            stats.cache_inserts,
+            stats.cache_evictions,
+            stats.decoded_cache_resident_bytes,
             stats.samples_read,
             stats.bytes_read,
             stats.range_cache_hits,
@@ -743,11 +715,11 @@ fn write_report(
     )?;
     writeln!(
         &mut text,
-        "- `decode_sample_*_no_cache` shows the lower bound of API-level reuse: byte ranges may hit the range cache, but decoded frames are not cached by `video-hw-fmp4` itself."
+        "- `decode_sample_*_no_cache` shows the lower bound of API-level reuse: byte ranges may hit the range cache, but decoded frames are not reused."
     )?;
     writeln!(
         &mut text,
-        "- `decode_window_*_lru` models the caller-side decoded-frame cache recommended for sliders, trackers, and sparse revisits."
+        "- `cached_decode_sample_*` uses the library `CachedFrameDecoder`; cache hits skip decoder calls entirely."
     )?;
     fs::write(&path, text).with_context(|| format!("write report: {}", path.display()))?;
     Ok(path)

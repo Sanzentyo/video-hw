@@ -13,7 +13,8 @@ pub use config::{
 };
 pub use core::EncodedSampleIter;
 pub use decode::{
-    DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, FrameDecodeRangeRequest,
+    CachedFrameDecodeResult, CachedFrameDecoder, DecodeDiagnostics, DecodedFrameCacheConfig,
+    DecodedFrameCacheStats, DecodedFrameIter, DecodedSampleFrame, FrameDecodeRangeRequest,
     FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult, FrameDecodeWindowRequest,
     FrameDecoder, GopCursor, ReturnedFrameOrder,
 };
