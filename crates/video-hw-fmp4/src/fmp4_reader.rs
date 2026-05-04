@@ -15,7 +15,7 @@ pub use core::EncodedSampleIter;
 pub use decode::{
     DecodeDiagnostics, DecodedFrameIter, DecodedSampleFrame, FrameDecodeRangeRequest,
     FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult, FrameDecodeWindowRequest,
-    FrameDecoder, GopCursor,
+    FrameDecoder, GopCursor, ReturnedFrameOrder,
 };
 #[cfg(feature = "async-session")]
 pub use session_async::AsyncReaderEvent;

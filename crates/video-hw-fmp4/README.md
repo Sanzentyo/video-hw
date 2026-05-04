@@ -140,8 +140,11 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - 人物検出、HISDF 解釈、bbox crop、tracking、検証 artifact 保存は `video-hw-fmp4` の責務外です。上位層は `sample_at_pts`、`GopCursor`、`decode_range`、`cache_stats` を組み合わせて必要な frame/window を取得します。
 - 既定は `IndexMode::Eager` です。`IndexMode::Lazy` は `next_sample` や `read_sample` で必要分だけ metadata index を延長し、`samples(track)` のような完全な slice を返す API では EOF まで index 化します。
 - `sample_at_pts_with_delta` は `SampleLookupMatch::{Exact,Previous,FirstAfter}` で完全一致/近傍一致を返します。長い区間は `decode_range_iter`、中心sample周辺の短窓は `decode_window` を使えます。
+- `FrameDecoder::decode_window` と `decode_range` / `decode_sample` の `frames` は fMP4 sample metadata の PTS 順、つまり presentation order で返します。H.264 B-frame などで sample id / DTS / decoder submit order が前後しても、返却順は backend 由来の `DecodedFrame::pts_90k` だけに依存せず、reader が保持する `SampleMeta` の `pts` と `sample_id` から決まります。
+- `DecodedSampleFrame` は `sample_id`、fMP4 由来の `sample_meta`（`pts` / `dts` / `duration` など）、返却ベクタ内の `presentation_index`、backend の `frame` を持ちます。decode-order が必要な caller は `sample_meta.dts` または `sample_id` / `sample_meta` から明示的に並べ替えてください。
+- `DecodeDiagnostics` は `returned_frame_order`、要求 sample 数、decoder から得た frame 数、返却 frame 数、sample metadata 付き frame 数、drop/unmatched 数、missing sample ids を返します。`decode_window` / `decode_range` / `decode_sample` の返却ベクタは `ReturnedFrameOrder::Presentation` として報告されます。
 - `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
-- `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由を返します。
+- `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由も返します。
 - `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。
 - async reader は `samples` / `sample_meta` / `sample_at_pts_with_delta` / `read_sample` / `read_gop` / `read_segment` / `index_snapshot` / cache/status 系 API を worker 経由で利用できます。borrow を返せないため metadata slice は `Vec<SampleMeta>` として返します。
 

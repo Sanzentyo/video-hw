@@ -128,6 +128,8 @@ impl FrameDecodeRequest {
 #[derive(Debug, Clone)]
 pub struct DecodedSampleFrame {
     pub sample_id: Option<SampleId>,
+    pub sample_meta: Option<SampleMeta>,
+    pub presentation_index: Option<usize>,
     pub frame: DecodedFrame,
 }
 
@@ -181,6 +183,14 @@ impl FrameDecodeWindowRequest {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ReturnedFrameOrder {
+    Presentation,
+    Decode,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DecodeDiagnostics {
     #[cfg_attr(feature = "serde", serde(with = "serde_backend"))]
     pub requested_backend: Backend,
@@ -193,7 +203,11 @@ pub struct DecodeDiagnostics {
     pub fallback_used: bool,
     pub fallback_reason: Option<String>,
     pub requested_sample_count: usize,
+    pub decoded_frame_count: usize,
     pub returned_sample_count: usize,
+    pub frames_with_sample_metadata_count: usize,
+    pub dropped_or_unmatched_frame_count: usize,
+    pub returned_frame_order: ReturnedFrameOrder,
     pub missing_sample_ids: Vec<SampleId>,
 }
 
@@ -261,6 +275,8 @@ pub struct DecodedFrameIter<'a> {
     session: AnyDecodeSession,
     decode_samples: EncodedSampleIter<'a>,
     wanted_sample_ids: HashSet<SampleId>,
+    sample_meta_by_id: HashMap<SampleId, SampleMeta>,
+    presentation_index_by_id: HashMap<SampleId, usize>,
     pts_to_sample: HashMap<i64, SampleId>,
     buffered_frames: VecDeque<DecodedSampleFrame>,
     target_frame_index: Option<usize>,
@@ -326,6 +342,8 @@ impl<'a> FrameDecoder<'a> {
             .map(|sample| sample.meta.clone())
             .collect::<Vec<_>>();
         let gop_sample_order = ordered_sample_ids_by_pts(&gop_metas);
+        let gop_meta_by_id = sample_meta_by_id(&gop_metas);
+        let gop_presentation_index_by_id = presentation_index_by_id(&gop_sample_order);
         for sample in gop_samples {
             let mut collect = DecodeCollectState {
                 pts_to_sample: &mut pts_to_sample,
@@ -333,6 +351,8 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.target_sample,
                 target_frame_index: &mut target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &gop_meta_by_id,
+                presentation_index_by_id: &gop_presentation_index_by_id,
             };
             submit_sample(&mut session, &track, sample, &mut collect)?;
         }
@@ -348,13 +368,23 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.target_sample,
                 target_frame_index: &mut target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &gop_meta_by_id,
+                presentation_index_by_id: &gop_presentation_index_by_id,
             };
             push_decoded_frame(frame, &mut collect);
         }
         assign_frames_by_presentation_order(&mut frames, &gop_sample_order);
         sort_frames_by_sample_order(&mut frames, &gop_sample_order);
+        let decoded_frame_count = frames.len();
+        attach_sample_metadata(&mut frames, &gop_meta_by_id, &gop_sample_order);
         target_frame_index = find_frame_index(&frames, request.target_sample);
-        finalize_decode_diagnostics(&mut diagnostics, &gop_sample_order, &frames);
+        finalize_decode_diagnostics(
+            &mut diagnostics,
+            &gop_sample_order,
+            decoded_frame_count,
+            ReturnedFrameOrder::Presentation,
+            &frames,
+        );
 
         Ok(FrameDecodeResult {
             target_sample: request.target_sample,
@@ -393,6 +423,8 @@ impl<'a> FrameDecoder<'a> {
         let requested_samples = samples_in_range(self.reader, request.range)?.to_vec();
         let wanted_sample_order = ordered_sample_ids_by_pts(&requested_samples);
         let wanted_sample_ids = wanted_sample_order.iter().copied().collect::<HashSet<_>>();
+        let requested_meta_by_id = sample_meta_by_id(&requested_samples);
+        let requested_presentation_index_by_id = presentation_index_by_id(&wanted_sample_order);
         let end_pts = requested_samples
             .last()
             .map(sample_end_pts)
@@ -429,6 +461,8 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.range.start_sample,
                 target_frame_index: &mut ignored_target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &requested_meta_by_id,
+                presentation_index_by_id: &requested_presentation_index_by_id,
             };
             submit_sample(&mut session, &track, sample, &mut collect)?;
         }
@@ -443,13 +477,23 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.range.start_sample,
                 target_frame_index: &mut ignored_target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &requested_meta_by_id,
+                presentation_index_by_id: &requested_presentation_index_by_id,
             };
             push_decoded_frame(frame, &mut collect);
         }
+        let decoded_frame_count = frames.len();
         assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
         retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
-        finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
+        attach_sample_metadata(&mut frames, &requested_meta_by_id, &wanted_sample_order);
+        finalize_decode_diagnostics(
+            &mut diagnostics,
+            &wanted_sample_order,
+            decoded_frame_count,
+            ReturnedFrameOrder::Presentation,
+            &frames,
+        );
         Ok(FrameDecodeRangeResult {
             range: request.range,
             diagnostics,
@@ -482,12 +526,19 @@ impl<'a> FrameDecoder<'a> {
         config.output_mode = request.output_mode;
         let (session, diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
-        let (wanted_sample_ids, end_pts) = {
+        let (wanted_sample_ids, sample_meta_by_id, presentation_index_by_id, end_pts) = {
             let samples = samples_in_range(self.reader, request.range)?;
             let wanted_sample_ids = samples
                 .iter()
                 .map(|sample| sample.sample_id)
                 .collect::<HashSet<_>>();
+            let sample_order = ordered_sample_ids_by_pts(samples);
+            let sample_meta_by_id = sample_meta_by_id(samples);
+            let presentation_index_by_id = sample_order
+                .iter()
+                .enumerate()
+                .map(|(index, sample_id)| (*sample_id, index))
+                .collect::<HashMap<_, _>>();
             let end_pts = samples
                 .last()
                 .map(|sample| {
@@ -497,7 +548,12 @@ impl<'a> FrameDecoder<'a> {
                     )
                 })
                 .context("sample range is empty")?;
-            (wanted_sample_ids, end_pts)
+            (
+                wanted_sample_ids,
+                sample_meta_by_id,
+                presentation_index_by_id,
+                end_pts,
+            )
         };
         let decode_segment = GopSegment {
             track_id: request.range.track_id,
@@ -519,6 +575,8 @@ impl<'a> FrameDecoder<'a> {
             session,
             decode_samples,
             wanted_sample_ids,
+            sample_meta_by_id,
+            presentation_index_by_id,
             pts_to_sample: HashMap::new(),
             buffered_frames: VecDeque::new(),
             target_frame_index: None,
@@ -547,6 +605,8 @@ impl<'a> FrameDecoder<'a> {
             request.after,
         )?;
         let wanted_sample_ids = wanted_sample_order.iter().copied().collect::<HashSet<_>>();
+        let sample_meta_by_id = sample_meta_by_id(&samples);
+        let presentation_index_by_id = presentation_index_by_id(&wanted_sample_order);
         let (decode_first_index, decode_end_index) =
             decode_span_for_sample_ids(&samples, &wanted_sample_ids)?;
         let decode_anchor_index = decode_first_index.min(center_decode_index);
@@ -625,6 +685,8 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.center_sample,
                 target_frame_index: &mut target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &sample_meta_by_id,
+                presentation_index_by_id: &presentation_index_by_id,
             };
             submit_sample(&mut session, &track, sample, &mut collect)?;
         }
@@ -639,13 +701,23 @@ impl<'a> FrameDecoder<'a> {
                 target_sample: request.center_sample,
                 target_frame_index: &mut target_frame_index,
                 filter_sample_ids: None,
+                sample_meta_by_id: &sample_meta_by_id,
+                presentation_index_by_id: &presentation_index_by_id,
             };
             push_decoded_frame(frame, &mut collect);
         }
+        let decoded_frame_count = frames.len();
         assign_frames_by_presentation_order(&mut frames, &decode_sample_order);
         retain_requested_frames(&mut frames, &wanted_sample_ids);
         sort_frames_by_sample_order(&mut frames, &wanted_sample_order);
-        finalize_decode_diagnostics(&mut diagnostics, &wanted_sample_order, &frames);
+        attach_sample_metadata(&mut frames, &sample_meta_by_id, &wanted_sample_order);
+        finalize_decode_diagnostics(
+            &mut diagnostics,
+            &wanted_sample_order,
+            decoded_frame_count,
+            ReturnedFrameOrder::Presentation,
+            &frames,
+        );
         Ok(FrameDecodeRangeResult {
             range,
             diagnostics,
@@ -676,6 +748,8 @@ impl Iterator for DecodedFrameIter<'_> {
                         target_sample: self.range.start_sample,
                         target_frame_index: &mut self.target_frame_index,
                         filter_sample_ids: Some(&self.wanted_sample_ids),
+                        sample_meta_by_id: &self.sample_meta_by_id,
+                        presentation_index_by_id: &self.presentation_index_by_id,
                     };
                     if let Err(err) =
                         submit_sample(&mut self.session, &self.track, sample, &mut collect)
@@ -698,6 +772,8 @@ impl Iterator for DecodedFrameIter<'_> {
                                     target_sample: self.range.start_sample,
                                     target_frame_index: &mut self.target_frame_index,
                                     filter_sample_ids: Some(&self.wanted_sample_ids),
+                                    sample_meta_by_id: &self.sample_meta_by_id,
+                                    presentation_index_by_id: &self.presentation_index_by_id,
                                 };
                                 push_decoded_frame(frame, &mut collect);
                             }
@@ -732,7 +808,11 @@ fn create_decode_session(
                 fallback_used: false,
                 fallback_reason: None,
                 requested_sample_count: 0,
+                decoded_frame_count: 0,
                 returned_sample_count: 0,
+                frames_with_sample_metadata_count: 0,
+                dropped_or_unmatched_frame_count: 0,
+                returned_frame_order: ReturnedFrameOrder::Unknown,
                 missing_sample_ids: Vec::new(),
             },
         )),
@@ -759,7 +839,11 @@ fn create_decode_session(
                     fallback_used: fallback_backend != resolved_backend,
                     fallback_reason: Some(fallback_reason),
                     requested_sample_count: 0,
+                    decoded_frame_count: 0,
                     returned_sample_count: 0,
+                    frames_with_sample_metadata_count: 0,
+                    dropped_or_unmatched_frame_count: 0,
+                    returned_frame_order: ReturnedFrameOrder::Unknown,
                     missing_sample_ids: Vec::new(),
                 },
             ))
@@ -829,9 +913,14 @@ fn push_decoded_frame(frame: DecodedFrame, collect: &mut DecodeCollectState<'_>)
     if sample_id == Some(collect.target_sample) && collect.target_frame_index.is_none() {
         *collect.target_frame_index = Some(collect.frames.len());
     }
-    collect
-        .frames
-        .push_back(DecodedSampleFrame { sample_id, frame });
+    collect.frames.push_back(DecodedSampleFrame {
+        sample_id,
+        sample_meta: sample_id
+            .and_then(|sample_id| collect.sample_meta_by_id.get(&sample_id).cloned()),
+        presentation_index: sample_id
+            .and_then(|sample_id| collect.presentation_index_by_id.get(&sample_id).copied()),
+        frame,
+    });
 }
 
 struct DecodeCollectState<'a> {
@@ -840,12 +929,29 @@ struct DecodeCollectState<'a> {
     target_sample: SampleId,
     target_frame_index: &'a mut Option<usize>,
     filter_sample_ids: Option<&'a HashSet<SampleId>>,
+    sample_meta_by_id: &'a HashMap<SampleId, SampleMeta>,
+    presentation_index_by_id: &'a HashMap<SampleId, usize>,
 }
 
 fn ordered_sample_ids_by_pts(samples: &[SampleMeta]) -> Vec<SampleId> {
     let mut ordered = samples.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|sample| (sample.pts.ticks, sample.sample_id));
     ordered.into_iter().map(|sample| sample.sample_id).collect()
+}
+
+fn sample_meta_by_id(samples: &[SampleMeta]) -> HashMap<SampleId, SampleMeta> {
+    samples
+        .iter()
+        .map(|sample| (sample.sample_id, sample.clone()))
+        .collect()
+}
+
+fn presentation_index_by_id(sample_order: &[SampleId]) -> HashMap<SampleId, usize> {
+    sample_order
+        .iter()
+        .enumerate()
+        .map(|(index, sample_id)| (*sample_id, index))
+        .collect()
 }
 
 fn presentation_window_sample_ids(
@@ -943,6 +1049,22 @@ fn retain_requested_frames(
     });
 }
 
+fn attach_sample_metadata(
+    frames: &mut VecDeque<DecodedSampleFrame>,
+    sample_meta_by_id: &HashMap<SampleId, SampleMeta>,
+    sample_order: &[SampleId],
+) {
+    let presentation_index_by_id = presentation_index_by_id(sample_order);
+    for frame in frames {
+        frame.sample_meta = frame
+            .sample_id
+            .and_then(|sample_id| sample_meta_by_id.get(&sample_id).cloned());
+        frame.presentation_index = frame
+            .sample_id
+            .and_then(|sample_id| presentation_index_by_id.get(&sample_id).copied());
+    }
+}
+
 fn find_frame_index(
     frames: &VecDeque<DecodedSampleFrame>,
     target_sample: SampleId,
@@ -955,6 +1077,8 @@ fn find_frame_index(
 fn finalize_decode_diagnostics(
     diagnostics: &mut DecodeDiagnostics,
     requested_sample_order: &[SampleId],
+    decoded_frame_count: usize,
+    returned_frame_order: ReturnedFrameOrder,
     frames: &VecDeque<DecodedSampleFrame>,
 ) {
     let returned = frames
@@ -962,7 +1086,14 @@ fn finalize_decode_diagnostics(
         .filter_map(|frame| frame.sample_id)
         .collect::<HashSet<_>>();
     diagnostics.requested_sample_count = requested_sample_order.len();
-    diagnostics.returned_sample_count = returned.len();
+    diagnostics.decoded_frame_count = decoded_frame_count;
+    diagnostics.returned_sample_count = frames.len();
+    diagnostics.frames_with_sample_metadata_count = frames
+        .iter()
+        .filter(|frame| frame.sample_meta.is_some())
+        .count();
+    diagnostics.dropped_or_unmatched_frame_count = decoded_frame_count.saturating_sub(frames.len());
+    diagnostics.returned_frame_order = returned_frame_order;
     diagnostics.missing_sample_ids = requested_sample_order
         .iter()
         .copied()
@@ -1023,7 +1154,12 @@ fn estimate_fps(samples: &[SampleMeta]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{
+        fs,
+        num::NonZeroU32,
+        process::{Command, Stdio},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};
@@ -1042,6 +1178,18 @@ mod tests {
         )
     ))]
     use video_hw::Codec;
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    use video_hw::DecodedFrame;
 
     #[test]
     fn frame_decode_request_defaults_to_auto_rgb() {
@@ -1239,9 +1387,273 @@ mod tests {
             returned,
             vec![SampleId(0), SampleId(3), SampleId(2), SampleId(4)]
         );
+        for (index, frame) in result.frames.iter().enumerate() {
+            assert_eq!(frame.presentation_index, Some(index));
+            assert_eq!(
+                frame.sample_meta.as_ref().map(|sample| sample.sample_id),
+                frame.sample_id
+            );
+        }
         assert_eq!(result.diagnostics.requested_sample_count, 4);
         assert_eq!(result.diagnostics.returned_sample_count, 4);
+        assert_eq!(result.diagnostics.frames_with_sample_metadata_count, 4);
+        assert!(matches!(
+            result.diagnostics.returned_frame_order,
+            ReturnedFrameOrder::Presentation
+        ));
         assert!(result.diagnostics.missing_sample_ids.is_empty());
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    #[test]
+    fn decode_window_roundtrip_preserves_presentation_frame_alignment() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping decode-window roundtrip test: ffmpeg is not available");
+            return;
+        }
+
+        let input_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sample-videos")
+            .join("foreman_cif.mp4");
+        let mut reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input_path.clone()))
+            .into_sync_session()
+            .expect("sample should open");
+        let video_track = reader
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist")
+            .track_id;
+        let mut request = FrameDecodeWindowRequest::new(video_track, SampleId(2));
+        request.before = 2;
+        request.after = 1;
+        request.output_mode = DecodeOutputMode::Rgb24;
+        let mut decoder = FrameDecoder::new(&mut reader);
+        let result = match decoder.decode_window(request) {
+            Ok(result) => result,
+            Err(err) => {
+                let error = format!("{err:#}");
+                if error.contains("failed to create decoder session")
+                    || error.contains("auto backend selection failed")
+                    || error.contains("unsupported config")
+                {
+                    eprintln!("skipping decode-window roundtrip test: {error}");
+                    return;
+                }
+                panic!("decode_window failed unexpectedly: {error}");
+            }
+        };
+        assert_eq!(result.frames.len(), 4);
+
+        let (width, height, decoded_rgb) = rgb24_window_payload(&result.frames);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "video-hw-fmp4-frame-order-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let decoded_raw = temp_dir.join("decoded.rgb");
+        let source_raw = temp_dir.join("source.rgb");
+        let roundtrip_mp4 = temp_dir.join("roundtrip.mp4");
+        let roundtrip_raw = temp_dir.join("roundtrip.rgb");
+        fs::write(&decoded_raw, &decoded_rgb).expect("decoded raw should be written");
+
+        run_ffmpeg(&[
+            "-y",
+            "-i",
+            input_path.to_str().expect("utf-8 input path"),
+            "-frames:v",
+            "4",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            source_raw.to_str().expect("utf-8 source path"),
+        ]);
+        run_ffmpeg(&[
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            &format!("{width}x{height}"),
+            "-framerate",
+            "30",
+            "-i",
+            decoded_raw.to_str().expect("utf-8 decoded path"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            roundtrip_mp4.to_str().expect("utf-8 roundtrip path"),
+        ]);
+        run_ffmpeg(&[
+            "-y",
+            "-i",
+            roundtrip_mp4.to_str().expect("utf-8 roundtrip path"),
+            "-frames:v",
+            "4",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            roundtrip_raw.to_str().expect("utf-8 roundtrip raw path"),
+        ]);
+
+        let source = fs::read(&source_raw).expect("source raw should exist");
+        let roundtrip = fs::read(&roundtrip_raw).expect("roundtrip raw should exist");
+        assert_diagonal_best_match(&source, &roundtrip, width as usize * height as usize * 3, 4);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn rgb24_window_payload(frames: &[DecodedSampleFrame]) -> (u32, u32, Vec<u8>) {
+        let mut dims = None;
+        let mut raw = Vec::new();
+        for frame in frames {
+            let DecodedFrame::Rgb24 {
+                dims: frame_dims,
+                data,
+                ..
+            } = &frame.frame
+            else {
+                panic!("decode window should return RGB24 frames");
+            };
+            let frame_dims = *frame_dims;
+            if let Some(expected) = dims {
+                assert_eq!(frame_dims, expected);
+            } else {
+                dims = Some(frame_dims);
+            }
+            raw.extend_from_slice(data);
+        }
+        let dims = dims.expect("at least one frame");
+        (dims.width.get(), dims.height.get(), raw)
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn run_ffmpeg(args: &[&str]) {
+        let output = Command::new("ffmpeg")
+            .args(args)
+            .output()
+            .expect("ffmpeg should launch");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn assert_diagonal_best_match(
+        source: &[u8],
+        roundtrip: &[u8],
+        frame_len: usize,
+        frames: usize,
+    ) {
+        assert_eq!(source.len(), frame_len * frames);
+        assert_eq!(roundtrip.len(), frame_len * frames);
+        for source_index in 0..frames {
+            let source_frame =
+                &source[source_index * frame_len..source_index.saturating_add(1) * frame_len];
+            let mut best_index = 0;
+            let mut best_mse = f64::INFINITY;
+            let mut diagonal_mse = f64::INFINITY;
+            for roundtrip_index in 0..frames {
+                let roundtrip_frame = &roundtrip
+                    [roundtrip_index * frame_len..roundtrip_index.saturating_add(1) * frame_len];
+                let mse = frame_mse(source_frame, roundtrip_frame);
+                if roundtrip_index == source_index {
+                    diagonal_mse = mse;
+                }
+                if mse < best_mse {
+                    best_mse = mse;
+                    best_index = roundtrip_index;
+                }
+            }
+            assert!(
+                best_index == source_index || diagonal_mse <= best_mse * 1.02 + 1.0,
+                "source frame {source_index} matched roundtrip frame {best_index}; diagonal mse={diagonal_mse:.4}, best mse={best_mse:.4}"
+            );
+        }
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
+    fn frame_mse(left: &[u8], right: &[u8]) -> f64 {
+        assert_eq!(left.len(), right.len());
+        let sum = left
+            .iter()
+            .zip(right)
+            .map(|(left, right)| {
+                let delta = f64::from(*left) - f64::from(*right);
+                delta * delta
+            })
+            .sum::<f64>();
+        sum / left.len() as f64
     }
 
     #[cfg(all(
@@ -1272,7 +1684,11 @@ mod tests {
             fallback_used: true,
             fallback_reason: Some("primary backend failed".to_string()),
             requested_sample_count: 3,
+            decoded_frame_count: 4,
             returned_sample_count: 2,
+            frames_with_sample_metadata_count: 2,
+            dropped_or_unmatched_frame_count: 2,
+            returned_frame_order: ReturnedFrameOrder::Presentation,
             missing_sample_ids: vec![SampleId(42)],
         };
         let json = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
@@ -1285,6 +1701,10 @@ mod tests {
         assert_eq!(roundtrip.output_mode, diagnostics.output_mode);
         assert_eq!(roundtrip.fallback_used, diagnostics.fallback_used);
         assert_eq!(roundtrip.fallback_reason, diagnostics.fallback_reason);
+        assert!(matches!(
+            roundtrip.returned_frame_order,
+            ReturnedFrameOrder::Presentation
+        ));
         assert_eq!(roundtrip.missing_sample_ids, diagnostics.missing_sample_ids);
     }
 }
