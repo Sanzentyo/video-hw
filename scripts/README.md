@@ -148,6 +148,17 @@ cargo +nightly -Zscript scripts/check_nvidia_decode_psnr.rs --input sample-video
 - 既定入力は `sample-videos/foreman_cif.h265`、既定しきい値は frame 単位の `psnr_y` 最小値 40 dB。
 - `FFMPEG_PATH` または `--ffmpeg` で FFmpeg 実行ファイルを指定できる。
 
+### 11) fMP4 decode access pattern benchmark
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs -- --input sample-videos/foreman_cif.mp4 --backend auto --frame-count 90
+```
+
+- `decode_range_iter`、単発 `decode_sample`、caller-side LRU 付き `decode_window` を同じ入力で比較する。
+- FFmpeg RGB24 reference に対する max MSE / min PSNR も同じレポートへ記録する。
+- Windows/Linux の既定 features は `backend-nvidia backend-intel backend-vulkan`、macOS は `backend-vt`。
+- 詳細は `docs/benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md` を参照。
+
 ## 前提
 
 - `nightly` ツールチェーンが利用可能であること

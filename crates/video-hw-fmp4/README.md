@@ -145,6 +145,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `DecodeDiagnostics` は `returned_frame_order`、要求 sample 数、decoder から得た frame 数、返却 frame 数、sample metadata 付き frame 数、drop/unmatched 数、不確実な fallback sample association 数、missing sample ids を返します。`decode_window` / `decode_range` / `decode_sample` の返却ベクタは `ReturnedFrameOrder::Presentation` として報告されます。
 - `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
 - `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由も返します。
+- decode access pattern の性能を見る場合は `scripts/benchmark_fmp4_decode_access.rs` を使って、`decode_range_iter`、単発 `decode_sample`、caller-side LRU 付き `decode_window` を比較できます。レポートには encoded payload read 数、byte range cache hit/miss、FFmpeg RGB24 reference との MSE/PSNR が入ります。
 - `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。
 - async reader は `samples` / `sample_meta` / `sample_at_pts_with_delta` / `read_sample` / `read_gop` / `read_segment` / `index_snapshot` / cache/status 系 API を worker 経由で利用できます。borrow を返せないため metadata slice は `Vec<SampleMeta>` として返します。
 
