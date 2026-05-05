@@ -3741,8 +3741,8 @@ fn probe_hevc_encode_submit_execution(
         let src_picture_resource = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D::default())
             .coded_extent(vk::Extent2D {
-                width: image_width,
-                height: image_height,
+                width: source_picture_resource_width,
+                height: source_picture_resource_height,
             })
             .base_array_layer(0)
             .image_view_binding(source_image_view);
