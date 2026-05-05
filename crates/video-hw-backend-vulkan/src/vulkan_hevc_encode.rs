@@ -91,7 +91,12 @@ pub(crate) enum HevcEncodeVideoSessionParametersCreateProbe {
 
 #[derive(Debug, Clone)]
 pub(crate) enum HevcEncodeSubmitExecutionProbe {
-    Ready { queue_family_index: u32 },
+    Ready {
+        queue_family_index: u32,
+        bitstream_buffer_offset: u32,
+        bytes_written: u32,
+        head16: String,
+    },
     Failed(String),
     Skipped(String),
 }
@@ -164,6 +169,7 @@ struct HevcEncodeSubmitExecutionConfig {
     rate_control_modes: vk::VideoEncodeRateControlModeFlagsKHR,
     max_rate_control_layers: u32,
     max_quality_levels: u32,
+    supported_encode_feedback_flags: vk::VideoEncodeFeedbackFlagsKHR,
     min_bitstream_buffer_offset_alignment: vk::DeviceSize,
     min_bitstream_buffer_size_alignment: vk::DeviceSize,
     maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
@@ -1286,6 +1292,9 @@ fn probe_single_hevc_encode_session_format(
                             .capability_snapshot
                             .max_rate_control_layers,
                         max_quality_levels: candidate.capability_snapshot.max_quality_levels,
+                        supported_encode_feedback_flags: candidate
+                            .capability_snapshot
+                            .supported_encode_feedback_flags,
                         min_bitstream_buffer_offset_alignment: candidate
                             .capability_snapshot
                             .min_bitstream_buffer_offset_alignment,
@@ -2673,8 +2682,20 @@ fn probe_hevc_encode_submit_execution(
     let mut dpb_image_view = vk::ImageView::null();
     let mut dst_buffer = vk::Buffer::null();
     let mut dst_buffer_memory = vk::DeviceMemory::null();
+    let mut query_pool = vk::QueryPool::null();
+    let mut query_result = HevcEncodeFeedbackQueryResult::default();
+    let mut dst_head16 = String::new();
 
     let probe_result = (|| -> Result<(), String> {
+        if !config
+            .supported_encode_feedback_flags
+            .contains(vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BYTES_WRITTEN)
+        {
+            return Err(
+                "encode submit feedback does not support BITSTREAM_BYTES_WRITTEN".to_string(),
+            );
+        }
+
         // SAFETY: queue family index and queue 0 were requested during device creation.
         let queue = unsafe { device.get_device_queue(config.queue_family_index.0, 0) };
         if queue == vk::Queue::null() {
@@ -2788,6 +2809,8 @@ fn probe_hevc_encode_submit_execution(
         )?;
         dst_buffer = created_dst_buffer;
         dst_buffer_memory = created_dst_buffer_memory;
+        query_pool =
+            create_hevc_encode_feedback_query_pool(device, config.supported_encode_feedback_flags)?;
         let requested_rate_control_mode = resolve_hevc_encode_probe_rate_control_mode();
         let selected_rate_control_mode = resolve_hevc_encode_probe_selected_rate_control_mode(
             requested_rate_control_mode,
@@ -2996,6 +3019,7 @@ fn probe_hevc_encode_submit_execution(
             .buffer_memory_barriers(std::slice::from_ref(&dst_buffer_barrier));
         // SAFETY: barriers reference resources created above and command buffer is recording.
         unsafe {
+            device.cmd_reset_query_pool(command_buffer, query_pool, 0, 1);
             device.cmd_pipeline_barrier2(command_buffer, &source_prepare_dependency);
             device.cmd_clear_color_image(
                 command_buffer,
@@ -3395,7 +3419,14 @@ fn probe_hevc_encode_submit_execution(
         };
         // SAFETY: encode info references local data that remains valid through the call.
         unsafe {
+            device.cmd_begin_query(
+                command_buffer,
+                query_pool,
+                0,
+                vk::QueryControlFlags::empty(),
+            );
             (video_encode_device.fp().cmd_encode_video_khr)(command_buffer, &encode_info);
+            device.cmd_end_query(command_buffer, query_pool, 0);
         }
 
         let end_coding_info = vk::VideoEndCodingInfoKHR::default();
@@ -3515,6 +3546,15 @@ fn probe_hevc_encode_submit_execution(
         // SAFETY: fence is valid and associated with this queue submit.
         unsafe { device.wait_for_fences(std::slice::from_ref(&fence), true, 1_000_000_000) }
             .map_err(|err| format!("vkWaitForFences failed: {err}"))?;
+        query_result = read_hevc_encode_feedback_query(device, query_pool)?;
+        if query_result.status != vk::QueryResultStatusKHR::COMPLETE {
+            return Err(format!(
+                "encode feedback status was not COMPLETE: {:?}",
+                query_result.status
+            ));
+        }
+        dst_head16 = read_hevc_encode_dst_head(device, dst_buffer_memory, query_result)
+            .unwrap_or_else(|err| format!("unreadable:{err}"));
         Ok(())
     })();
 
@@ -3544,6 +3584,9 @@ fn probe_hevc_encode_submit_execution(
         if dst_buffer_memory != vk::DeviceMemory::null() {
             device.free_memory(dst_buffer_memory, None);
         }
+        if query_pool != vk::QueryPool::null() {
+            device.destroy_query_pool(query_pool, None);
+        }
         if fence != vk::Fence::null() {
             device.destroy_fence(fence, None);
         }
@@ -3555,11 +3598,101 @@ fn probe_hevc_encode_submit_execution(
     match probe_result {
         Ok(()) => HevcEncodeSubmitExecutionProbe::Ready {
             queue_family_index: config.queue_family_index.0,
+            bitstream_buffer_offset: query_result.offset,
+            bytes_written: query_result.bytes_written,
+            head16: dst_head16,
         },
         Err(err) => {
             HevcEncodeSubmitExecutionProbe::Failed(append_hevc_encode_validation_messages(err))
         }
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct HevcEncodeFeedbackQueryResult {
+    offset: u32,
+    bytes_written: u32,
+    status: vk::QueryResultStatusKHR,
+}
+
+impl Default for HevcEncodeFeedbackQueryResult {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            bytes_written: 0,
+            status: vk::QueryResultStatusKHR::NOT_READY,
+        }
+    }
+}
+
+fn create_hevc_encode_feedback_query_pool(
+    device: &ash::Device,
+    supported_flags: vk::VideoEncodeFeedbackFlagsKHR,
+) -> Result<vk::QueryPool, String> {
+    let flags = vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BYTES_WRITTEN
+        | if supported_flags.contains(vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BUFFER_OFFSET) {
+            vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BUFFER_OFFSET
+        } else {
+            vk::VideoEncodeFeedbackFlagsKHR::empty()
+        };
+    let mut feedback_create_info =
+        vk::QueryPoolVideoEncodeFeedbackCreateInfoKHR::default().encode_feedback_flags(flags);
+    let create_info = vk::QueryPoolCreateInfo::default()
+        .query_type(vk::QueryType::VIDEO_ENCODE_FEEDBACK_KHR)
+        .query_count(1)
+        .push_next(&mut feedback_create_info);
+    // SAFETY: query pool create info references stack data that lives through the call.
+    unsafe { device.create_query_pool(&create_info, None) }
+        .map_err(|err| format!("vkCreateQueryPool for HEVC encode feedback failed: {err}"))
+}
+
+fn read_hevc_encode_feedback_query(
+    device: &ash::Device,
+    query_pool: vk::QueryPool,
+) -> Result<HevcEncodeFeedbackQueryResult, String> {
+    let mut result = [HevcEncodeFeedbackQueryResult::default()];
+    // SAFETY: query pool is valid, result buffer matches the requested query count.
+    unsafe {
+        device.get_query_pool_results(
+            query_pool,
+            0,
+            &mut result,
+            vk::QueryResultFlags::WAIT | vk::QueryResultFlags::WITH_STATUS_KHR,
+        )
+    }
+    .map_err(|err| format!("vkGetQueryPoolResults for HEVC encode feedback failed: {err}"))?;
+    Ok(result[0])
+}
+
+fn read_hevc_encode_dst_head(
+    device: &ash::Device,
+    dst_buffer_memory: vk::DeviceMemory,
+    query_result: HevcEncodeFeedbackQueryResult,
+) -> Result<String, String> {
+    let bytes_to_read = query_result.bytes_written.min(16);
+    if bytes_to_read == 0 {
+        return Ok(String::new());
+    }
+    let offset = u64::from(query_result.offset);
+    let size = u64::from(bytes_to_read);
+    // SAFETY: memory is owned by this device and the requested range is limited to the
+    // implementation-reported encoded byte count.
+    let ptr =
+        unsafe { device.map_memory(dst_buffer_memory, offset, size, vk::MemoryMapFlags::empty()) }
+            .map_err(|err| format!("vkMapMemory for HEVC encode dst head failed: {err}"))?;
+    // SAFETY: mapped range is valid for `bytes_to_read` bytes until unmap.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), bytes_to_read as usize) };
+    let head = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("");
+    // SAFETY: pointer was returned by `vkMapMemory` above.
+    unsafe {
+        device.unmap_memory(dst_buffer_memory);
+    }
+    Ok(head)
 }
 
 fn create_hevc_encode_probe_image(
