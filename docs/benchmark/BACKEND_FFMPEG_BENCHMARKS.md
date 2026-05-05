@@ -106,7 +106,8 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   pNext to begin-coding, can reserve the final bitstream alignment from
   `dstBufferRange` like FFmpeg, can override sample-derived SPS dimensions to
   the probe coded size, can omit encode image-view YCbCr-conversion pNext for
-  A/B probing, and maps CBR/VBR slice `constant_qp` / `slice_qp_delta` to
+  A/B probing, can write parameter-sample bytes into the externally encoded
+  prefix area, and maps CBR/VBR slice `constant_qp` / `slice_qp_delta` to
   FFmpeg's shape. Session creation now also
   uses the device max coded extent like FFmpeg, and profile pNext chain ordering
   now matches FFmpeg's H.265-profile-before-usage shape. Those parity

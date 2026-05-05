@@ -158,6 +158,10 @@ fails at `vkEndCommandBuffer`.
 `VkSamplerYcbcrConversionInfo` from encode image views; image view creation
 succeeds in this mode, but the FFmpeg-generated-parameter probe still fails at
 `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_MODE=parameter-sample` can write the
+parameter sample bytes into the externally encoded prefix area before
+`dstBufferOffset`; writing the first 256 bytes of the FFmpeg-generated 320x180
+stream still fails at `vkEndCommandBuffer`.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
@@ -165,8 +169,8 @@ reference-slot pointer, and combined FFmpeg-style probes all still fail at
 / fixed-QP / quality-level / source-upload / source-resource-extent /
 session-H265-create-info / begin-rate-control-pNext / dst-range-reserve /
 parameter-size / FFmpeg-generated-parameter-sample / image-view-pNext parity
-points. More complete HEVC command/resource wiring is still required before
-enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+points / externally-encoded-prefix bytes. More complete HEVC command/resource
+wiring is still required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 

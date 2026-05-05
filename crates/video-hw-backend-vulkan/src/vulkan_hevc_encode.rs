@@ -336,6 +336,13 @@ enum HevcEncodeProbeDstRangeMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeDstPrefixMode {
+    None,
+    Zero,
+    ParameterSample,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcEncodeProbeParameterSizeMode {
     Sample,
     Coded,
@@ -3003,6 +3010,37 @@ fn parse_hevc_encode_probe_dst_prefix_bytes(value: Option<&str>) -> u64 {
         .unwrap_or(0)
 }
 
+fn resolve_hevc_encode_probe_dst_prefix_mode() -> HevcEncodeProbeDstPrefixMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_dst_prefix_mode(mode.as_deref())
+}
+
+fn parse_hevc_encode_probe_dst_prefix_mode(mode: Option<&str>) -> HevcEncodeProbeDstPrefixMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("zero") | Some("zeros") | Some("0") => HevcEncodeProbeDstPrefixMode::Zero,
+        Some("parameter-sample")
+        | Some("parameter_sample")
+        | Some("sample")
+        | Some("ffmpeg-sample")
+        | Some("ffmpeg_sample")
+        | Some("ffmpeg") => HevcEncodeProbeDstPrefixMode::ParameterSample,
+        _ => HevcEncodeProbeDstPrefixMode::None,
+    }
+}
+
+fn hevc_encode_probe_dst_prefix_mode_label(mode: HevcEncodeProbeDstPrefixMode) -> &'static str {
+    match mode {
+        HevcEncodeProbeDstPrefixMode::None => "none",
+        HevcEncodeProbeDstPrefixMode::Zero => "zero",
+        HevcEncodeProbeDstPrefixMode::ParameterSample => "parameter-sample",
+    }
+}
+
 fn resolve_hevc_encode_probe_dst_range_mode() -> HevcEncodeProbeDstRangeMode {
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_DST_RANGE_MODE";
     let mode = std::env::var(ENV_VAR).ok();
@@ -3352,6 +3390,14 @@ fn probe_hevc_encode_submit_execution(
         )?;
         dst_buffer = created_dst_buffer;
         dst_buffer_memory = created_dst_buffer_memory;
+        let dst_prefix_mode = resolve_hevc_encode_probe_dst_prefix_mode();
+        let dst_prefix_mode_label = hevc_encode_probe_dst_prefix_mode_label(dst_prefix_mode);
+        let dst_prefix_written = write_hevc_encode_probe_dst_prefix(
+            device,
+            dst_buffer_memory,
+            dst_buffer_offset,
+            dst_prefix_mode,
+        )?;
         query_pool =
             create_hevc_encode_feedback_query_pool(device, config.supported_encode_feedback_flags)?;
         let requested_rate_control_mode = resolve_hevc_encode_probe_rate_control_mode();
@@ -3464,7 +3510,7 @@ fn probe_hevc_encode_submit_execution(
                 source_picture_resource_extent_mode,
             );
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_mode={}, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_mode={}, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_prefix_mode={}, dst_prefix_written={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3484,6 +3530,8 @@ fn probe_hevc_encode_submit_execution(
             dst_buffer_range,
             dst_buffer_alloc_range,
             synthetic_prefix_bytes,
+            dst_prefix_mode_label,
+            dst_prefix_written,
             config.min_bitstream_buffer_offset_alignment.max(1),
             dst_size_alignment,
             dst_range_mode_label,
@@ -5265,6 +5313,41 @@ fn write_hevc_encode_source_upload_pattern(
     result
 }
 
+fn write_hevc_encode_probe_dst_prefix(
+    device: &ash::Device,
+    memory: vk::DeviceMemory,
+    prefix_bytes: u64,
+    mode: HevcEncodeProbeDstPrefixMode,
+) -> Result<u64, String> {
+    if prefix_bytes == 0 || matches!(mode, HevcEncodeProbeDstPrefixMode::None) {
+        return Ok(0);
+    }
+    let mapped = unsafe { device.map_memory(memory, 0, prefix_bytes, vk::MemoryMapFlags::empty()) }
+        .map_err(|err| format!("vkMapMemory for encode dst prefix failed: {err}"))?;
+    let result = (|| {
+        let prefix_len = usize::try_from(prefix_bytes)
+            .map_err(|_| "encode dst prefix size exceeds usize range".to_string())?;
+        let bytes = unsafe { std::slice::from_raw_parts_mut(mapped.cast::<u8>(), prefix_len) };
+        match mode {
+            HevcEncodeProbeDstPrefixMode::None => {}
+            HevcEncodeProbeDstPrefixMode::Zero => bytes.fill(0),
+            HevcEncodeProbeDstPrefixMode::ParameterSample => {
+                bytes.fill(0);
+                let sample = load_hevc_encode_probe_parameter_sample()?;
+                let copy_len = sample.len().min(bytes.len());
+                bytes[..copy_len].copy_from_slice(&sample[..copy_len]);
+                return u64::try_from(copy_len)
+                    .map_err(|_| "encode dst prefix copy length exceeds u64 range".to_string());
+            }
+        }
+        Ok(prefix_bytes)
+    })();
+    unsafe {
+        device.unmap_memory(memory);
+    }
+    result
+}
+
 fn create_hevc_encode_probe_transfer_buffer(
     device: &ash::Device,
     instance: &ash::Instance,
@@ -5811,6 +5894,32 @@ mod tests {
     #[test]
     fn parse_hevc_encode_probe_dst_prefix_bytes_accepts_decimal_bytes() {
         assert_eq!(parse_hevc_encode_probe_dst_prefix_bytes(Some(" 256 ")), 256);
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dst_prefix_mode_defaults_to_none() {
+        assert_eq!(
+            parse_hevc_encode_probe_dst_prefix_mode(None),
+            HevcEncodeProbeDstPrefixMode::None
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_dst_prefix_mode(Some("")),
+            HevcEncodeProbeDstPrefixMode::None
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dst_prefix_mode_accepts_fill_aliases() {
+        assert_eq!(
+            parse_hevc_encode_probe_dst_prefix_mode(Some("zero")),
+            HevcEncodeProbeDstPrefixMode::Zero
+        );
+        for alias in ["parameter-sample", "sample", "ffmpeg"] {
+            assert_eq!(
+                parse_hevc_encode_probe_dst_prefix_mode(Some(alias)),
+                HevcEncodeProbeDstPrefixMode::ParameterSample
+            );
+        }
     }
 
     #[test]
