@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::ffi::{CStr, c_void};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use ash::vk;
@@ -95,6 +96,8 @@ pub(crate) enum HevcEncodeSubmitExecutionProbe {
     Ready {
         queue_family_index: u32,
         bitstream_buffer_offset: u32,
+        dst_buffer_offset: u64,
+        bitstream_memory_offset: u64,
         bytes_written: u32,
         head16: String,
     },
@@ -3065,6 +3068,15 @@ fn resolve_hevc_encode_probe_dst_prefix_bytes() -> u64 {
     parse_hevc_encode_probe_dst_prefix_bytes(value.as_deref())
 }
 
+fn hevc_encode_probe_output_path() -> Option<PathBuf> {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_OUTPUT_PATH";
+    std::env::var(ENV_VAR)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn parse_hevc_encode_probe_dst_prefix_bytes(value: Option<&str>) -> u64 {
     value
         .map(str::trim)
@@ -3277,6 +3289,8 @@ fn probe_hevc_encode_submit_execution(
     let mut query_pool = vk::QueryPool::null();
     let mut query_result = HevcEncodeFeedbackQueryResult::default();
     let mut dst_head16 = String::new();
+    let mut dst_buffer_offset = 0_u64;
+    let mut bitstream_memory_offset = 0_u64;
 
     let probe_result = (|| -> Result<(), String> {
         if !config
@@ -3424,7 +3438,7 @@ fn probe_hevc_encode_submit_execution(
             resolve_hevc_encode_probe_dst_prefix_bytes(),
             dst_offset_alignment,
         );
-        let dst_buffer_offset = synthetic_prefix_bytes;
+        dst_buffer_offset = synthetic_prefix_bytes;
         if !dst_buffer_offset.is_multiple_of(dst_offset_alignment) {
             return Err(format!(
                 "encode dst buffer offset {dst_buffer_offset} is not aligned to {dst_offset_alignment}"
@@ -4373,8 +4387,23 @@ fn probe_hevc_encode_submit_execution(
                 query_result.status
             ));
         }
-        dst_head16 = read_hevc_encode_dst_head(device, dst_buffer_memory, query_result)
-            .unwrap_or_else(|err| format!("unreadable:{err}"));
+        bitstream_memory_offset =
+            hevc_encode_probe_bitstream_memory_offset(dst_buffer_offset, query_result)?;
+        let dst_bytes = read_hevc_encode_dst_bytes(
+            device,
+            dst_buffer_memory,
+            bitstream_memory_offset,
+            query_result.bytes_written,
+        )?;
+        if let Some(output_path) = hevc_encode_probe_output_path() {
+            std::fs::write(&output_path, &dst_bytes).map_err(|err| {
+                format!(
+                    "failed to write HEVC encode probe output to '{}': {err}",
+                    output_path.display()
+                )
+            })?;
+        }
+        dst_head16 = hevc_encode_head16(&dst_bytes);
         Ok(())
     })();
 
@@ -4428,6 +4457,8 @@ fn probe_hevc_encode_submit_execution(
         Ok(()) => HevcEncodeSubmitExecutionProbe::Ready {
             queue_family_index: config.queue_family_index.0,
             bitstream_buffer_offset: query_result.offset,
+            dst_buffer_offset,
+            bitstream_memory_offset,
             bytes_written: query_result.bytes_written,
             head16: dst_head16,
         },
@@ -4506,34 +4537,47 @@ fn read_hevc_encode_feedback_query(
     Ok(result[0])
 }
 
-fn read_hevc_encode_dst_head(
+fn hevc_encode_probe_bitstream_memory_offset(
+    dst_buffer_offset: u64,
+    query_result: HevcEncodeFeedbackQueryResult,
+) -> Result<u64, String> {
+    dst_buffer_offset
+        .checked_add(u64::from(query_result.offset))
+        .ok_or_else(|| "encode feedback bitstream memory offset overflow".to_string())
+}
+
+fn read_hevc_encode_dst_bytes(
     device: &ash::Device,
     dst_buffer_memory: vk::DeviceMemory,
-    query_result: HevcEncodeFeedbackQueryResult,
-) -> Result<String, String> {
-    let bytes_to_read = query_result.bytes_written.min(16);
+    offset: u64,
+    bytes_to_read: u32,
+) -> Result<Vec<u8>, String> {
     if bytes_to_read == 0 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
-    let offset = u64::from(query_result.offset);
     let size = u64::from(bytes_to_read);
     // SAFETY: memory is owned by this device and the requested range is limited to the
     // implementation-reported encoded byte count.
     let ptr =
         unsafe { device.map_memory(dst_buffer_memory, offset, size, vk::MemoryMapFlags::empty()) }
-            .map_err(|err| format!("vkMapMemory for HEVC encode dst head failed: {err}"))?;
+            .map_err(|err| format!("vkMapMemory for HEVC encode dst output failed: {err}"))?;
     // SAFETY: mapped range is valid for `bytes_to_read` bytes until unmap.
     let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), bytes_to_read as usize) };
-    let head = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("");
+    let output = bytes.to_vec();
     // SAFETY: pointer was returned by `vkMapMemory` above.
     unsafe {
         device.unmap_memory(dst_buffer_memory);
     }
-    Ok(head)
+    Ok(output)
+}
+
+fn hevc_encode_head16(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn create_hevc_encode_probe_ycbcr_conversion(
@@ -6056,6 +6100,28 @@ mod tests {
                 HevcEncodeProbeDstRangeMode::FfmpegReserveAlign
             ),
             1_048_320
+        );
+    }
+
+    #[test]
+    fn hevc_encode_probe_bitstream_memory_offset_is_relative_to_dst_buffer_offset() {
+        let query_result = HevcEncodeFeedbackQueryResult {
+            offset: 13,
+            bytes_written: 47,
+            status: vk::QueryResultStatusKHR::COMPLETE,
+        };
+        assert_eq!(
+            hevc_encode_probe_bitstream_memory_offset(256, query_result).unwrap(),
+            269
+        );
+    }
+
+    #[test]
+    fn hevc_encode_head16_limits_preview_to_first_16_bytes() {
+        let bytes = (0_u8..20).collect::<Vec<_>>();
+        assert_eq!(
+            hevc_encode_head16(&bytes),
+            "000102030405060708090a0b0c0d0e0f"
         );
     }
 

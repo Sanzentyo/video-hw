@@ -133,12 +133,14 @@ cargo +nightly -Zscript scripts/verify_fmp4_lazy.rs sample-videos/sample-10s.mp4
 ```bash
 cargo +nightly -Zscript scripts/check_vulkan_hevc_psnr.rs
 cargo +nightly -Zscript scripts/check_vulkan_hevc_psnr.rs --input sample-videos/foreman_cif.h265 --min-psnr-y 40
+cargo +nightly -Zscript scripts/check_vulkan_hevc_encode_probe.rs --adapter-index 1 --width 320 --height 180 --min-psnr-y 60
 ```
 
 - `decode_to_yuv` の `backend-vulkan` HEVC NV12 出力を FFmpeg software decode の NV12 と raw-vs-raw で比較する。
 - 既定入力は `sample-videos/foreman_cif.h265`、既定しきい値は frame 単位の `psnr_y` 最小値 40 dB。
 - slice offset の診断をしたい場合は `--offset-mode annexb|rbsp|nalu|global|memory` を指定する。
 - `FFMPEG_PATH` または `--ffmpeg` で FFmpeg 実行ファイルを指定できる。
+- `check_vulkan_hevc_encode_probe.rs` は FFmpeg `hevc_vulkan` で生成した parameter/header NAL を使って ignored live encode probe の出力sliceをFFmpeg decodeし、probe入力の平坦NV12（Y=16/UV=128）に対するMSE/PSNRを確認する。
 
 ### 10) NVIDIA HEVC decode PSNR 検証
 
@@ -167,7 +169,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - FFmpeg Vulkan の adapter 指定は `-init_hw_device vulkan:<index>` を使う。Windows hybrid GPU 環境では `vulkan=vk:<index>` が指定した物理デバイスを選ばず、NVIDIA encode ケースが Intel 側へ流れることがあった。
 - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters` で `video-hw` / `vk-video` 側に見えている Vulkan adapter を確認できる。
 - adapter ごとに失敗理由も report に残すため、複数 GPU 環境では `--allow-failures true` で全候補を走査する。
-- Vulkan HEVC encode は direct Vulkan submit path が未完了のため、この環境では unavailable として report される。診断用には `cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture` を明示実行する。
+- Vulkan HEVC encode は production backend としてはまだ unavailable として report される。診断用には `cargo +nightly -Zscript scripts/check_vulkan_hevc_encode_probe.rs --adapter-index <n>`、または `cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture` を明示実行する。
 
 ### 12) fMP4 decode access pattern benchmark
 

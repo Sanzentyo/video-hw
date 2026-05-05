@@ -113,9 +113,13 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   profile pNext chain ordering now matches FFmpeg's H.265-profile-before-usage
   shape. With an FFmpeg `hevc_vulkan` 320x180 parameter sample and
   `parameter_vui_safety=preserve`, the ignored NVIDIA live probe reaches
-  `Ready(bytes_written=47)`. This is only a submit diagnostic;
-  `VulkanEncoderAdapter` still stays disabled for HEVC encode until the
-  produced bitstream is written, decoded by FFmpeg, and quality-checked.
+  `Ready(bytes_written=47)`. The probe now reads output at
+  `dstBufferOffset + feedback_offset` and can dump that slice with
+  `VIDEO_HW_VULKAN_HEVC_ENCODE_OUTPUT_PATH`; when the FFmpeg-generated
+  parameter/header NAL prefix is prepended, FFmpeg decodes the one-frame stream
+  and the flat NV12 probe input compares at MSE=0 / PSNR=inf. This is still a
+  one-frame diagnostic path; `VulkanEncoderAdapter` stays disabled for HEVC
+  encode until the packetization and multi-frame production path are wired.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

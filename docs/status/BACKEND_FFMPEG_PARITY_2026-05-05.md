@@ -68,6 +68,7 @@ Optional environment variables:
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_FPS`
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE`
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_VUI_SAFETY=auto|preserve|force-off`
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_OUTPUT_PATH=<Annex-B slice output>`
 
 On the RTX 5070 Ti Laptop GPU, the HEVC encode feedback query pool now requires
 an explicit HEVC video profile in the query pool `pNext` chain; without it,
@@ -166,7 +167,10 @@ combination (`parameter_mode=sample`, `parameter_size_mode=sample`,
 `source_picture_resource_extent_mode=coded`,
 `session_h265_create_info_mode=ffmpeg`, `dst_range_mode=ffmpeg`) the NVIDIA
 live probe now reports `encode_submit_execution_probe: Ready` with
-`bytes_written=47` and `head16=0000000140010c01ffff016000000300`.
+`bytes_written=47`. The feedback bitstream offset is relative to
+`VkVideoEncodeInfoKHR::dstBufferOffset`, so the probe now reads the output at
+`dstBufferOffset + feedback_offset`; the actual encoded slice starts with
+`head16=000000012601af08a0bcea1fff7f661a`.
 `VIDEO_HW_VULKAN_HEVC_ENCODE_IMAGE_VIEW_MODE=no-ycbcr` can omit
 `VkSamplerYcbcrConversionInfo` from encode image views; image view creation
 succeeds in this mode, and it is part of the successful FFmpeg-generated
@@ -175,11 +179,16 @@ parameter probe above.
 parameter sample bytes into the externally encoded prefix area before
 `dstBufferOffset`; writing the first 256 bytes of the FFmpeg-generated 320x180
 stream is also part of the successful submit diagnostic above. This does not
-yet prove production HEVC encode support: the probe currently observes a
-non-empty driver output buffer, but it does not yet write a complete stream,
-decode it with FFmpeg, or compare decoded frames by MSE/PSNR. More complete HEVC
-command/resource wiring and bitstream validation are still required before
-enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+yet prove production HEVC encode support by itself: the driver output is the
+slice only, so it is not independently decodable without parameter/header NALs.
+`scripts/check_vulkan_hevc_encode_probe.rs` reproduces the diagnostic by
+generating an FFmpeg `hevc_vulkan` 320x180 parameter sample, dumping the live
+probe output slice, prepending the leading non-VCL NALs (VPS/SPS/PPS/prefix
+SEI), decoding the combined stream with FFmpeg, and comparing the decoded NV12
+frame against the probe's flat input. On this NVIDIA adapter the result is
+`mse_y=0`, `mse_uv=0`, `mse_all=0`, `psnr_y=inf`, `psnr_uv=inf`, `psnr_all=inf`.
+More complete HEVC packetization and multi-frame production wiring are still
+required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 
