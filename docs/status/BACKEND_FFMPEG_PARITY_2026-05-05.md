@@ -52,6 +52,22 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 | Vulkan NVIDIA | HEVC encode | Not complete: `video-hw` reports `Vulkan HEVC encode initialization failed; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet`; FFmpeg Vulkan HEVC encode on the NVIDIA adapter succeeds at 87.55 fps |
 | Vulkan Intel | HEVC decode/encode | Decode works in FFmpeg Vulkan at 196.72 fps but is not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan encode fails with unsupported encode queue |
 
+### Intel oneVPL verification follow-up
+
+- Latest verification reports after fixing benchmark output retention:
+  - H.264: `output/benchmark-intel-precise-h264-1777958803.md` (PASS, verify=ok)
+  - HEVC: `output/benchmark-intel-precise-hevc-1777958762.md` (PASS, verify=ok)
+- The Intel precise benchmark previously passed `--discard-output` even when
+  `--verify` was requested, so the integrated runner reported verification as
+  skipped despite successful encode runs. The script now keeps the video-hw
+  output when verification is enabled.
+- Intel HEVC hardware encode also needed packet collection to normalize
+  oneVPL `mfxBitstream.DataOffset` before reading `DataLength`; otherwise the
+  Annex-B stream could start from stale bytes and FFmpeg decoded only a subset
+  of the requested frames. The HEVC ARGB->NV12 hardware path now uses the
+  synchronous encode call for correctness; the 30-frame 320x180 verify run
+  reports 30 decodable frames.
+
 ### Vulkan HEVC encode live probe
 
 The direct ash-level Vulkan HEVC encode path remains blocked after the latest

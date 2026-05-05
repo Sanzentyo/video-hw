@@ -123,6 +123,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.
+- Intel precise encode verification keeps the video-hw output when `--verify`
+  is enabled. Intel HEVC packet collection normalizes oneVPL bitstream
+  `DataOffset` before reading and uses the synchronous hardware HEVC-NV12 path
+  for a decodable multi-frame Annex-B stream.
 - Use `--allow-failures false` when CI should fail immediately on the first
   backend benchmark error.
 - Reports use wall-clock timings and should be run on an otherwise quiet system

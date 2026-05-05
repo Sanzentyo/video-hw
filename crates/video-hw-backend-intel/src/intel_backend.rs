@@ -999,15 +999,8 @@ async fn encode_with_onevpl(
         .max(min_bitstream_capacity);
     let mut backing_buffer = vec![0_u8; buffer_size];
     let mut bitstream = Bitstream::with_codec(&mut backing_buffer, to_onevpl_codec(codec));
-    struct PendingEncodeSubmission<'a> {
-        _surface: Option<onevpl::FrameSurface<'a>>,
-        bitstream: Bitstream<'static>,
-        submission: onevpl::encode::EncodeSubmission,
-    }
     let mut packets = Vec::new();
     let mut pending_pts = VecDeque::new();
-    let mut pending_encode_submissions = VecDeque::new();
-    let encode_queue_limit = usize::from(async_depth.max(1));
     let aligned_width = usize::from(hw_width);
     let aligned_height = usize::from(hw_height);
 
@@ -1059,114 +1052,17 @@ async fn encode_with_onevpl(
                 .get_surface()
                 .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
             write_argb_to_nv12_surface(&mut input_surface, argb, width, height)?;
-            let mut queued_surface = Some(input_surface);
-            let max_queued_bitstream_capacity = 32 * 1024 * 1024;
-            let mut queued_bitstream_capacity = buffer_size;
-            let mut queued_bitstream = Some(Bitstream::with_owned_capacity(
-                queued_bitstream_capacity,
-                to_onevpl_codec(codec),
-            ));
-            let mut queued = false;
-            loop {
-                let submission_result = encoder.encode_async(
-                    &mut ctrl,
-                    queued_surface.as_mut(),
-                    queued_bitstream
-                        .as_mut()
-                        .expect("queued bitstream is initialized"),
-                );
-                match submission_result {
-                    Ok(submission) => {
-                        pending_encode_submissions.push_back(PendingEncodeSubmission {
-                            _surface: queued_surface.take(),
-                            bitstream: queued_bitstream
-                                .take()
-                                .expect("queued bitstream is initialized"),
-                            submission,
-                        });
-                        queued = true;
-                        break;
-                    }
-                    Err(MfxStatus::MoreData) => break,
-                    Err(MfxStatus::NotEnoughBuffer) => {
-                        let next_capacity = queued_bitstream_capacity
-                            .saturating_mul(2)
-                            .min(max_queued_bitstream_capacity);
-                        if next_capacity <= queued_bitstream_capacity {
-                            let context = format!(
-                                "Encoder::encode_async (hardware hevc-nv12, bitstream_capacity={} reached max {})",
-                                queued_bitstream_capacity, max_queued_bitstream_capacity
-                            );
-                            return Err(map_onevpl_status(MfxStatus::NotEnoughBuffer, &context));
-                        }
-                        queued_bitstream_capacity = next_capacity;
-                        queued_bitstream = Some(Bitstream::with_owned_capacity(
-                            queued_bitstream_capacity,
-                            to_onevpl_codec(codec),
-                        ));
-                    }
-                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
-                        if let Some(mut pending) = pending_encode_submissions.pop_front() {
-                            match encoder.sync_encode(
-                                pending.submission,
-                                &pending.bitstream,
-                                Some(0),
-                            ) {
-                                Ok(_) => {
-                                    collect_packets(
-                                        &mut pending.bitstream,
-                                        codec,
-                                        &mut pending_pts,
-                                        &mut packets,
-                                    )?;
-                                }
-                                Err(
-                                    MfxStatus::InExecution
-                                    | MfxStatus::DeviceBusy
-                                    | MfxStatus::TaskBusy,
-                                ) => {
-                                    pending_encode_submissions.push_back(pending);
-                                }
-                                Err(status) => {
-                                    return Err(map_onevpl_status(
-                                        status,
-                                        "Encoder::sync_encode (hardware hevc-nv12)",
-                                    ));
-                                }
-                            }
-                        }
-                        std::thread::yield_now();
-                    }
-                    Err(status) => {
-                        return Err(map_onevpl_status(
-                            status,
-                            "Encoder::encode_async (hardware hevc-nv12)",
-                        ));
-                    }
-                }
-            }
-            if queued
-                && pending_encode_submissions.len() >= encode_queue_limit
-                && let Some(mut pending) = pending_encode_submissions.pop_front()
+            match encoder
+                .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
+                .await
             {
-                match encoder.sync_encode(pending.submission, &pending.bitstream, Some(0)) {
-                    Ok(_) => {
-                        collect_packets(
-                            &mut pending.bitstream,
-                            codec,
-                            &mut pending_pts,
-                            &mut packets,
-                        )?;
-                    }
-                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
-                        pending_encode_submissions.push_back(pending);
-                    }
-                    Err(status) => {
-                        return Err(map_onevpl_status(
-                            status,
-                            "Encoder::sync_encode (hardware hevc-nv12)",
-                        ));
-                    }
+                Ok(_) => collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?,
+                Err(MfxStatus::MoreData) => {}
+                Err(status) => {
+                    return Err(map_onevpl_status(
+                        status,
+                        "Encoder::encode (hardware hevc-nv12)",
+                    ));
                 }
             }
             continue;
@@ -1283,22 +1179,6 @@ async fn encode_with_onevpl(
         }
     }
 
-    if hevc_cpu_nv12 {
-        while let Some(mut pending) = pending_encode_submissions.pop_front() {
-            encoder
-                .sync_encode(pending.submission, &pending.bitstream, None)
-                .map_err(|status| {
-                    map_onevpl_status(status, "Encoder::sync_encode drain (hardware hevc-nv12)")
-                })?;
-            collect_packets(
-                &mut pending.bitstream,
-                codec,
-                &mut pending_pts,
-                &mut packets,
-            )?;
-        }
-    }
-
     loop {
         let mut ctrl = EncodeCtrl::new();
         match encoder.encode(&mut ctrl, None, &mut bitstream, None).await {
@@ -1322,6 +1202,13 @@ fn collect_packets(
         return Ok(());
     }
 
+    if bitstream.offset() > 0 {
+        bitstream.write_all(&[]).map_err(|err| {
+            BackendError::Backend(format!(
+                "failed to normalize encoded bitstream offset before read: {err}"
+            ))
+        })?;
+    }
     let mut data = vec![0_u8; data_len];
     bitstream.read_exact(&mut data).map_err(|err| {
         BackendError::Backend(format!("failed to read encoded bitstream payload: {err}"))

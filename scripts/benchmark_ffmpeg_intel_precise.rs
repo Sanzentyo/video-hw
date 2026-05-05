@@ -801,8 +801,10 @@ fn run_case(
                     args.raw_input_pix_fmt.as_cli(),
                     "--output",
                     &video_hw_output.to_string_lossy(),
-                    "--discard-output",
                 ]);
+                if !args.verify {
+                    c.arg("--discard-output");
+                }
                 c
             } else {
                 let mut c = Command::new(encode_bin);
@@ -817,8 +819,10 @@ fn run_case(
                     &args.frame_count.to_string(),
                     "--output",
                     &video_hw_output.to_string_lossy(),
-                    "--discard-output",
                 ]);
+                if !args.verify {
+                    c.arg("--discard-output");
+                }
                 c
             };
             if args.require_hardware {
