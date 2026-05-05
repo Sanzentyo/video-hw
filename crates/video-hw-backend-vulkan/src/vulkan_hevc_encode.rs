@@ -1298,6 +1298,7 @@ fn probe_single_hevc_encode_session_format(
             config.coded_extent.width,
             config.coded_extent.height,
             candidate.capability_snapshot.encode_h265_std_syntax_flags,
+            candidate.capability_snapshot.max_quality_levels,
         ) {
             Ok(session_parameters) => {
                 let submit_execution_probe = probe_hevc_encode_submit_execution(
@@ -1524,6 +1525,7 @@ fn create_hevc_encode_video_session_parameters(
     coded_width: u32,
     coded_height: u32,
     encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
+    max_quality_levels: u32,
 ) -> Result<HevcEncodeSessionParameters, String> {
     let parameter_mode = resolve_hevc_encode_parameter_mode();
     match parameter_mode {
@@ -1547,6 +1549,7 @@ fn create_hevc_encode_video_session_parameters(
                 video_session,
                 parameter_mode,
                 encode_h265_std_syntax_flags,
+                max_quality_levels,
             )
         }
         HevcEncodeParameterMode::EmptyTemplate => {
@@ -1555,10 +1558,13 @@ fn create_hevc_encode_video_session_parameters(
                     .max_std_vps_count(1)
                     .max_std_sps_count(1)
                     .max_std_pps_count(1);
+            let mut quality_level_info = vk::VideoEncodeQualityLevelInfoKHR::default()
+                .quality_level(resolve_hevc_encode_probe_quality_level(max_quality_levels));
             let create_info = vk::VideoSessionParametersCreateInfoKHR::default()
                 .video_session(video_session)
                 .video_session_parameters_template(vk::VideoSessionParametersKHR::null())
-                .push_next(&mut encode_h265_session_parameters);
+                .push_next(&mut encode_h265_session_parameters)
+                .push_next(&mut quality_level_info);
             let mut video_session_parameters = vk::VideoSessionParametersKHR::null();
             // SAFETY: `create_info` references stack data alive for this call.
             let result = unsafe {
@@ -1600,6 +1606,7 @@ fn create_hevc_encode_video_session_parameters_from_sample(
     video_session: vk::VideoSessionKHR,
     parameter_mode: HevcEncodeParameterMode,
     encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
+    max_quality_levels: u32,
 ) -> Result<HevcEncodeSessionParameters, String> {
     debug_assert!(matches!(
         parameter_mode,
@@ -1657,10 +1664,13 @@ fn create_hevc_encode_video_session_parameters_from_sample(
         encode_h265_session_parameters =
             encode_h265_session_parameters.parameters_add_info(add_info);
     }
+    let mut quality_level_info = vk::VideoEncodeQualityLevelInfoKHR::default()
+        .quality_level(resolve_hevc_encode_probe_quality_level(max_quality_levels));
     let create_info = vk::VideoSessionParametersCreateInfoKHR::default()
         .video_session(video_session)
         .video_session_parameters_template(vk::VideoSessionParametersKHR::null())
-        .push_next(&mut encode_h265_session_parameters);
+        .push_next(&mut encode_h265_session_parameters)
+        .push_next(&mut quality_level_info);
     let mut video_session_parameters = vk::VideoSessionParametersKHR::null();
     // SAFETY: `create_info` references stack data alive for this call.
     let result = unsafe {
