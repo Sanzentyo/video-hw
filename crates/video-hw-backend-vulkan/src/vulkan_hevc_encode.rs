@@ -2655,6 +2655,22 @@ fn parse_hevc_encode_probe_constant_qp(value: Option<&str>) -> Option<i32> {
         .filter(|value| (0..=51).contains(value))
 }
 
+fn resolve_hevc_encode_probe_quality_level(max_quality_levels: u32) -> u32 {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_QUALITY_LEVEL";
+    let override_value = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_quality_level(override_value.as_deref(), max_quality_levels)
+}
+
+fn parse_hevc_encode_probe_quality_level(value: Option<&str>, max_quality_levels: u32) -> u32 {
+    let upper_bound = max_quality_levels.saturating_sub(1);
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|value| value.min(upper_bound))
+        .unwrap_or(0)
+}
+
 fn hevc_encode_probe_slice_qp_delta(
     constant_qp: i32,
     pps_init_qp_minus26: i8,
@@ -3104,7 +3120,8 @@ fn probe_hevc_encode_submit_execution(
         let temporal_id = hevc_encode_probe_temporal_id(picture_info_mode);
         let pic_order_cnt_val = hevc_encode_probe_pic_order_cnt_val(picture_info_mode);
         let reference_idx_minus1 = hevc_encode_probe_reference_idx_minus1(reference_index_mode);
-        let selected_quality_level = config.max_quality_levels.saturating_sub(1);
+        let selected_quality_level =
+            resolve_hevc_encode_probe_quality_level(config.max_quality_levels);
         let control_config = HevcEncodeProbeControlConfig {
             selected_rate_control_mode,
             selected_quality_level,
@@ -5489,6 +5506,16 @@ mod tests {
             hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::VBR), None,),
             0
         );
+    }
+
+    #[test]
+    fn hevc_encode_quality_level_defaults_to_ffmpeg_zero() {
+        assert_eq!(parse_hevc_encode_probe_quality_level(None, 7), 0);
+        assert_eq!(parse_hevc_encode_probe_quality_level(Some(""), 7), 0);
+        assert_eq!(parse_hevc_encode_probe_quality_level(Some("3"), 7), 3);
+        assert_eq!(parse_hevc_encode_probe_quality_level(Some("99"), 7), 6);
+        assert_eq!(parse_hevc_encode_probe_quality_level(Some("bad"), 7), 0);
+        assert_eq!(parse_hevc_encode_probe_quality_level(Some("3"), 0), 0);
     }
 
     #[test]
