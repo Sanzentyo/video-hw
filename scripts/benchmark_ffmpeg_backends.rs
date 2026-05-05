@@ -108,6 +108,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     verify: bool,
 
+    #[arg(long, default_value_t = false)]
+    equal_raw_input: bool,
+
     /// Continue the integrated run when a backend or case fails.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     allow_failures: bool,
@@ -115,6 +118,12 @@ struct Args {
     /// Pass backend-internal metric flags to scripts that support them.
     #[arg(long, default_value_t = false)]
     include_internal_metrics: bool,
+
+    #[arg(long)]
+    vt_enable_pipeline_scheduler: Option<bool>,
+
+    #[arg(long)]
+    vt_pipeline_queue_capacity: Option<usize>,
 
     #[arg(long, default_value = "output")]
     output_dir: PathBuf,
@@ -320,8 +329,23 @@ fn run_child_precise_script(
     if args.verify {
         command.arg("--verify");
     }
+    if args.equal_raw_input && matches!(backend, Backend::Nv | Backend::Intel | Backend::Vt) {
+        command.arg("--equal-raw-input");
+    }
     if args.include_internal_metrics && matches!(backend, Backend::Nv | Backend::Vt) {
         command.arg("--include-internal-metrics");
+    }
+    if matches!(backend, Backend::Vt) {
+        if let Some(enabled) = args.vt_enable_pipeline_scheduler {
+            command
+                .arg("--vt-enable-pipeline-scheduler")
+                .arg(enabled.to_string());
+        }
+        if let Some(capacity) = args.vt_pipeline_queue_capacity {
+            command
+                .arg("--vt-pipeline-queue-capacity")
+                .arg(capacity.to_string());
+        }
     }
     if args.allow_failures && matches!(backend, Backend::Intel) {
         command.arg("--allow-case-failures");

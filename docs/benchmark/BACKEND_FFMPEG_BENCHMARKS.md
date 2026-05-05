@@ -21,6 +21,21 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vt --codec h264 --warmup 1 --repeat 5 --verify
 ```
 
+Use `--equal-raw-input` when comparing encode paths that support raw ARGB input
+(`nv`, `intel`, `vt`). VT-specific options can be forwarded through
+`--vt-enable-pipeline-scheduler <true|false>` and
+`--vt-pipeline-queue-capacity <N>`.
+
+macOS/VT smoke verified the integrated runner with:
+
+```sh
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vt --codec h264 --warmup 0 --repeat 1 --frame-count 30 --verify --equal-raw-input --include-internal-metrics --vt-enable-pipeline-scheduler true --vt-pipeline-queue-capacity 4
+```
+
+Generated:
+- `output/benchmark-backends-h264-1777946337.md`
+- `output/benchmark-vt-precise-h264-1777946337.md`
+
 The integrated runner writes an aggregate report to:
 
 ```text
