@@ -82,6 +82,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 - Adapter discovery:
   - `vulkaninfo --summary`: GPU0 Intel(R) Graphics (`vendorID=0x8086`, `deviceID=0x7d67`, driver 101.6629), GPU1 NVIDIA GeForce RTX 5070 Ti Laptop GPU (`vendorID=0x10de`, `deviceID=0x2f18`, driver 591.44)
   - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters --release`: only `0 NVIDIA GeForce RTX 5070 Ti Laptop GPU 4318 12056 true true`
+  - Full `vulkaninfo` extension scan: Intel exposes `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_queue`, and `VK_KHR_video_queue`, but does not expose `VK_KHR_video_encode_queue` / H.264 or H.265 encode extensions. NVIDIA exposes both decode and encode queues for H.264/H.265.
 - Interpretation: NV, Intel oneVPL, and the available `video-hw` Vulkan NVIDIA adapter are at FFmpeg parity or faster for the measured H.264/HEVC decode+encode cases. The remaining uncovered hardware is Intel Vulkan: it exists as a Vulkan physical device, but is not exposed by `vk-video` / `video-hw` on this driver, and FFmpeg's own Vulkan encode path fails on it. This is recorded as an environment/driver/backend availability gap, not a passing Vulkan parity case.
 
 ### H.264
