@@ -61,6 +61,7 @@ pub(crate) struct HevcEncodeSessionBootstrap {
     pub max_quality_levels: u32,
     pub encode_capability_flags: vk::VideoEncodeCapabilityFlagsKHR,
     pub encode_h265_capability_flags: vk::VideoEncodeH265CapabilityFlagsKHR,
+    pub encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
     pub supported_encode_feedback_flags: vk::VideoEncodeFeedbackFlagsKHR,
     pub min_bitstream_buffer_offset_alignment: u64,
     pub min_bitstream_buffer_size_alignment: u64,
@@ -127,6 +128,7 @@ struct HevcEncodeCapabilitySnapshot {
     max_active_reference_pictures: u32,
     encode_capability_flags: vk::VideoEncodeCapabilityFlagsKHR,
     encode_h265_capability_flags: vk::VideoEncodeH265CapabilityFlagsKHR,
+    encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
     rate_control_modes: vk::VideoEncodeRateControlModeFlagsKHR,
     max_rate_control_layers: u32,
     max_bitrate: u64,
@@ -163,6 +165,7 @@ struct HevcEncodeSubmitExecutionConfig {
     parameter_set_sps_temporal_mvp_enabled: bool,
     parameter_mode: HevcEncodeParameterMode,
     parameter_feedback_probe_summary: Option<String>,
+    encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
     coded_width: u32,
     coded_height: u32,
     picture_format: vk::Format,
@@ -719,6 +722,7 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
             let max_quality_levels = encode_capabilities.max_quality_levels;
             let encode_capability_flags = encode_capabilities.flags;
             let encode_h265_capability_flags = encode_h265_capabilities.flags;
+            let encode_h265_std_syntax_flags = encode_h265_capabilities.std_syntax_flags;
             let supported_encode_feedback_flags =
                 encode_capabilities.supported_encode_feedback_flags;
             let max_level_idc = encode_h265_capabilities.max_level_idc;
@@ -737,6 +741,7 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
                 max_active_reference_pictures,
                 encode_capability_flags,
                 encode_h265_capability_flags,
+                encode_h265_std_syntax_flags,
                 rate_control_modes,
                 max_rate_control_layers,
                 max_bitrate,
@@ -860,6 +865,9 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
             encode_h265_capability_flags: candidate
                 .capability_snapshot
                 .encode_h265_capability_flags,
+            encode_h265_std_syntax_flags: candidate
+                .capability_snapshot
+                .encode_h265_std_syntax_flags,
             supported_encode_feedback_flags: candidate
                 .capability_snapshot
                 .supported_encode_feedback_flags,
@@ -1279,6 +1287,7 @@ fn probe_single_hevc_encode_session_format(
             video_session,
             config.coded_extent.width,
             config.coded_extent.height,
+            candidate.capability_snapshot.encode_h265_std_syntax_flags,
         ) {
             Ok(session_parameters) => {
                 let submit_execution_probe = probe_hevc_encode_submit_execution(
@@ -1301,6 +1310,9 @@ fn probe_single_hevc_encode_session_format(
                         parameter_feedback_probe_summary: session_parameters
                             .feedback_probe_summary
                             .clone(),
+                        encode_h265_std_syntax_flags: candidate
+                            .capability_snapshot
+                            .encode_h265_std_syntax_flags,
                         coded_width: config.coded_extent.width,
                         coded_height: config.coded_extent.height,
                         picture_format: config.picture_format,
@@ -1501,6 +1513,7 @@ fn create_hevc_encode_video_session_parameters(
     video_session: vk::VideoSessionKHR,
     coded_width: u32,
     coded_height: u32,
+    encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
 ) -> Result<HevcEncodeSessionParameters, String> {
     let parameter_mode = resolve_hevc_encode_parameter_mode();
     match parameter_mode {
@@ -1523,6 +1536,7 @@ fn create_hevc_encode_video_session_parameters(
                 video_encode_device,
                 video_session,
                 parameter_mode,
+                encode_h265_std_syntax_flags,
             )
         }
         HevcEncodeParameterMode::EmptyTemplate => {
@@ -1575,6 +1589,7 @@ fn create_hevc_encode_video_session_parameters_from_sample(
     video_encode_device: &ash::khr::video_encode_queue::Device,
     video_session: vk::VideoSessionKHR,
     parameter_mode: HevcEncodeParameterMode,
+    encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
 ) -> Result<HevcEncodeSessionParameters, String> {
     debug_assert!(matches!(
         parameter_mode,
@@ -1602,6 +1617,7 @@ fn create_hevc_encode_video_session_parameters_from_sample(
         parameter_sets.parsed_sps.vui_parameters.is_some(),
     );
     apply_hevc_encode_parameter_mode_sps_overrides(&mut parameter_sets, effective_parameter_mode);
+    apply_hevc_encode_capability_sps_overrides(&mut parameter_sets, encode_h265_std_syntax_flags);
     let mut std_parameter_storage =
         build_hevc_std_parameter_set_storage(&parameter_sets).map_err(|err| {
             format!("failed to build HEVC std parameter storage for encode probe: {err}")
@@ -1874,6 +1890,17 @@ fn apply_hevc_encode_parameter_mode_sps_overrides(
         }
         _ => {}
     }
+}
+
+fn apply_hevc_encode_capability_sps_overrides(
+    parameter_sets: &mut HevcParameterSets,
+    std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
+) {
+    parameter_sets
+        .parsed_sps
+        .sample_adaptive_offset_enabled_flag = std_syntax_flags
+        .contains(vk::VideoEncodeH265StdFlagsKHR::SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET);
+    parameter_sets.parsed_sps.sps_temporal_mvp_enabled_flag = false;
 }
 
 fn hevc_encode_parameter_mode_label(mode: HevcEncodeParameterMode) -> &'static str {
@@ -3045,7 +3072,7 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3075,6 +3102,7 @@ fn probe_hevc_encode_submit_execution(
             config.parameter_set_pps_init_qp_minus26,
             config.parameter_set_sample_adaptive_offset_enabled,
             config.parameter_set_sps_temporal_mvp_enabled,
+            config.encode_h265_std_syntax_flags,
             parameter_feedback_probe,
             reference_list_mode_label,
             reference_index_mode_label,
