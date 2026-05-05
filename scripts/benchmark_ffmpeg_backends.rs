@@ -169,6 +169,16 @@ struct CaseSamples {
     seconds: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+struct VulkanAdapterInfo {
+    index: usize,
+    name: String,
+    vendor_id: Option<u32>,
+    device_id: Option<u32>,
+    supports_decoding: Option<bool>,
+    supports_encoding: Option<bool>,
+}
+
 impl CaseSamples {
     fn summarize(&self) -> CaseSummary {
         let stats = Stats::from_samples(&self.seconds);
@@ -283,7 +293,7 @@ fn default_backends_for_host() -> Vec<Backend> {
     Vec::new()
 }
 
-fn discover_vulkan_adapter_indexes() -> Result<Vec<usize>> {
+fn discover_vulkaninfo_adapters() -> Result<Vec<VulkanAdapterInfo>> {
     let output = Command::new("vulkaninfo")
         .arg("--summary")
         .output()
@@ -296,19 +306,57 @@ fn discover_vulkan_adapter_indexes() -> Result<Vec<usize>> {
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let indexes = stdout
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            let rest = trimmed.strip_prefix("GPU")?;
-            let (index, suffix) = rest.split_once(':')?;
-            suffix.is_empty().then(|| index.parse::<usize>().ok()).flatten()
-        })
-        .collect::<Vec<_>>();
-    if indexes.is_empty() {
+    let mut adapters = Vec::new();
+    let mut current: Option<VulkanAdapterInfo> = None;
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("GPU") {
+            if let Some(adapter) = current.take() {
+                adapters.push(adapter);
+            }
+            if let Some((index, suffix)) = rest.split_once(':')
+                && suffix.is_empty()
+                && let Ok(index) = index.parse::<usize>()
+            {
+                current = Some(VulkanAdapterInfo {
+                    index,
+                    name: String::new(),
+                    vendor_id: None,
+                    device_id: None,
+                    supports_decoding: None,
+                    supports_encoding: None,
+                });
+            }
+            continue;
+        }
+        let Some(adapter) = current.as_mut() else {
+            continue;
+        };
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "deviceName" => adapter.name = value.to_string(),
+                "vendorID" => adapter.vendor_id = parse_u32_auto(value),
+                "deviceID" => adapter.device_id = parse_u32_auto(value),
+                _ => {}
+            }
+        }
+    }
+    if let Some(adapter) = current.take() {
+        adapters.push(adapter);
+    }
+    if adapters.is_empty() {
         bail!("vulkaninfo reported no GPU entries");
     }
-    Ok(indexes)
+    Ok(adapters)
+}
+
+fn parse_u32_auto(value: &str) -> Option<u32> {
+    value
+        .strip_prefix("0x")
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .or_else(|| value.parse::<u32>().ok())
 }
 
 fn run_backend(backend: Backend, args: &Args) -> Result<BackendReport> {
@@ -365,9 +413,10 @@ fn run_child_precise_script(
     let report_path = newest_new_report(child_output_dir, &before)
         .with_context(|| format!("locate {} report", backend.display()))?;
     let cases = parse_case_summaries(&report_path)?;
+    let status = parse_child_report_status(&report_path, args.verify)?;
     Ok(BackendReport {
         backend,
-        status: BackendStatus::Passed,
+        status,
         report_path: Some(report_path),
         cases,
     })
@@ -378,51 +427,143 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
     let profile = if args.release { "release" } else { "debug" };
     let decode_bin = example_bin_path(profile, "decode_to_yuv");
     let encode_bin = example_bin_path(profile, "encode_synthetic");
+    let list_adapters_bin = example_bin_path(profile, "list_vulkan_adapters");
     let null_sink = null_sink();
     let total_rounds = args.warmup + args.repeat;
-    let adapter_indexes = if args.vulkan_adapter_indexes.is_empty() {
-        discover_vulkan_adapter_indexes().unwrap_or_else(|err| {
-            eprintln!("failed to discover Vulkan adapters via vulkaninfo: {err:#}; falling back to adapter 0");
-            vec![0]
-        })
-    } else {
-        args.vulkan_adapter_indexes.clone()
-    };
+    let ffmpeg_adapters = discover_vulkaninfo_adapters().unwrap_or_else(|err| {
+        eprintln!("failed to discover Vulkan adapters via vulkaninfo: {err:#}");
+        Vec::new()
+    });
+    let video_hw_adapters = discover_video_hw_vulkan_adapters(&list_adapters_bin)
+        .unwrap_or_else(|err| {
+            eprintln!("failed to discover video-hw Vulkan adapters: {err:#}");
+            Vec::new()
+        });
 
     let mut cases = Vec::new();
-    for adapter_index in adapter_indexes {
-        println!("vulkan adapter {adapter_index}");
+    for adapter in &video_hw_adapters {
+        if !args.vulkan_adapter_indexes.is_empty()
+            && !args.vulkan_adapter_indexes.contains(&adapter.index)
+        {
+            continue;
+        }
+        println!(
+            "video-hw vulkan adapter {} ({})",
+            adapter.index, adapter.name
+        );
+        let video_hw_adapter_label = adapter_label(adapter);
+        let ffmpeg_match = find_matching_vulkaninfo_adapter(adapter, &ffmpeg_adapters);
         cases.push(run_vulkan_case(
-            adapter_index,
+            adapter.index,
+            &video_hw_adapter_label,
             "video-hw decode",
             303,
             total_rounds,
             args.warmup,
-            || vulkan_decode_command(&decode_bin, args, adapter_index),
+            || vulkan_decode_command(&decode_bin, args, adapter.index),
         ));
+        if let Some(ffmpeg_adapter) = ffmpeg_match {
+            cases.push(run_vulkan_case(
+                ffmpeg_adapter.index,
+                &adapter_label(ffmpeg_adapter),
+                "ffmpeg vulkan decode",
+                303,
+                total_rounds,
+                args.warmup,
+                || Ok(ffmpeg_vulkan_decode_command(
+                    args,
+                    ffmpeg_adapter.index,
+                    &null_sink,
+                )),
+            ));
+        } else {
+            cases.push(unavailable_case(
+                "ffmpeg vulkan decode",
+                &video_hw_adapter_label,
+                "no vulkaninfo adapter with matching name/device id",
+            ));
+        }
         cases.push(run_vulkan_case(
-            adapter_index,
-            "ffmpeg vulkan decode",
-            303,
-            total_rounds,
-            args.warmup,
-            || Ok(ffmpeg_vulkan_decode_command(args, adapter_index, &null_sink)),
-        ));
-        cases.push(run_vulkan_case(
-            adapter_index,
+            adapter.index,
+            &video_hw_adapter_label,
             "video-hw encode",
             args.frame_count,
             total_rounds,
             args.warmup,
-            || vulkan_encode_command(&encode_bin, args, adapter_index, &null_sink),
+            || vulkan_encode_command(&encode_bin, args, adapter.index, &null_sink),
+        ));
+        if let Some(ffmpeg_adapter) = ffmpeg_match {
+            cases.push(run_vulkan_case(
+                ffmpeg_adapter.index,
+                &adapter_label(ffmpeg_adapter),
+                "ffmpeg vulkan encode",
+                args.frame_count,
+                total_rounds,
+                args.warmup,
+                || Ok(ffmpeg_vulkan_encode_command(
+                    args,
+                    ffmpeg_adapter.index,
+                    &null_sink,
+                )),
+            ));
+        } else {
+            cases.push(unavailable_case(
+                "ffmpeg vulkan encode",
+                &video_hw_adapter_label,
+                "no vulkaninfo adapter with matching name/device id",
+            ));
+        }
+    }
+
+    for ffmpeg_adapter in &ffmpeg_adapters {
+        if !args.vulkan_adapter_indexes.is_empty()
+            && !args.vulkan_adapter_indexes.contains(&ffmpeg_adapter.index)
+        {
+            continue;
+        }
+        if find_matching_video_hw_adapter(ffmpeg_adapter, &video_hw_adapters).is_some() {
+            continue;
+        }
+        println!(
+            "ffmpeg-only vulkan adapter {} ({})",
+            ffmpeg_adapter.index, ffmpeg_adapter.name
+        );
+        let adapter_label = adapter_label(ffmpeg_adapter);
+        cases.push(unavailable_case(
+            "video-hw decode",
+            &adapter_label,
+            "adapter is not exposed by vk-video/video-hw",
         ));
         cases.push(run_vulkan_case(
-            adapter_index,
+            ffmpeg_adapter.index,
+            &adapter_label,
+            "ffmpeg vulkan decode",
+            303,
+            total_rounds,
+            args.warmup,
+            || Ok(ffmpeg_vulkan_decode_command(
+                args,
+                ffmpeg_adapter.index,
+                &null_sink,
+            )),
+        ));
+        cases.push(unavailable_case(
+            "video-hw encode",
+            &adapter_label,
+            "adapter is not exposed by vk-video/video-hw",
+        ));
+        cases.push(run_vulkan_case(
+            ffmpeg_adapter.index,
+            &adapter_label,
             "ffmpeg vulkan encode",
             args.frame_count,
             total_rounds,
             args.warmup,
-            || Ok(ffmpeg_vulkan_encode_command(args, adapter_index, &null_sink)),
+            || Ok(ffmpeg_vulkan_encode_command(
+                args,
+                ffmpeg_adapter.index,
+                &null_sink,
+            )),
         ));
     }
 
@@ -434,7 +575,7 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
     write_vulkan_report(&report_path, args, &cases)?;
     let status = if cases
         .iter()
-        .any(|case| case.status.starts_with("failed:"))
+        .any(|case| case.status.starts_with("failed:") || case.status.starts_with("unavailable:"))
     {
         BackendStatus::Failed("one or more Vulkan adapter cases failed".to_string())
     } else {
@@ -461,6 +602,8 @@ fn build_vulkan_examples(release: bool) -> Result<()> {
         "decode_to_yuv",
         "--example",
         "encode_synthetic",
+        "--example",
+        "list_vulkan_adapters",
     ]);
     if release {
         command.arg("--release");
@@ -468,8 +611,89 @@ fn build_vulkan_examples(release: bool) -> Result<()> {
     run_inherited(&mut command).context("build Vulkan examples")
 }
 
+fn discover_video_hw_vulkan_adapters(list_adapters_bin: &Path) -> Result<Vec<VulkanAdapterInfo>> {
+    let output = Command::new(list_adapters_bin)
+        .output()
+        .context("run list_vulkan_adapters")?;
+    if !output.status.success() {
+        bail!(
+            "list_vulkan_adapters failed: status={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(parse_video_hw_vulkan_adapter_line)
+        .collect())
+}
+
+fn parse_video_hw_vulkan_adapter_line(line: &str) -> Option<VulkanAdapterInfo> {
+    let cells = line.split('\t').collect::<Vec<_>>();
+    if cells.len() != 6 {
+        return None;
+    }
+    Some(VulkanAdapterInfo {
+        index: cells[0].parse().ok()?,
+        name: cells[1].to_string(),
+        vendor_id: cells[2].parse().ok(),
+        device_id: cells[3].parse().ok(),
+        supports_decoding: cells[4].parse().ok(),
+        supports_encoding: cells[5].parse().ok(),
+    })
+}
+
+fn find_matching_vulkaninfo_adapter<'a>(
+    video_hw: &VulkanAdapterInfo,
+    vulkaninfo: &'a [VulkanAdapterInfo],
+) -> Option<&'a VulkanAdapterInfo> {
+    vulkaninfo
+        .iter()
+        .find(|adapter| same_vulkan_adapter(video_hw, adapter))
+}
+
+fn find_matching_video_hw_adapter<'a>(
+    vulkaninfo: &VulkanAdapterInfo,
+    video_hw: &'a [VulkanAdapterInfo],
+) -> Option<&'a VulkanAdapterInfo> {
+    video_hw
+        .iter()
+        .find(|adapter| same_vulkan_adapter(adapter, vulkaninfo))
+}
+
+fn same_vulkan_adapter(left: &VulkanAdapterInfo, right: &VulkanAdapterInfo) -> bool {
+    if left.name != right.name {
+        return false;
+    }
+    match (
+        left.vendor_id,
+        left.device_id,
+        right.vendor_id,
+        right.device_id,
+    ) {
+        (Some(left_vendor), Some(left_device), Some(right_vendor), Some(right_device)) => {
+            left_vendor == right_vendor && left_device == right_device
+        }
+        _ => true,
+    }
+}
+
+fn adapter_label(adapter: &VulkanAdapterInfo) -> String {
+    let decode = adapter
+        .supports_decoding
+        .map(|value| if value { "decode" } else { "no-decode" })
+        .unwrap_or("decode?");
+    let encode = adapter
+        .supports_encoding
+        .map(|value| if value { "encode" } else { "no-encode" })
+        .unwrap_or("encode?");
+    format!("{} {decode}/{encode}", adapter.name)
+}
+
 fn run_vulkan_case<F>(
     adapter_index: usize,
+    adapter_name: &str,
     label: &'static str,
     frame_count: usize,
     total_rounds: usize,
@@ -493,7 +717,7 @@ where
         );
         let command = match command_factory() {
             Ok(command) => command,
-            Err(err) => return failed_case(adapter_index, label, err),
+            Err(err) => return failed_case(adapter_index, adapter_name, label, err),
         };
         match run_timed(command) {
             Ok(seconds) => {
@@ -502,20 +726,35 @@ where
                     samples.seconds.push(seconds);
                 }
             }
-            Err(err) => return failed_case(adapter_index, label, err),
+            Err(err) => return failed_case(adapter_index, adapter_name, label, err),
         }
     }
     let mut summary = samples.summarize();
-    summary.case = format!("{label} [vk{adapter_index}]");
+    summary.case = format!("{label} [{adapter_name} vk{adapter_index}]");
     summary
 }
 
-fn failed_case(adapter_index: usize, label: &str, err: anyhow::Error) -> CaseSummary {
+fn failed_case(
+    adapter_index: usize,
+    adapter_name: &str,
+    label: &str,
+    err: anyhow::Error,
+) -> CaseSummary {
     let status = format!("failed: {err:#}").replace('|', "\\|");
-    eprintln!("  {label} [vk{adapter_index}] {status}");
+    eprintln!("  {label} [{adapter_name} vk{adapter_index}] {status}");
     CaseSummary {
-        case: format!("{label} [vk{adapter_index}]"),
+        case: format!("{label} [{adapter_name} vk{adapter_index}]"),
         status,
+        mean_seconds: None,
+        p50_seconds: None,
+        throughput_fps: None,
+    }
+}
+
+fn unavailable_case(label: &str, adapter_name: &str, reason: &str) -> CaseSummary {
+    CaseSummary {
+        case: format!("{label} [{adapter_name}]"),
+        status: format!("unavailable: {reason}").replace('|', "\\|"),
         mean_seconds: None,
         p50_seconds: None,
         throughput_fps: None,
@@ -765,6 +1004,40 @@ fn parse_case_summaries(report_path: &Path) -> Result<Vec<CaseSummary>> {
         .lines()
         .filter_map(parse_case_summary_line)
         .collect())
+}
+
+fn parse_child_report_status(report_path: &Path, verify_requested: bool) -> Result<BackendStatus> {
+    let text = fs::read_to_string(report_path)
+        .with_context(|| format!("read report: {}", report_path.display()))?;
+
+    let parity_failed = text.lines().any(|line| {
+        line.trim_start().starts_with("- Overall:")
+            && (line.contains("=> FAIL") || line.contains("Overall: FAIL"))
+    });
+    if parity_failed {
+        return Ok(BackendStatus::Failed(
+            "child report parity check failed".to_string(),
+        ));
+    }
+
+    if verify_requested {
+        let verification_failed = text
+            .lines()
+            .skip_while(|line| line.trim() != "## Verification")
+            .skip(1)
+            .take_while(|line| !line.starts_with("## "))
+            .any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("failed") || line.contains("skipped")
+            });
+        if verification_failed {
+            return Ok(BackendStatus::Failed(
+                "child report verification did not pass".to_string(),
+            ));
+        }
+    }
+
+    Ok(BackendStatus::Passed)
 }
 
 fn parse_case_summary_line(line: &str) -> Option<CaseSummary> {

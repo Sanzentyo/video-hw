@@ -44,6 +44,11 @@ pub use video_hw_backend_vt::{VtDecoderAdapter, VtEncoderAdapter};
     feature = "backend-vulkan",
     any(target_os = "linux", target_os = "windows")
 ))]
+pub use video_hw_backend_vulkan::{VulkanAdapterReport, vulkan_adapter_reports};
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub use video_hw_backend_vulkan::{VulkanDecoderAdapter, VulkanEncoderAdapter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

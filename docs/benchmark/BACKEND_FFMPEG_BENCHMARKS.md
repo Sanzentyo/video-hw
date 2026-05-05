@@ -32,6 +32,12 @@ their generated reports. Vulkan is measured directly by the integrated runner:
 it discovers Vulkan adapters with `vulkaninfo --summary` (or uses
 `--vulkan-adapter-indexes`) and records `video-hw` decode/encode plus FFmpeg
 Vulkan decode/encode for each adapter.
+For backend-specific scripts, the integrated runner also reads the generated
+report's parity and verification result so a child command that completes but
+reports `Overall: FAIL` is surfaced as a failed backend in the aggregate report.
+The runner matches `video-hw` Vulkan adapters to FFmpeg Vulkan adapters by
+device name/vendor/device id because the two tools can use different numeric
+adapter indexes on hybrid-GPU systems.
 
 ## Backend-Specific Scripts
 
@@ -52,6 +58,8 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
 - Intel benchmarking requires oneVPL/QSV support. On Linux, the required Intel
   media driver stack must be installed and visible to oneVPL and FFmpeg.
 - Vulkan benchmarking requires a Vulkan video decode capable driver/device.
+  The `list_vulkan_adapters` example prints the adapters exposed through
+  `vk-video` / `video-hw`.
 - VT benchmarking is macOS-only.
 
 ## Notes
@@ -67,6 +75,8 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   matches FFmpeg null-sink decode and avoids measuring pixel readback when the
   comparison is backend throughput. NV and Intel encode timing defaults to equal
   raw input where supported.
+- Vulkan metadata decode uses GPU texture decode and avoids CPU NV12 readback,
+  matching FFmpeg Vulkan null-sink decode more closely.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

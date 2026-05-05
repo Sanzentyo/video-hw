@@ -16,23 +16,22 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 
 ## Reports
 
-- Integrated: `output/benchmark-backends-h264-1777947507.md`
-- NVIDIA detail: `output/benchmark-nv-precise-h264-1777947453.md`
-- Intel detail: `output/benchmark-intel-precise-h264-1777947494.md`
-- Vulkan detail: `output/benchmark-vulkan-h264-1777947507.md`
+- Integrated: `output/benchmark-backends-h264-1777949002.md`
+- NVIDIA detail: `output/benchmark-nv-precise-h264-1777948949.md`
+- Intel detail: `output/benchmark-intel-precise-h264-1777948989.md`
+- Vulkan detail: `output/benchmark-vulkan-h264-1777949002.md`
 
 ## Result Summary
 
 | Backend | Case | Result |
 |---|---|---|
-| NVIDIA | H.264 decode | PASS: video-hw 1017.61 fps vs FFmpeg CUDA/CUVID 622.39 fps |
-| NVIDIA | H.264 encode | PASS: video-hw 188.85 fps vs FFmpeg NVENC 198.10 fps (-4.67%) |
-| Intel oneVPL | H.264 decode | PASS: video-hw 1072.69 fps vs FFmpeg QSV 1123.66 fps (-4.54%) |
-| Intel oneVPL | H.264 encode | PASS: video-hw 74.64 fps vs FFmpeg QSV 71.63 fps (+4.21%) |
-| Vulkan adapter 0 | video-hw H.264 decode/encode | PASS in the short adapter sweep |
-| Vulkan adapter 0 | FFmpeg Vulkan H.264 | FAIL: FFmpeg Vulkan decode exits 0xc0000005 and encode lacks `VK_KHR_video_encode_queue` |
-| Vulkan adapter 1 | FFmpeg Vulkan H.264 decode/encode | PASS in the short adapter sweep |
-| Vulkan adapter 1 | video-hw H.264 decode/encode | BLOCKED: vk-video reports `Vulkan adapter index 1 is not available` |
+| NVIDIA | H.264 decode | PASS: video-hw 1053.93 fps vs FFmpeg CUDA/CUVID 615.37 fps |
+| NVIDIA | H.264 encode | PASS: video-hw 198.82 fps vs FFmpeg NVENC 190.04 fps (+4.62%) |
+| Intel oneVPL | H.264 decode | PASS: video-hw 1078.85 fps vs FFmpeg QSV 1125.58 fps (-4.15%) |
+| Intel oneVPL | H.264 encode | PASS: video-hw 74.66 fps vs FFmpeg QSV 72.65 fps (+2.77%) |
+| Vulkan NVIDIA | H.264 decode | PASS: video-hw 603.68 fps vs FFmpeg Vulkan 512.49 fps |
+| Vulkan NVIDIA | H.264 encode | PASS: video-hw 112.89 fps vs FFmpeg Vulkan 89.06 fps |
+| Vulkan Intel | H.264 decode/encode | Not usable here: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode exits 0xc0000005 and encode fails with unsupported encode queue |
 
 ## Notes
 
@@ -40,7 +39,12 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   so they match FFmpeg null-sink decode instead of measuring pixel readback.
 - NV encode comparisons now default to equal raw ARGB input. The older synthetic
   vs lavfi comparison could report a false encode parity failure.
-- Vulkan is now adapter-addressable in `video-hw` options and examples, but this
-  environment exposes two adapters via `vulkaninfo` while vk-video exposes only
-  adapter 0 to `video-hw`. The integrated runner records this as a concrete
-  per-adapter failure instead of hiding it.
+- Vulkan is now adapter-addressable in `video-hw` options and examples. The
+  integrated runner matches adapters by name/device id instead of assuming
+  `video-hw` and FFmpeg use the same numeric Vulkan index.
+- `video-hw` / `vk-video` exposes the NVIDIA Vulkan video adapter on this
+  machine. Intel Vulkan is listed by `vulkaninfo`, but is not usable by either
+  `video-hw` or FFmpeg Vulkan in this environment; Intel hardware parity is
+  covered through the oneVPL/QSV backend above.
+- Vulkan metadata decode now uses GPU texture decode instead of the byte decoder
+  path, avoiding CPU NV12 readback for metadata-only benchmarks.

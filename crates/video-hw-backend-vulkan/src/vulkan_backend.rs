@@ -6,7 +6,7 @@ use ash::vk;
 use vk_video::parameters::{DecoderParameters, RateControl, VideoParameters};
 use vk_video::{
     BytesDecoder, BytesEncoder, EncodedInputChunk, Frame as VkFrame, RawFrameData, VulkanDevice,
-    VulkanInstance,
+    VulkanInstance, WgpuTexturesDecoder,
 };
 
 use crate::{
@@ -26,6 +26,39 @@ use crate::{
 const HEVC_DECODE_INFO_READBACK_NON_ZERO_FLAG: u32 = 1;
 const HEVC_DECODE_INFO_SLOT_SHIFT: u32 = 1;
 const HEVC_DECODE_INFO_PROBE_COVERED_FLAG: u32 = 1 << 31;
+
+#[derive(Debug, Clone)]
+pub struct VulkanAdapterReport {
+    pub index: usize,
+    pub name: String,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub supports_decoding: bool,
+    pub supports_encoding: bool,
+}
+
+pub fn vulkan_adapter_reports() -> Result<Vec<VulkanAdapterReport>, BackendError> {
+    let instance = VulkanInstance::new().map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to initialize Vulkan: {err}"))
+    })?;
+    let adapters = instance.iter_adapters(None).map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
+    })?;
+    Ok(adapters
+        .enumerate()
+        .map(|(index, adapter)| {
+            let info = adapter.info();
+            VulkanAdapterReport {
+                index,
+                name: info.name.clone(),
+                vendor_id: info.device_properties.vendor_id,
+                device_id: info.device_properties.device_id,
+                supports_decoding: adapter.supports_decoding(),
+                supports_encoding: adapter.supports_encoding(),
+            }
+        })
+        .collect())
+}
 
 pub struct VulkanDecoderAdapter {
     config: DecoderConfig,
@@ -74,6 +107,9 @@ impl VulkanDecoderAdapter {
         if matches!(self.config.codec, Codec::Hevc) {
             return self.decode_pending_hevc_bitstream(bitstream);
         }
+        if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+            return self.decode_pending_h264_metadata(bitstream);
+        }
         ensure_vk_codec_supported(self.config.codec, "decode")?;
         let mut decoder = create_vk_bytes_decoder(self.options.adapter_index).map_err(|err| {
             if !self.config.require_hardware && self.options.allow_software_fallback.unwrap_or(true)
@@ -102,6 +138,48 @@ impl VulkanDecoderAdapter {
             self.next_pts_90k,
             self.config.fps,
         )
+    }
+
+    fn decode_pending_h264_metadata(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
+        ensure_vk_codec_supported(self.config.codec, "decode")?;
+        let mut decoder =
+            create_vk_wgpu_textures_decoder(self.options.adapter_index).map_err(|err| {
+                if !self.config.require_hardware
+                    && self.options.allow_software_fallback.unwrap_or(true)
+                {
+                    BackendError::UnsupportedConfig(format!(
+                        "{err}; software fallback is not available in direct Vulkan backend"
+                    ))
+                } else {
+                    err
+                }
+            })?;
+        let mut decoded = decoder
+            .decode(EncodedInputChunk {
+                data: bitstream,
+                pts: None,
+            })
+            .map_err(|err| {
+                BackendError::UnsupportedConfig(format!("Vulkan metadata decode failed: {err}"))
+            })?;
+        decoded.extend(decoder.flush().map_err(|err| {
+            BackendError::UnsupportedConfig(format!("Vulkan metadata decode flush failed: {err}"))
+        })?);
+        let pts_step = decode_pts_step(self.config.fps);
+        decoded
+            .into_iter()
+            .enumerate()
+            .map(|(index, decoded_frame)| {
+                Ok(metadata_only_frame(
+                    decoded_frame.data.width() as usize,
+                    decoded_frame.data.height() as usize,
+                    Some(
+                        self.next_pts_90k
+                            .saturating_add(usize_to_i64(index).saturating_mul(pts_step)),
+                    ),
+                ))
+            })
+            .collect()
     }
 
     fn decode_pending_hevc_bitstream(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
@@ -913,6 +991,19 @@ fn create_vk_bytes_decoder(adapter_index: Option<usize>) -> Result<BytesDecoder,
         .create_bytes_decoder(DecoderParameters::default())
         .map_err(|err| {
             BackendError::UnsupportedConfig(format!("failed to create Vulkan decoder: {err}"))
+        })
+}
+
+fn create_vk_wgpu_textures_decoder(
+    adapter_index: Option<usize>,
+) -> Result<WgpuTexturesDecoder, BackendError> {
+    let device = create_vk_device(true, false, adapter_index)?;
+    device
+        .create_wgpu_textures_decoder(DecoderParameters::default())
+        .map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "failed to create Vulkan texture decoder: {err}"
+            ))
         })
 }
 
