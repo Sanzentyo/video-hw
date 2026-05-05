@@ -165,6 +165,7 @@ struct HevcEncodeSubmitExecutionConfig {
     parameter_set_sps_temporal_mvp_enabled: bool,
     parameter_mode: HevcEncodeParameterMode,
     parameter_size_mode: HevcEncodeProbeParameterSizeMode,
+    parameter_vui_safety_mode: HevcEncodeProbeParameterVuiSafetyMode,
     parameter_feedback_probe_summary: Option<String>,
     encode_h265_std_syntax_flags: vk::VideoEncodeH265StdFlagsKHR,
     coded_width: u32,
@@ -349,6 +350,13 @@ enum HevcEncodeProbeParameterSizeMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeParameterVuiSafetyMode {
+    Auto,
+    Preserve,
+    ForceOff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcEncodeProbeImageViewMode {
     YcbcrConversion,
     NoYcbcrConversion,
@@ -455,6 +463,7 @@ struct HevcEncodeSessionParameters {
     sps_temporal_mvp_enabled: bool,
     mode: HevcEncodeParameterMode,
     size_mode: HevcEncodeProbeParameterSizeMode,
+    vui_safety_mode: HevcEncodeProbeParameterVuiSafetyMode,
     feedback_probe_summary: Option<String>,
 }
 
@@ -1394,6 +1403,7 @@ fn probe_single_hevc_encode_session_format(
                             .feedback_probe_summary
                             .clone(),
                         parameter_size_mode: session_parameters.size_mode,
+                        parameter_vui_safety_mode: session_parameters.vui_safety_mode,
                         encode_h265_std_syntax_flags: candidate
                             .capability_snapshot
                             .encode_h265_std_syntax_flags,
@@ -1659,6 +1669,7 @@ fn create_hevc_encode_video_session_parameters(
                 sps_temporal_mvp_enabled: false,
                 mode: parameter_mode,
                 size_mode: HevcEncodeProbeParameterSizeMode::Coded,
+                vui_safety_mode: HevcEncodeProbeParameterVuiSafetyMode::Preserve,
                 feedback_probe_summary: Some("skipped(mode=empty-template)".to_string()),
             })
         }
@@ -1690,10 +1701,12 @@ fn create_hevc_encode_video_session_parameters_from_sample(
     let mut parameter_sets = extract_hevc_parameter_sets_annexb(&parameter_sample)
         .map_err(|err| format!("failed to extract HEVC parameter sets for encode probe: {err}"))?;
     validate_hevc_encode_probe_parameter_profile(&parameter_sets)?;
+    let parameter_vui_safety_mode = resolve_hevc_encode_probe_parameter_vui_safety_mode();
     let effective_parameter_mode = resolve_hevc_encode_parameter_mode_with_vui_safety(
         parameter_mode,
         hevc_encode_probe_parameter_sample_override_path().is_some(),
         parameter_sets.parsed_sps.vui_parameters.is_some(),
+        parameter_vui_safety_mode,
     );
     apply_hevc_encode_parameter_mode_sps_overrides(&mut parameter_sets, effective_parameter_mode);
     apply_hevc_encode_capability_sps_overrides(
@@ -1793,6 +1806,7 @@ fn create_hevc_encode_video_session_parameters_from_sample(
         sps_temporal_mvp_enabled,
         mode: effective_parameter_mode,
         size_mode: parameter_size_mode,
+        vui_safety_mode: parameter_vui_safety_mode,
         feedback_probe_summary,
     })
 }
@@ -1807,6 +1821,12 @@ fn resolve_hevc_encode_probe_parameter_size_mode() -> HevcEncodeProbeParameterSi
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SIZE_MODE";
     let mode = std::env::var(ENV_VAR).ok();
     parse_hevc_encode_probe_parameter_size_mode(mode.as_deref())
+}
+
+fn resolve_hevc_encode_probe_parameter_vui_safety_mode() -> HevcEncodeProbeParameterVuiSafetyMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_VUI_SAFETY";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_parameter_vui_safety_mode(mode.as_deref())
 }
 
 fn resolve_hevc_encode_probe_image_view_mode() -> HevcEncodeProbeImageViewMode {
@@ -1912,6 +1932,34 @@ fn hevc_encode_probe_parameter_size_mode_label(
     match mode {
         HevcEncodeProbeParameterSizeMode::Sample => "sample",
         HevcEncodeProbeParameterSizeMode::Coded => "coded",
+    }
+}
+
+fn parse_hevc_encode_probe_parameter_vui_safety_mode(
+    mode: Option<&str>,
+) -> HevcEncodeProbeParameterVuiSafetyMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("preserve") | Some("keep") | Some("keep-vui") | Some("keep_vui") | Some("ffmpeg")
+        | Some("ffmpeg-like") | Some("ffmpeg_like") => {
+            HevcEncodeProbeParameterVuiSafetyMode::Preserve
+        }
+        Some("force-off") | Some("force_off") | Some("off") | Some("disable")
+        | Some("disabled") => HevcEncodeProbeParameterVuiSafetyMode::ForceOff,
+        _ => HevcEncodeProbeParameterVuiSafetyMode::Auto,
+    }
+}
+
+fn hevc_encode_probe_parameter_vui_safety_mode_label(
+    mode: HevcEncodeProbeParameterVuiSafetyMode,
+) -> &'static str {
+    match mode {
+        HevcEncodeProbeParameterVuiSafetyMode::Auto => "auto",
+        HevcEncodeProbeParameterVuiSafetyMode::Preserve => "preserve",
+        HevcEncodeProbeParameterVuiSafetyMode::ForceOff => "force-off",
     }
 }
 
@@ -2977,14 +3025,29 @@ fn resolve_hevc_encode_parameter_mode_with_vui_safety(
     requested_mode: HevcEncodeParameterMode,
     sample_override_enabled: bool,
     sample_has_vui_parameters: bool,
+    safety_mode: HevcEncodeProbeParameterVuiSafetyMode,
 ) -> HevcEncodeParameterMode {
-    if sample_override_enabled
-        && sample_has_vui_parameters
-        && matches!(requested_mode, HevcEncodeParameterMode::Sample)
-    {
-        HevcEncodeParameterMode::SampleSpsVuiFlagOff
-    } else {
-        requested_mode
+    match safety_mode {
+        HevcEncodeProbeParameterVuiSafetyMode::Auto => {
+            if sample_override_enabled
+                && sample_has_vui_parameters
+                && matches!(requested_mode, HevcEncodeParameterMode::Sample)
+            {
+                HevcEncodeParameterMode::SampleSpsVuiFlagOff
+            } else {
+                requested_mode
+            }
+        }
+        HevcEncodeProbeParameterVuiSafetyMode::Preserve => requested_mode,
+        HevcEncodeProbeParameterVuiSafetyMode::ForceOff => {
+            if sample_has_vui_parameters
+                && matches!(requested_mode, HevcEncodeParameterMode::Sample)
+            {
+                HevcEncodeParameterMode::SampleSpsVuiFlagOff
+            } else {
+                requested_mode
+            }
+        }
     }
 }
 
@@ -3440,6 +3503,8 @@ fn probe_hevc_encode_submit_execution(
         let parameter_mode_label = hevc_encode_parameter_mode_label(config.parameter_mode);
         let parameter_size_mode_label =
             hevc_encode_probe_parameter_size_mode_label(config.parameter_size_mode);
+        let parameter_vui_safety_mode_label =
+            hevc_encode_probe_parameter_vui_safety_mode_label(config.parameter_vui_safety_mode);
         let constant_qp = resolve_hevc_encode_probe_constant_qp(selected_rate_control_mode);
         let slice_qp_delta =
             hevc_encode_probe_slice_qp_delta(constant_qp, config.parameter_set_pps_init_qp_minus26)
@@ -3510,7 +3575,7 @@ fn probe_hevc_encode_submit_execution(
                 source_picture_resource_extent_mode,
             );
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_mode={}, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_prefix_mode={}, dst_prefix_written={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_mode={}, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_prefix_mode={}, dst_prefix_written={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_vui_safety={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3537,6 +3602,7 @@ fn probe_hevc_encode_submit_execution(
             dst_range_mode_label,
             parameter_mode_label,
             parameter_size_mode_label,
+            parameter_vui_safety_mode_label,
             config.parameter_set_ids.vps_id,
             config.parameter_set_ids.sps_id,
             config.parameter_set_ids.pps_id,
@@ -5847,6 +5913,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_hevc_encode_probe_parameter_vui_safety_mode_defaults_to_auto() {
+        assert_eq!(
+            parse_hevc_encode_probe_parameter_vui_safety_mode(None),
+            HevcEncodeProbeParameterVuiSafetyMode::Auto
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_parameter_vui_safety_mode(Some("")),
+            HevcEncodeProbeParameterVuiSafetyMode::Auto
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_parameter_vui_safety_mode_accepts_aliases() {
+        for alias in ["preserve", "keep-vui", "ffmpeg"] {
+            assert_eq!(
+                parse_hevc_encode_probe_parameter_vui_safety_mode(Some(alias)),
+                HevcEncodeProbeParameterVuiSafetyMode::Preserve
+            );
+        }
+        for alias in ["force-off", "off", "disabled"] {
+            assert_eq!(
+                parse_hevc_encode_probe_parameter_vui_safety_mode(Some(alias)),
+                HevcEncodeProbeParameterVuiSafetyMode::ForceOff
+            );
+        }
+    }
+
+    #[test]
     fn parse_hevc_encode_probe_image_view_mode_defaults_to_ycbcr_conversion() {
         assert_eq!(
             parse_hevc_encode_probe_image_view_mode(None),
@@ -6086,7 +6180,8 @@ mod tests {
             resolve_hevc_encode_parameter_mode_with_vui_safety(
                 HevcEncodeParameterMode::Sample,
                 true,
-                true
+                true,
+                HevcEncodeProbeParameterVuiSafetyMode::Auto
             ),
             HevcEncodeParameterMode::SampleSpsVuiFlagOff
         );
@@ -6094,7 +6189,8 @@ mod tests {
             resolve_hevc_encode_parameter_mode_with_vui_safety(
                 HevcEncodeParameterMode::Sample,
                 false,
-                true
+                true,
+                HevcEncodeProbeParameterVuiSafetyMode::Auto
             ),
             HevcEncodeParameterMode::Sample
         );
@@ -6102,7 +6198,8 @@ mod tests {
             resolve_hevc_encode_parameter_mode_with_vui_safety(
                 HevcEncodeParameterMode::Sample,
                 true,
-                false
+                false,
+                HevcEncodeProbeParameterVuiSafetyMode::Auto
             ),
             HevcEncodeParameterMode::Sample
         );
@@ -6110,9 +6207,28 @@ mod tests {
             resolve_hevc_encode_parameter_mode_with_vui_safety(
                 HevcEncodeParameterMode::SampleSpsNoVuiFlagOn,
                 true,
-                true
+                true,
+                HevcEncodeProbeParameterVuiSafetyMode::Auto
             ),
             HevcEncodeParameterMode::SampleSpsNoVuiFlagOn
+        );
+        assert_eq!(
+            resolve_hevc_encode_parameter_mode_with_vui_safety(
+                HevcEncodeParameterMode::Sample,
+                true,
+                true,
+                HevcEncodeProbeParameterVuiSafetyMode::Preserve
+            ),
+            HevcEncodeParameterMode::Sample
+        );
+        assert_eq!(
+            resolve_hevc_encode_parameter_mode_with_vui_safety(
+                HevcEncodeParameterMode::Sample,
+                false,
+                true,
+                HevcEncodeProbeParameterVuiSafetyMode::ForceOff
+            ),
+            HevcEncodeParameterMode::SampleSpsVuiFlagOff
         );
     }
 

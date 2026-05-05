@@ -67,6 +67,7 @@ Optional environment variables:
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_HEIGHT`
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_FPS`
 - `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE`
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_VUI_SAFETY=auto|preserve|force-off`
 
 On the RTX 5070 Ti Laptop GPU, the HEVC encode feedback query pool now requires
 an explicit HEVC video profile in the query pool `pNext` chain; without it,
@@ -152,25 +153,33 @@ fails at `vkEndCommandBuffer`.
 As an additional check, FFmpeg `hevc_vulkan` on Vulkan adapter 1 generated a
 320x180 Annex-B HEVC stream successfully; using that generated stream as
 `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH` also reaches
-`parameter_set_coded=320x180` / `parameter_set_coded_match=true`, but still
-fails at `vkEndCommandBuffer`.
+`parameter_set_coded=320x180` / `parameter_set_coded_match=true`. With the
+previous default VUI safety behavior this still forced the effective parameter
+mode to `sample-sps-vui-flag-off` and failed at `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_VUI_SAFETY=preserve` keeps the
+FFmpeg-generated SPS VUI intact; under the FFmpeg-style 320x180 probe
+combination (`parameter_mode=sample`, `parameter_size_mode=sample`,
+`image_view_mode=no-ycbcr`, `dst_prefix=256`,
+`dst_prefix_mode=parameter-sample`, `control_mode=ffmpeg`,
+`begin_pnext_mode=ffmpeg`, `begin_reference_slot_mode=ffmpeg`,
+`reference_slot_pointer_mode=ffmpeg`, `dpb_barrier_mode=none`,
+`source_picture_resource_extent_mode=coded`,
+`session_h265_create_info_mode=ffmpeg`, `dst_range_mode=ffmpeg`) the NVIDIA
+live probe now reports `encode_submit_execution_probe: Ready` with
+`bytes_written=47` and `head16=0000000140010c01ffff016000000300`.
 `VIDEO_HW_VULKAN_HEVC_ENCODE_IMAGE_VIEW_MODE=no-ycbcr` can omit
 `VkSamplerYcbcrConversionInfo` from encode image views; image view creation
-succeeds in this mode, but the FFmpeg-generated-parameter probe still fails at
-`vkEndCommandBuffer`.
+succeeds in this mode, and it is part of the successful FFmpeg-generated
+parameter probe above.
 `VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_MODE=parameter-sample` can write the
 parameter sample bytes into the externally encoded prefix area before
 `dstBufferOffset`; writing the first 256 bytes of the FFmpeg-generated 320x180
-stream still fails at `vkEndCommandBuffer`.
-The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
-reference-slot pointer, and combined FFmpeg-style probes all still fail at
-`vkEndCommandBuffer`, so the remaining blocker is after those picture resource
-/ image view / allocation / syntax-flag / output offset / zero-reference pointer
-/ fixed-QP / quality-level / source-upload / source-resource-extent /
-session-H265-create-info / begin-rate-control-pNext / dst-range-reserve /
-parameter-size / FFmpeg-generated-parameter-sample / image-view-pNext parity
-points / externally-encoded-prefix bytes. More complete HEVC command/resource
-wiring is still required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+stream is also part of the successful submit diagnostic above. This does not
+yet prove production HEVC encode support: the probe currently observes a
+non-empty driver output buffer, but it does not yet write a complete stream,
+decode it with FFmpeg, or compare decoded frames by MSE/PSNR. More complete HEVC
+command/resource wiring and bitstream validation are still required before
+enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 

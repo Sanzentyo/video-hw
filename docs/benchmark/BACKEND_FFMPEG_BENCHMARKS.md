@@ -107,11 +107,15 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   `dstBufferRange` like FFmpeg, can override sample-derived SPS dimensions to
   the probe coded size, can omit encode image-view YCbCr-conversion pNext for
   A/B probing, can write parameter-sample bytes into the externally encoded
-  prefix area, and maps CBR/VBR slice `constant_qp` / `slice_qp_delta` to
-  FFmpeg's shape. Session creation now also
-  uses the device max coded extent like FFmpeg, and profile pNext chain ordering
-  now matches FFmpeg's H.265-profile-before-usage shape. Those parity
-  improvements do not yet unblock NVIDIA HEVC encode submit on this driver.
+  prefix area, can preserve SPS VUI from an FFmpeg-generated parameter sample,
+  and maps CBR/VBR slice `constant_qp` / `slice_qp_delta` to FFmpeg's shape.
+  Session creation now also uses the device max coded extent like FFmpeg, and
+  profile pNext chain ordering now matches FFmpeg's H.265-profile-before-usage
+  shape. With an FFmpeg `hevc_vulkan` 320x180 parameter sample and
+  `parameter_vui_safety=preserve`, the ignored NVIDIA live probe reaches
+  `Ready(bytes_written=47)`. This is only a submit diagnostic;
+  `VulkanEncoderAdapter` still stays disabled for HEVC encode until the
+  produced bitstream is written, decoded by FFmpeg, and quality-checked.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.
