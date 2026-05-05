@@ -1,6 +1,6 @@
 # video-hw Status
 
-更新日: 2026-03-08
+更新日: 2026-05-05
 
 ## 1. 現在の構成（実装実態）
 
@@ -34,13 +34,12 @@
 - `EncodeSession::submit` は現状 ARGB 系のみ受理（`Nv12/Rgb24` は `InvalidInput`）
 
 2. transform 実装差
-- `VtTransformAdapter` は現状 pass-through 実装（GPU transform 実体は未接続）
+- `VtTransformAdapter` は Metal compute 優先 + CPU worker fallback の NV12->RGB 経路を持つ
 - VT decode callback は `output_mode != Metadata` 時に BGRA pixel buffer から ARGB payload を抽出可能
-- `NvidiaTransformAdapter` の NV12->RGB worker 経路はテスト条件での検証中心
+- `NvidiaTransformAdapter` は CUDA 優先 + CPU worker fallback、VT は Metal 優先 + CPU worker fallback で transform adapter の運用形を揃えている
 
 3. 配布・運用整備
-- CI 導入は後回し（現時点で `.github/workflows` は未運用）
-- backend 別 CI（VT 実機 / NVIDIA 実機）の分離運用は未整備
+- GitHub CI は導入しない方針。backend 別の確認は実機で手動コマンドを実行して記録する
 - NVIDIA backend は `nvidia-video-codec-sdk`（ラッパー）経由で SDK を利用
 - SDK 本体は各利用者が別途取得し、環境変数でパス指定する前提
 
@@ -64,6 +63,9 @@
   - HEVC hw_optional chunk_1048576: 229.68-237.62 ms
   - HEVC hw_required chunk_1048576: 223.12-232.26 ms
 - `cargo deny check licenses advisories bans sources`: pass
+- `cargo check --workspace --all-targets --all-features`: pass（2026-05-05, macOS）
+- `cargo test -p video-hw-backend-vt --features backend-vt -- --nocapture`: pass（22 passed, 2026-05-05）
+- `cargo test -p video-hw --features backend-vt e2e_vt_backend -- --nocapture`: pass（5 passed, 2026-05-05）
 
 注記:
 - `backend-vt` は target 条件上、非 macOS 環境では VT 本体テストは有効化されない
@@ -79,7 +81,7 @@
 - encode 入力型（ARGB 以外）の扱いを `unstable` か明示 reject のいずれかに整理
 
 3. 配布準備
-- CI の導入タイミング見直し（当面は手動検証を継続）
+- GitHub CI は不要。NV/Intel/Vulkan/VT の backend 別手動 test/bench 手順と結果文書を維持する
 - NVIDIA 依存の配布ポリシー（同梱可否・再配布条件）の明文化強化
 - `cargo-deny` 運用の継続（依存更新時の定期実行）
 

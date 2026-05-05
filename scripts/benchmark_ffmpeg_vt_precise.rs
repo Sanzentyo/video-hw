@@ -107,6 +107,12 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     include_internal_metrics: bool,
+
+    #[arg(long)]
+    vt_enable_pipeline_scheduler: Option<bool>,
+
+    #[arg(long)]
+    vt_pipeline_queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +366,16 @@ fn main() -> Result<()> {
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(&mut report, "verify: {}", args.verify)?;
     writeln!(&mut report, "internal_metrics: {}", args.include_internal_metrics)?;
+    writeln!(
+        &mut report,
+        "vt_enable_pipeline_scheduler: {:?}",
+        args.vt_enable_pipeline_scheduler
+    )?;
+    writeln!(
+        &mut report,
+        "vt_pipeline_queue_capacity: {:?}",
+        args.vt_pipeline_queue_capacity
+    )?;
     writeln!(&mut report)?;
     writeln!(
         &mut report,
@@ -589,13 +605,11 @@ fn run_case(
                 "--chunk-bytes",
                 &args.chunk_bytes.to_string(),
             ]);
-            if args.include_internal_metrics {
-                cmd.env("VIDEO_HW_VT_METRICS", "1");
-            }
+            apply_vt_options(&mut cmd, args);
             run_timed_command(cmd)
         }
         Case::VideoHwEncode => {
-            let mut cmd = if args.equal_raw_input {
+            let cmd = if args.equal_raw_input {
                 let mut c = Command::new(encode_raw_bin);
                 c.args([
                     "--backend",
@@ -615,6 +629,7 @@ fn run_case(
                     "--output",
                     &video_hw_output.to_string_lossy(),
                 ]);
+                apply_vt_options(&mut c, args);
                 c
             } else {
                 let mut c = Command::new(encode_bin);
@@ -630,11 +645,9 @@ fn run_case(
                     "--output",
                     &video_hw_output.to_string_lossy(),
                 ]);
+                apply_vt_options(&mut c, args);
                 c
             };
-            if args.include_internal_metrics {
-                cmd.env("VIDEO_HW_VT_METRICS", "1");
-            }
             run_timed_command(cmd)
         }
         Case::FfmpegDecode => {
@@ -704,6 +717,20 @@ fn run_case(
             }
             run_timed_command(cmd)
         }
+    }
+}
+
+fn apply_vt_options(cmd: &mut Command, args: &Args) {
+    if args.include_internal_metrics {
+        cmd.args(["--vt-report-metrics", "true"]);
+    }
+    if let Some(enabled) = args.vt_enable_pipeline_scheduler {
+        cmd.arg("--vt-enable-pipeline-scheduler")
+            .arg(enabled.to_string());
+    }
+    if let Some(capacity) = args.vt_pipeline_queue_capacity {
+        cmd.arg("--vt-pipeline-queue-capacity")
+            .arg(capacity.to_string());
     }
 }
 

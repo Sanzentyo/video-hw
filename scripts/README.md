@@ -60,8 +60,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --re
 - 生成レポート: `output/benchmark-vt-precise-<codec>-<epoch>.md`
 - `--verify` で `ffprobe` + `ffmpeg -v error` 検証を実行する。
 - `--equal-raw-input` で `video-hw` / `ffmpeg` encode に同一 raw ARGB 入力を供給する。
-- `--include-internal-metrics` で `VIDEO_HW_VT_METRICS=1` を有効化し、
+- `--include-internal-metrics` で `--vt-report-metrics true` を example CLI へ渡し、
   `Internal Metrics (video-hw)` セクションを NV 精密レポートと同形式で出力する。
+- VT backend 固有パラメータを変える場合は
+  `--vt-enable-pipeline-scheduler <true|false>` / `--vt-pipeline-queue-capacity <N>` を使用する。
 
 ### 5) VideoToolbox 精密ベンチ定常運用（直列実行）
 
@@ -71,6 +73,7 @@ cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
 
 - 既定は `warmup=1`, `repeat=3`, `verify=true`, `equal-raw-input=true`, `include-internal-metrics=true`
 - H264 と HEVC を同時ではなく順番に実行する
+- `--vt-enable-pipeline-scheduler` / `--vt-pipeline-queue-capacity` は各 codec の精密ベンチへ引き渡す
 
 ### 6) Intel 精密ベンチ（反復 + 統計）
 

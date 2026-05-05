@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     AnyDecodeSession, Backend, BackendDecoderOptions, BackendKind, BitstreamInput, Codec,
-    DecodeOutputMode, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
+    DecodeOutputMode, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions, VtDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -24,6 +24,12 @@ struct Args {
     require_hardware: bool,
     #[arg(long)]
     nv_report_metrics: Option<bool>,
+    #[arg(long)]
+    vt_report_metrics: Option<bool>,
+    #[arg(long)]
+    vt_enable_pipeline_scheduler: Option<bool>,
+    #[arg(long)]
+    vt_pipeline_queue_capacity: Option<usize>,
     #[arg(long, default_value_t = false)]
     intel_force_software: bool,
 }
@@ -46,6 +52,12 @@ fn main() -> Result<()> {
     config.backend_options = if backend_is_nvidia(resolved_backend) {
         BackendDecoderOptions::Nvidia(NvidiaDecoderOptions {
             report_metrics: args.nv_report_metrics,
+        })
+    } else if backend_is_vt(resolved_backend) {
+        BackendDecoderOptions::VideoToolbox(VtDecoderOptions {
+            report_metrics: args.vt_report_metrics,
+            enable_pipeline_scheduler: args.vt_enable_pipeline_scheduler,
+            pipeline_queue_capacity: args.vt_pipeline_queue_capacity,
         })
     } else if backend_is_intel(resolved_backend) {
         BackendDecoderOptions::Intel(IntelDecoderOptions {
@@ -143,6 +155,16 @@ fn backend_is_intel(backend: BackendKind) -> bool {
     any(target_os = "linux", target_os = "windows")
 )))]
 fn backend_is_intel(_backend: BackendKind) -> bool {
+    false
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+fn backend_is_vt(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::VideoToolbox)
+}
+
+#[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
+fn backend_is_vt(_backend: BackendKind) -> bool {
     false
 }
 

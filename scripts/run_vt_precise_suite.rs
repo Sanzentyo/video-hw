@@ -33,6 +33,12 @@ struct Args {
 
     #[arg(long, default_value_t = true)]
     include_internal_metrics: bool,
+
+    #[arg(long)]
+    vt_enable_pipeline_scheduler: Option<bool>,
+
+    #[arg(long)]
+    vt_pipeline_queue_capacity: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -70,6 +76,14 @@ fn run_one(codec: &str, args: &Args) -> Result<()> {
     }
     if args.include_internal_metrics {
         cmd.arg("--include-internal-metrics");
+    }
+    if let Some(enabled) = args.vt_enable_pipeline_scheduler {
+        cmd.arg("--vt-enable-pipeline-scheduler")
+            .arg(enabled.to_string());
+    }
+    if let Some(capacity) = args.vt_pipeline_queue_capacity {
+        cmd.arg("--vt-pipeline-queue-capacity")
+            .arg(capacity.to_string());
     }
 
     println!("[vt-suite] start codec={codec}");

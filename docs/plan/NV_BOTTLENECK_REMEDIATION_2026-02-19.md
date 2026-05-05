@@ -132,12 +132,12 @@
   - 実装: generation 同期（`NvEncoderAdapter::sync_pipeline_generation`）
 - [x] NV-P1-005: `TransformLayer` 導入（RGB/resize を非同期 worker 化、GPU優先・CPU fallback）
   - 実装: `PipelineScheduler` が `BackendTransformAdapter` を駆動し、KeepNative fast-path / NV12->RGB 非同期 reap を実行
-- [ ] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
+- [x] NV-P1-006: backend adapter 差分実装（NVIDIA: CUDA変換、VT: Metal/CoreImage 経路）
   - Phase 1 実装済み: `src/backend_transform_adapter.rs`
     - 共通 `BackendTransformAdapter` trait
     - `DecodedUnit`（`MetadataOnly | Nv12Cpu | RgbCpu`）
     - NVIDIA 側: KeepNative fast-path + NV12->RGB 非同期 dispatch（`TransformDispatcher` 連携）
-    - VT 側: パススルー stub（Metal/CoreImage 実装は未着手）
+    - VT 側: Metal compute 優先 + CPU worker fallback の NV12->RGB 実経路を実装
   - Phase 2（部分）実装済み:
     - `src/cuda_transform.rs` を追加（NVRTC + CUDA kernel による NV12->RGB）
     - `NvidiaTransformAdapter` で CUDA 経路を優先使用し、失敗時のみ CPU worker fallback
@@ -152,8 +152,9 @@
     - encode metrics に copy 計測（`input_copy_bytes`, `output_copy_bytes`）を追加
   - 契約文書:
     - `docs/plan/NV_RAW_INPUT_ZERO_COPY_CONTRACT_2026-02-19.md`
-  - 方針（保留）:
-    - VT 実体（Metal/CoreImage）は別セッションで NV 同等水準まで引き上げる
+  - 追補（2026-05-05）:
+    - `crates/video-hw-backend-vt` に `VtTransformAdapter` 実体、VT metrics/options、pipeline scheduler 接続、session generation 制御を追加
+    - `decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe` は VT backend options を CLI から指定可能
     - 実行計画: `docs/plan/VT_PARITY_EXECUTION_PLAN_2026-02-19.md`
 - [ ] NV-P2-001: マルチストリーム時の backpressure 制御としきい値調整
 - [ ] NV-P2-002: canary + rollback 運用手順書（SLO/アラート）整備
@@ -161,9 +162,8 @@
 ## 9.1 将来タスク（保留・次回以降）
 
 - `NV-P1-002` safe lifetime 追加最適化（本セッションでは打ち止め）
-- `NV-P1-006` VT 実体（Metal/CoreImage）の実装完了
 - 品質比較（PSNR/SSIM）と bitrate 比較の自動化
-- GPU ランナー常設 CI（Windows + NVIDIA）
+- 実機別の手動 test/bench 結果更新（GitHub CI は導入しない）
 - `NV-P2-001` / `NV-P2-002` の運用段階タスク
 
 注記（2026-02-19 再計測）:

@@ -56,6 +56,12 @@ VideoToolbox backend へ同等レベルで適用する。
 - `BackendDecoderOptions::VideoToolbox` / `BackendEncoderOptions::VideoToolbox` を追加し、VT も metrics / pipeline scheduler / queue capacity を config から指定できる。環境変数 `VIDEO_HW_VT_METRICS` / `VIDEO_HW_VT_PIPELINE` / `VIDEO_HW_VT_PIPELINE_QUEUE` は fallback として維持する。
 - 短時間 smoke として `benchmark_ffmpeg_vt_precise.rs --warmup 0 --repeat 1 --frame-count 30 --verify --equal-raw-input` を h264/hevc で通過。
 
+### 2026-05-05 追記
+
+- `decode_annexb` / `encode_synthetic` / `encode_raw_argb` / `encode_streaming_probe` は `--vt-report-metrics` / `--vt-enable-pipeline-scheduler` / `--vt-pipeline-queue-capacity` を受け取り、NV の CLI option 運用と揃える。
+- `benchmark_ffmpeg_vt_precise.rs` / `run_vt_precise_suite.rs` は環境変数だけに依存せず、VT backend options を example CLI へ渡せる。
+- macOS 実測: `cargo check --workspace --all-targets --all-features`、`cargo test -p video-hw-backend-vt --features backend-vt -- --nocapture`、`cargo test -p video-hw --features backend-vt e2e_vt_backend -- --nocapture` は pass。
+
 ## 5. 実装フェーズ（VTセッション）
 
 1. VT-P2: Transform 実体化（完了）
@@ -68,7 +74,8 @@ VideoToolbox backend へ同等レベルで適用する。
 
 3. VT-P5: 検証固定化
 - ffmpeg VT 比較を `warmup/repeat/verify/equal-raw-input` で定常化
-- soak test を定期実行できるスクリプトを整備
+- `run_vt_precise_suite.rs` で h264/hevc の直列 suite を維持
+- soak test は GitHub CI ではなく実機手動 bench として運用する
 
 ## 6. 受け入れ基準
 

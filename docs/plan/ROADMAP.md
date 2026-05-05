@@ -20,9 +20,9 @@
 2. API 契約の明確化
 - decode 出力（Metadata中心）と encode 入力（ARGB中心）の現行制約を明示する
 
-3. 配布/CI 基盤
+3. 配布/運用基盤
 - ライセンスファイルと依存ポリシーを整備
-- CI は後段で導入し、現時点は手動検証を継続
+- GitHub CI は導入しない。backend 別 test/bench は実機で手動実行し、結果を docs に記録する
 
 ## 直近4週間（短期計画）
 
@@ -31,7 +31,7 @@
 - Week 1: docs baseline fix
 - Week 2: API contract clarification
 - Week 3: licensing and distribution hygiene
-- Week 4: bench/テスト再測定と docs 反映（CI 導入は後段）
+- Week 4: bench/テスト再測定と docs 反映（GitHub CI は対象外）
 
 ## 中期（2026 Q2）
 
