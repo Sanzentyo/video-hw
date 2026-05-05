@@ -1423,6 +1423,15 @@ fn probe_hevc_decode_submit_execution(
             .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
             .push_next(&mut decode_h265_profile)
             .push_next(&mut decode_usage);
+        let session_max_dpb_slots = hevc_decode_session_limit_from_env(
+            "VIDEO_HW_VULKAN_HEVC_DECODE_SESSION_DPB_SLOTS",
+            capability_snapshot.max_dpb_slots,
+        );
+        let session_max_active_reference_pictures = hevc_decode_session_limit_from_env_allow_zero(
+            "VIDEO_HW_VULKAN_HEVC_DECODE_SESSION_ACTIVE_REFS",
+            capability_snapshot.max_active_reference_pictures,
+        )
+        .min(session_max_dpb_slots);
         let create_info = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(queue_family_index.0)
             .video_profile(&profile)
@@ -1432,8 +1441,8 @@ fn probe_hevc_decode_submit_execution(
                 height: parameter_sets.coded_height,
             })
             .reference_picture_format(output_format)
-            .max_dpb_slots(capability_snapshot.max_dpb_slots.max(1))
-            .max_active_reference_pictures(capability_snapshot.max_active_reference_pictures.max(1))
+            .max_dpb_slots(session_max_dpb_slots)
+            .max_active_reference_pictures(session_max_active_reference_pictures)
             .std_header_version(&capability_snapshot.std_header_version);
         // SAFETY: All pointers in `create_info` reference stack data valid for this call.
         let session_create_result = unsafe {
@@ -2986,6 +2995,25 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     } else {
         value.saturating_add(alignment.saturating_sub(remainder))
     }
+}
+
+fn hevc_decode_session_limit_from_env(env_key: &str, capability_limit: u32) -> u32 {
+    let default_limit = capability_limit.max(1);
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(default_limit))
+        .unwrap_or(default_limit)
+}
+
+fn hevc_decode_session_limit_from_env_allow_zero(env_key: &str, capability_limit: u32) -> u32 {
+    let default_limit = capability_limit.max(1);
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.min(default_limit))
+        .unwrap_or(default_limit)
 }
 
 fn hevc_experimental_dpb_mode() -> HevcExperimentalDpbMode {
@@ -6135,6 +6163,58 @@ mod tests {
             parse_hevc_experimental_dpb_mode(Some("on")),
             HevcExperimentalDpbMode::On
         );
+    }
+
+    #[test]
+    fn hevc_decode_session_limit_from_env_defaults_and_clamps() {
+        const ENV_KEY: &str = "VIDEO_HW_TEST_HEVC_DECODE_SESSION_LIMIT";
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "4");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 4);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "99");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "0");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
+    }
+
+    #[test]
+    fn hevc_decode_session_limit_allow_zero_accepts_zero_override() {
+        const ENV_KEY: &str = "VIDEO_HW_TEST_HEVC_DECODE_SESSION_LIMIT_ZERO";
+        unsafe {
+            std::env::set_var(ENV_KEY, "0");
+        }
+        assert_eq!(
+            hevc_decode_session_limit_from_env_allow_zero(ENV_KEY, 15),
+            0
+        );
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "99");
+        }
+        assert_eq!(
+            hevc_decode_session_limit_from_env_allow_zero(ENV_KEY, 15),
+            15
+        );
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
     }
 
     #[test]
