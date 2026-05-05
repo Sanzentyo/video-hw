@@ -128,12 +128,16 @@ default now matches FFmpeg's "no rate control settings" fallback of 18, with
 The source image is now initialized through a staging-buffer NV12 upload instead
 of a clear-only path, so the probe no longer feeds a synthetic unfilled
 multi-plane image to encode.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_SOURCE_PICTURE_RESOURCE_EXTENT_MODE=coded|image-aligned`
+can also switch `srcPictureResource.codedExtent` independently; both 320x180 and
+320x192 source resource extents still fail at `vkEndCommandBuffer` in the
+FFmpeg-style 320x180 probe.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
 / image view / allocation / syntax-flag / output offset / zero-reference pointer
-/ fixed-QP / source-upload parity points. More complete HEVC command/resource
-wiring is still required before enabling `Codec::Hevc` in
+/ fixed-QP / source-upload / source-resource-extent parity points. More complete
+HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
 `VulkanEncoderAdapter`.
 
 ## Notes

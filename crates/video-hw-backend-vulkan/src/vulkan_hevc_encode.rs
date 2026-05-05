@@ -199,6 +199,8 @@ struct HevcEncodePreEncodeProbeResources {
     source_image_view: vk::ImageView,
     source_upload_buffer: vk::Buffer,
     source_upload_buffer_size: u64,
+    source_upload_width: u32,
+    source_upload_height: u32,
     dpb_image: vk::Image,
     dpb_image_view: vk::ImageView,
     source_picture_resource_width: u32,
@@ -2181,6 +2183,13 @@ fn resolve_hevc_encode_probe_picture_resource_extent_mode()
     parse_hevc_encode_probe_picture_resource_extent_mode(mode.as_deref())
 }
 
+fn resolve_hevc_encode_probe_source_picture_resource_extent_mode()
+-> HevcEncodeProbePictureResourceExtentMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_SOURCE_PICTURE_RESOURCE_EXTENT_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_picture_resource_extent_mode(mode.as_deref())
+}
+
 fn resolve_hevc_encode_probe_primary_mode() -> HevcEncodePrimaryProbeMode {
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_PRIMARY_MODE";
     let mode = std::env::var(ENV_VAR).ok();
@@ -3156,14 +3165,30 @@ fn probe_hevc_encode_submit_execution(
             };
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
+        let source_picture_resource_extent_mode =
+            resolve_hevc_encode_probe_source_picture_resource_extent_mode();
+        let (source_picture_resource_width, source_picture_resource_height) =
+            match source_picture_resource_extent_mode {
+                HevcEncodeProbePictureResourceExtentMode::Coded => {
+                    (config.coded_width, config.coded_height)
+                }
+                HevcEncodeProbePictureResourceExtentMode::ImageAligned => {
+                    (image_width, image_height)
+                }
+            };
+        let source_picture_resource_extent_mode_label =
+            hevc_encode_probe_picture_resource_extent_mode_label(
+                source_picture_resource_extent_mode,
+            );
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
             image_height,
-            image_width,
-            image_height,
+            source_picture_resource_width,
+            source_picture_resource_height,
+            source_picture_resource_extent_mode_label,
             picture_resource_coded_width,
             picture_resource_coded_height,
             picture_resource_extent_mode_label,
@@ -3410,10 +3435,12 @@ fn probe_hevc_encode_submit_execution(
             source_image_view,
             source_upload_buffer,
             source_upload_buffer_size,
+            source_upload_width: image_width,
+            source_upload_height: image_height,
             dpb_image,
             dpb_image_view,
-            source_picture_resource_width: image_width,
-            source_picture_resource_height: image_height,
+            source_picture_resource_width,
+            source_picture_resource_height,
             picture_resource_coded_width,
             picture_resource_coded_height,
             dst_buffer,
@@ -3794,10 +3821,12 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         source_upload_buffer,
                         source_upload_buffer_size,
+                        source_upload_width: image_width,
+                        source_upload_height: image_height,
                         dpb_image,
                         dpb_image_view,
-                        source_picture_resource_width: image_width,
-                        source_picture_resource_height: image_height,
+                        source_picture_resource_width,
+                        source_picture_resource_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
@@ -3830,10 +3859,12 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         source_upload_buffer,
                         source_upload_buffer_size,
+                        source_upload_width: image_width,
+                        source_upload_height: image_height,
                         dpb_image,
                         dpb_image_view,
-                        source_picture_resource_width: image_width,
-                        source_picture_resource_height: image_height,
+                        source_picture_resource_width,
+                        source_picture_resource_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
@@ -3866,10 +3897,12 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         source_upload_buffer,
                         source_upload_buffer_size,
+                        source_upload_width: image_width,
+                        source_upload_height: image_height,
                         dpb_image,
                         dpb_image_view,
-                        source_picture_resource_width: image_width,
-                        source_picture_resource_height: image_height,
+                        source_picture_resource_width,
+                        source_picture_resource_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
@@ -4372,8 +4405,8 @@ fn run_hevc_encode_pre_encode_probe(
         });
     let source_upload_regions = build_hevc_encode_source_upload_regions(
         vk::Format::G8_B8R8_2PLANE_420_UNORM,
-        resources.source_picture_resource_width,
-        resources.source_picture_resource_height,
+        resources.source_upload_width,
+        resources.source_upload_height,
     )?
     .1;
     let source_upload_buffer_barrier = vk::BufferMemoryBarrier2::default()
