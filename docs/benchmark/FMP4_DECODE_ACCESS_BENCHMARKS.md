@@ -99,3 +99,20 @@ The result matches the current implementation model: contiguous decode is
 efficient when callers use the streaming range API; exact-frame sparse access is
 minimal at the encoded byte-cache layer only unless callers opt into
 `CachedFrameDecoder`.
+
+## macOS / VideoToolbox Smoke
+
+On this macOS machine, a 30-frame H.264 run against
+`sample-videos/foreman_cif.mp4` with `--backend auto --reference sequential-baseline`
+produced `output/benchmark-fmp4-decode-access-1777946150.md`.
+
+Key numbers:
+
+- `decode_range_iter_contiguous`: 0.016 s, 30 encoded sample reads, 88 KB
+  payload read, 29/1 byte-cache hit/miss.
+- `decode_sample_sequential_no_cache`: 0.314 s, 465 encoded sample reads,
+  1.63 MB payload read.
+- `cached_decode_sample_sequential`: 23 decoded cache hits and 7 misses for
+  30 requests, 168 encoded sample reads, 63 inserts, 0 evictions.
+- `cached_decode_sample_ping_pong`: 53 decoded cache hits for 60 requests,
+  showing expected reuse when recently decoded frames are revisited.
