@@ -664,20 +664,12 @@ pub(crate) fn estimate_hevc_access_unit_count(bitstream: &[u8]) -> Result<usize,
     Ok(extract_hevc_access_unit_headers(bitstream)?.len())
 }
 
+#[cfg(test)]
 pub(crate) fn probe_hevc_decode_session_bootstrap(
     bitstream: &[u8],
 ) -> Result<HevcDecodeSessionBootstrap, String> {
-    probe_hevc_decode_session_bootstrap_with_access_unit_limit(bitstream, None)
-}
-
-pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
-    bitstream: &[u8],
-    submit_probe_access_unit_limit: Option<usize>,
-) -> Result<HevcDecodeSessionBootstrap, String> {
     probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
-        bitstream,
-        submit_probe_access_unit_limit,
-        None,
+        bitstream, None, None,
     )
 }
 

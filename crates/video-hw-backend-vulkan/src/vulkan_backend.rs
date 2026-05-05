@@ -17,7 +17,7 @@ use crate::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
         HevcVideoSessionCreateProbe, HevcVideoSessionParametersCreateProbe,
         extract_hevc_access_unit_headers, extract_hevc_parameter_sets_annexb,
-        probe_hevc_decode_prerequisites, probe_hevc_decode_session_bootstrap,
+        probe_hevc_decode_prerequisites,
         probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index,
     },
     vulkan_hevc_encode::{
@@ -209,6 +209,7 @@ impl VulkanDecoderAdapter {
             .map_err(|_| {
                 BackendError::UnsupportedConfig(hevc_decode_blocker_message_with_bitstream(
                     bitstream,
+                    physical_device_index,
                 ))
             })?;
         let (
@@ -250,13 +251,13 @@ impl VulkanDecoderAdapter {
             HevcDecodeSubmitExecutionProbe::Failed(err) => {
                 return Err(BackendError::UnsupportedConfig(format!(
                     "Vulkan HEVC decode submit execution failed: {err}; {}",
-                    hevc_decode_blocker_message_with_bitstream(bitstream)
+                    hevc_decode_blocker_message_with_bitstream(bitstream, physical_device_index)
                 )));
             }
             HevcDecodeSubmitExecutionProbe::Skipped(reason) => {
                 return Err(BackendError::UnsupportedConfig(format!(
                     "Vulkan HEVC decode submit execution was skipped: {reason}; {}",
-                    hevc_decode_blocker_message_with_bitstream(bitstream)
+                    hevc_decode_blocker_message_with_bitstream(bitstream, physical_device_index)
                 )));
             }
         };
@@ -665,7 +666,10 @@ fn resolve_hevc_decode_physical_device_index() -> Option<usize> {
         .and_then(|value| value.trim().parse().ok())
 }
 
-fn hevc_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
+fn hevc_decode_blocker_message_with_bitstream(
+    bitstream: &[u8],
+    physical_device_index: Option<usize>,
+) -> String {
     let mut message = hevc_decode_blocker_message();
     match extract_hevc_parameter_sets_annexb(bitstream) {
         Ok(parameter_sets) => {
@@ -677,7 +681,11 @@ fn hevc_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 parameter_sets.coded_width,
                 parameter_sets.coded_height
             ));
-            match probe_hevc_decode_session_bootstrap(bitstream) {
+            match probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                bitstream,
+                None,
+                physical_device_index,
+            ) {
                 Ok(bootstrap) => {
                     let formats = bootstrap
                         .decode_output_formats
@@ -1276,7 +1284,7 @@ mod tests {
 
     #[test]
     fn hevc_decode_blocker_message_with_bitstream_appends_parameter_set_status() {
-        let message = hevc_decode_blocker_message_with_bitstream(&[0_u8, 1, 2, 3]);
+        let message = hevc_decode_blocker_message_with_bitstream(&[0_u8, 1, 2, 3], None);
         assert!(message.contains("Vulkan HEVC decode initialization failed"));
         assert!(message.contains("parameter-set extraction failed"));
     }
