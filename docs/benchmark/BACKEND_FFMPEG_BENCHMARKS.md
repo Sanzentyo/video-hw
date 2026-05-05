@@ -89,11 +89,16 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   raw input where supported.
 - Vulkan metadata decode uses GPU texture decode and avoids CPU NV12 readback,
   matching FFmpeg Vulkan null-sink decode more closely.
-- Vulkan HEVC encode is still reported as unavailable by `video-hw` on this
-  environment. The backend contains an ignored live probe for driver/session
-  diagnostics, but `VulkanEncoderAdapter` must not claim HEVC encode support
-  until the direct Vulkan `cmdEncodeVideoKHR` path produces a non-empty
-  bitstream and passes FFmpeg decode verification. The current probe also maps
+- Vulkan HEVC encode now has an experimental `VulkanEncoderAdapter` production
+  path on the tested NVIDIA adapter. It uses FFmpeg `hevc_vulkan` to generate a
+  same-size parameter/header sample, prepends those leading non-VCL NAL units to
+  the direct Vulkan `cmdEncodeVideoKHR` slice output, and emits IDR-only Annex-B
+  packets. This is decodable by FFmpeg, but it is not performance parity yet:
+  the current implementation recreates the Vulkan video session for each input
+  frame and does not encode a reference-frame GOP. The 2026-05-05 smoke run at
+  640x360 / 3 frames measured video-hw Vulkan HEVC encode at 1.868 fps versus
+  FFmpeg Vulkan HEVC encode at 9.164 fps on the NVIDIA adapter.
+  The current probe also maps
   VPS sub-layer ordering and timing fields into StdVideo session parameters;
   it also uses an FFmpeg-like H.265 slice-header flag baseline and H.265
   rate-control pNext when the FFmpeg control probe mode is selected. It also
@@ -118,8 +123,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   `VIDEO_HW_VULKAN_HEVC_ENCODE_OUTPUT_PATH`; when the FFmpeg-generated
   parameter/header NAL prefix is prepended, FFmpeg decodes the one-frame stream
   and the flat NV12 probe input compares at MSE=0 / PSNR=inf. This is still a
-  one-frame diagnostic path; `VulkanEncoderAdapter` stays disabled for HEVC
-  encode until the packetization and multi-frame production path are wired.
+  one-frame diagnostic path. `VulkanEncoderAdapter` now uses the same slice
+  extraction and header-prefix packetization for an experimental multi-packet
+  IDR-only path, but persistent-session multi-frame encode is still the next
+  performance blocker.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

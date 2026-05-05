@@ -35,8 +35,22 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 - HEVC integrated: `output/benchmark-backends-hevc-1777958995.md`
   - NVIDIA: PASS
   - Intel oneVPL: PASS
-  - Vulkan NVIDIA: HEVC decode 680.103 fps vs FFmpeg Vulkan 495.702 fps; production HEVC encode remains unavailable in `VulkanEncoderAdapter`
+  - Vulkan NVIDIA: HEVC decode 680.103 fps vs FFmpeg Vulkan 495.702 fps; at that point production HEVC encode was still unavailable in `VulkanEncoderAdapter`
   - Vulkan Intel: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode works at 194.852 fps, encode fails with `Function not implemented`
+
+### Latest Vulkan HEVC production smoke
+
+- Command:
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec hevc --warmup 0 --repeat 1 --frame-count 3 --width 640 --height 360 --vulkan-adapter-indexes 0,1 --allow-failures true --verify`
+- Integrated: `output/benchmark-backends-hevc-1777959697.md`
+  - Vulkan NVIDIA decode: video-hw 690.765 fps vs FFmpeg Vulkan 502.376 fps
+  - Vulkan NVIDIA encode: video-hw 1.868 fps vs FFmpeg Vulkan 9.164 fps
+  - Vulkan Intel: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode works at 181.712 fps, FFmpeg Vulkan encode fails with `Function not implemented`
+- Decode verification smoke:
+  `cargo run -p video-hw --features backend-vulkan --example encode_synthetic --release -- --backend vulkan --codec hevc --fps 30 --frame-count 3 --width 640 --height 360 --output output\vulkan-hevc-production-smoke-1777959697.h265 --require-hardware --vulkan-adapter-index 0`
+  followed by `ffprobe -f hevc -count_frames` and `ffmpeg -v error -f hevc -i ... -f null NUL`.
+  Result: `codec_name=hevc`, `width=640`, `height=360`, `nb_read_frames=3`.
+- Interpretation: Vulkan HEVC encode is no longer just a live probe on the NVIDIA adapter. `VulkanEncoderAdapter` can emit decodable Annex-B HEVC by prepending FFmpeg-generated leading non-VCL NALs to direct Vulkan slice output. It is still IDR-only and recreates the video session per frame, so the implementation is functionally useful for smoke/parity exploration but not yet FFmpeg performance parity.
 
 ### H.264
 
@@ -64,7 +78,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 | Intel oneVPL | HEVC decode | PASS: video-hw 1358.28 fps vs FFmpeg QSV 1403.59 fps (-3.23%) |
 | Intel oneVPL | HEVC encode | PASS: video-hw 71.27 fps vs FFmpeg QSV 71.77 fps (-0.71%) |
 | Vulkan NVIDIA | HEVC decode | PASS: video-hw 690.15 fps vs FFmpeg Vulkan 511.34 fps |
-| Vulkan NVIDIA | HEVC encode | Not complete: `video-hw` reports `Vulkan HEVC encode initialization failed; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet`; FFmpeg Vulkan HEVC encode on the NVIDIA adapter succeeds at 87.55 fps |
+| Vulkan NVIDIA | HEVC encode | Partial: experimental IDR-only production path now emits decodable 3-frame Annex-B HEVC at 1.868 fps in the latest 640x360 smoke; FFmpeg Vulkan HEVC encode on the same NVIDIA adapter measures 9.164 fps in that run, so performance parity remains incomplete |
 | Vulkan Intel | HEVC decode/encode | Decode works in FFmpeg Vulkan at 196.72 fps but is not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan encode fails with unsupported encode queue |
 
 ### Intel oneVPL verification follow-up

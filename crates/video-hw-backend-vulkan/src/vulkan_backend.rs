@@ -20,7 +20,9 @@ use crate::{
         probe_hevc_decode_prerequisites, probe_hevc_decode_session_bootstrap,
         probe_hevc_decode_session_bootstrap_with_access_unit_limit,
     },
-    vulkan_hevc_encode::{HevcEncodePrerequisiteProbe, probe_hevc_encode_prerequisites},
+    vulkan_hevc_encode::{
+        HevcEncodePrerequisiteProbe, encode_hevc_idr_frame_annexb, probe_hevc_encode_prerequisites,
+    },
 };
 
 const HEVC_DECODE_INFO_READBACK_NON_ZERO_FLAG: u32 = 1;
@@ -423,15 +425,7 @@ impl VulkanEncoderAdapter {
             ));
         }
         if matches!(self.codec, Codec::Hevc) {
-            let coded_width = u32::try_from(width).map_err(|_| {
-                BackendError::InvalidInput("frame width does not fit in u32".to_string())
-            })?;
-            let coded_height = u32::try_from(height).map_err(|_| {
-                BackendError::InvalidInput("frame height does not fit in u32".to_string())
-            })?;
-            return Err(BackendError::UnsupportedConfig(
-                hevc_encode_blocker_message_with_config(coded_width, coded_height, self.fps),
-            ));
+            return self.encode_pending_hevc_frames(pending_frames, width, height);
         }
         ensure_vk_codec_supported(self.codec, "encode")?;
 
@@ -484,6 +478,54 @@ impl VulkanEncoderAdapter {
         if packets.is_empty() {
             return Err(BackendError::Backend(
                 "Vulkan encoder produced no output packets".to_string(),
+            ));
+        }
+        Ok(packets)
+    }
+
+    fn encode_pending_hevc_frames(
+        &self,
+        pending_frames: &[Frame],
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<EncodedPacket>, BackendError> {
+        let coded_width = u32::try_from(width).map_err(|_| {
+            BackendError::InvalidInput("frame width does not fit in u32".to_string())
+        })?;
+        let coded_height = u32::try_from(height).map_err(|_| {
+            BackendError::InvalidInput("frame height does not fit in u32".to_string())
+        })?;
+        let fps = u32::try_from(self.fps.max(1)).unwrap_or(30);
+        let mut packets = Vec::new();
+        for frame in pending_frames {
+            if frame.width != width || frame.height != height {
+                return Err(BackendError::InvalidInput(format!(
+                    "mixed frame dimensions are unsupported: expected {}x{}, got {}x{}",
+                    width, height, frame.width, frame.height
+                )));
+            }
+            let raw = frame_to_nv12_payload(frame, width, height)?;
+            let data = encode_hevc_idr_frame_annexb(coded_width, coded_height, fps, &raw.frame)
+                .map_err(|err| {
+                    BackendError::UnsupportedConfig(format!(
+                        "{}; experimental HEVC IDR encode failed: {err}",
+                        hevc_encode_blocker_message_with_config(
+                            coded_width,
+                            coded_height,
+                            self.fps
+                        )
+                    ))
+                })?;
+            packets.push(EncodedPacket {
+                codec: self.codec,
+                data,
+                pts_90k: frame.pts_90k,
+                is_keyframe: true,
+            });
+        }
+        if packets.is_empty() {
+            return Err(BackendError::Backend(
+                "Vulkan HEVC encoder produced no output packets".to_string(),
             ));
         }
         Ok(packets)

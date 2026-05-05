@@ -100,6 +100,7 @@ pub(crate) enum HevcEncodeSubmitExecutionProbe {
         bitstream_memory_offset: u64,
         bytes_written: u32,
         head16: String,
+        bitstream: Vec<u8>,
     },
     Failed(String),
     Skipped(String),
@@ -188,6 +189,16 @@ struct HevcEncodeSubmitExecutionConfig {
     session_max_dpb_slots: u32,
     session_max_active_reference_pictures: u32,
     session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
+    source_nv12: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HevcEncodeVideoSessionProbeConfig<'a> {
+    coded_extent: vk::Extent2D,
+    maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
+    session_dpb_mode: HevcEncodeProbeSessionDpbMode,
+    session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
+    source_nv12: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -677,7 +688,49 @@ pub(crate) fn probe_hevc_encode_prerequisites() -> HevcEncodePrerequisiteProbe {
 pub(crate) fn probe_hevc_encode_session_bootstrap(
     coded_width: u32,
     coded_height: u32,
+    fps: u32,
+) -> Result<HevcEncodeSessionBootstrap, String> {
+    run_hevc_encode_session_bootstrap(coded_width, coded_height, fps, None)
+}
+
+pub(crate) fn encode_hevc_idr_frame_annexb(
+    coded_width: u32,
+    coded_height: u32,
+    fps: u32,
+    source_nv12: &[u8],
+) -> Result<Vec<u8>, String> {
+    let expected_len = usize::try_from(u64::from(coded_width) * u64::from(coded_height) * 3 / 2)
+        .map_err(|_| "HEVC encode source NV12 size exceeds usize".to_string())?;
+    if source_nv12.len() != expected_len {
+        return Err(format!(
+            "HEVC encode source NV12 size mismatch: expected {expected_len}, got {}",
+            source_nv12.len()
+        ));
+    }
+    let bootstrap = run_hevc_encode_session_bootstrap(
+        coded_width,
+        coded_height,
+        fps,
+        Some(source_nv12.to_vec()),
+    )?;
+    let bitstream = match bootstrap.encode_submit_execution_probe {
+        HevcEncodeSubmitExecutionProbe::Ready { bitstream, .. } => bitstream,
+        HevcEncodeSubmitExecutionProbe::Failed(err) => return Err(err),
+        HevcEncodeSubmitExecutionProbe::Skipped(reason) => return Err(reason),
+    };
+    if bitstream.is_empty() {
+        return Err("HEVC encode produced an empty bitstream".to_string());
+    }
+    let mut output = hevc_encode_parameter_header_prefix()?;
+    output.extend_from_slice(&bitstream);
+    Ok(output)
+}
+
+fn run_hevc_encode_session_bootstrap(
+    coded_width: u32,
+    coded_height: u32,
     _fps: u32,
+    source_nv12: Option<Vec<u8>>,
 ) -> Result<HevcEncodeSessionBootstrap, String> {
     if coded_width == 0 || coded_height == 0 {
         return Err(format!(
@@ -872,11 +925,16 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
         ) = probe_hevc_encode_video_session_and_parameters_creation(
             &instance,
             &candidate,
-            coded_width,
-            coded_height,
-            maintenance1_mode,
-            session_dpb_mode,
-            session_h265_create_info_mode,
+            HevcEncodeVideoSessionProbeConfig {
+                coded_extent: vk::Extent2D {
+                    width: coded_width,
+                    height: coded_height,
+                },
+                maintenance1_mode,
+                session_dpb_mode,
+                session_h265_create_info_mode,
+                source_nv12: source_nv12.as_deref(),
+            },
         );
         let selected_properties =
             unsafe { instance.get_physical_device_properties(candidate.physical_device) };
@@ -1162,11 +1220,7 @@ fn query_hevc_encode_formats(
 fn probe_hevc_encode_video_session_and_parameters_creation(
     instance: &ash::Instance,
     candidate: &HevcEncodeCapabilityCandidate,
-    coded_width: u32,
-    coded_height: u32,
-    maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
-    session_dpb_mode: HevcEncodeProbeSessionDpbMode,
-    session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
+    config: HevcEncodeVideoSessionProbeConfig<'_>,
 ) -> (
     HevcEncodeVideoSessionCreateProbe,
     HevcEncodeVideoSessionParametersCreateProbe,
@@ -1177,7 +1231,7 @@ fn probe_hevc_encode_video_session_and_parameters_creation(
         candidate.physical_device,
         candidate.queue_family_index,
         candidate.extensions,
-        maintenance1_mode,
+        config.maintenance1_mode,
         candidate
             .capability_snapshot
             .video_maintenance1_feature_supported,
@@ -1214,16 +1268,14 @@ fn probe_hevc_encode_video_session_and_parameters_creation(
                     instance,
                     candidate,
                     HevcEncodeSessionFormatProbeConfig {
-                        coded_extent: vk::Extent2D {
-                            width: coded_width,
-                            height: coded_height,
-                        },
+                        coded_extent: config.coded_extent,
                         picture_format,
                         reference_picture_format,
-                        maintenance1_mode,
-                        session_dpb_mode,
-                        session_h265_create_info_mode,
+                        maintenance1_mode: config.maintenance1_mode,
+                        session_dpb_mode: config.session_dpb_mode,
+                        session_h265_create_info_mode: config.session_h265_create_info_mode,
                     },
+                    config.source_nv12,
                 ) {
                     Ok((
                         HevcEncodeVideoSessionParametersCreateProbe::Created,
@@ -1300,6 +1352,7 @@ fn probe_single_hevc_encode_session_format(
     instance: &ash::Instance,
     candidate: &HevcEncodeCapabilityCandidate,
     config: HevcEncodeSessionFormatProbeConfig,
+    source_nv12: Option<&[u8]>,
 ) -> Result<
     (
         HevcEncodeVideoSessionParametersCreateProbe,
@@ -1446,6 +1499,7 @@ fn probe_single_hevc_encode_session_format(
                         session_max_dpb_slots,
                         session_max_active_reference_pictures,
                         session_h265_create_info_mode: config.session_h265_create_info_mode,
+                        source_nv12: source_nv12.map(<[u8]>::to_vec),
                     },
                 );
                 // SAFETY: handle was created from this device and is not reused afterwards.
@@ -3077,6 +3131,52 @@ fn hevc_encode_probe_output_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn hevc_encode_parameter_header_prefix() -> Result<Vec<u8>, String> {
+    let sample = load_hevc_encode_probe_parameter_sample()?;
+    let end = leading_hevc_non_vcl_annexb_prefix_len(&sample)?;
+    Ok(sample[..end].to_vec())
+}
+
+fn leading_hevc_non_vcl_annexb_prefix_len(bytes: &[u8]) -> Result<usize, String> {
+    let mut cursor = 0_usize;
+    let mut end = 0_usize;
+    while let Some((start, prefix_len)) = find_annexb_start_code_with_prefix(bytes, cursor) {
+        let nalu_start = start
+            .checked_add(prefix_len)
+            .ok_or_else(|| "HEVC Annex-B NAL start overflow".to_string())?;
+        if nalu_start >= bytes.len() {
+            break;
+        }
+        let next_start = find_annexb_start_code_with_prefix(bytes, nalu_start)
+            .map(|(next, _)| next)
+            .unwrap_or(bytes.len());
+        let nal_type = (bytes[nalu_start] & 0x7e) >> 1;
+        if nal_type <= 31 {
+            break;
+        }
+        end = next_start;
+        cursor = next_start;
+    }
+    if end == 0 {
+        return Err("HEVC parameter sample has no leading non-VCL Annex-B NAL units".to_string());
+    }
+    Ok(end)
+}
+
+fn find_annexb_start_code_with_prefix(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut index = from;
+    while index + 3 <= bytes.len() {
+        if bytes[index..].starts_with(&[0, 0, 1]) {
+            return Some((index, 3));
+        }
+        if index + 4 <= bytes.len() && bytes[index..].starts_with(&[0, 0, 0, 1]) {
+            return Some((index, 4));
+        }
+        index += 1;
+    }
+    None
+}
+
 fn parse_hevc_encode_probe_dst_prefix_bytes(value: Option<&str>) -> u64 {
     value
         .map(str::trim)
@@ -3291,6 +3391,7 @@ fn probe_hevc_encode_submit_execution(
     let mut dst_head16 = String::new();
     let mut dst_buffer_offset = 0_u64;
     let mut bitstream_memory_offset = 0_u64;
+    let mut output_bitstream = Vec::new();
 
     let probe_result = (|| -> Result<(), String> {
         if !config
@@ -3400,11 +3501,14 @@ fn probe_hevc_encode_submit_execution(
             )?;
         source_upload_buffer = created_source_upload_buffer;
         source_upload_buffer_memory = created_source_upload_buffer_memory;
-        write_hevc_encode_source_upload_pattern(
+        write_hevc_encode_source_upload(
             device,
             source_upload_buffer_memory,
             source_upload_buffer_size,
             &source_upload_regions,
+            config.source_nv12.as_deref(),
+            config.coded_width,
+            config.coded_height,
         )?;
         let (
             created_dpb_image,
@@ -4404,6 +4508,7 @@ fn probe_hevc_encode_submit_execution(
             })?;
         }
         dst_head16 = hevc_encode_head16(&dst_bytes);
+        output_bitstream = dst_bytes;
         Ok(())
     })();
 
@@ -4461,6 +4566,7 @@ fn probe_hevc_encode_submit_execution(
             bitstream_memory_offset,
             bytes_written: query_result.bytes_written,
             head16: dst_head16,
+            bitstream: output_bitstream,
         },
         Err(err) => {
             HevcEncodeSubmitExecutionProbe::Failed(append_hevc_encode_validation_messages(err))
@@ -5369,11 +5475,14 @@ fn build_hevc_encode_source_upload_regions(
     Ok((next_offset, regions))
 }
 
-fn write_hevc_encode_source_upload_pattern(
+fn write_hevc_encode_source_upload(
     device: &ash::Device,
     memory: vk::DeviceMemory,
     buffer_size: u64,
     regions: &[vk::BufferImageCopy],
+    source_nv12: Option<&[u8]>,
+    coded_width: u32,
+    coded_height: u32,
 ) -> Result<(), String> {
     let buffer_size_usize = usize::try_from(buffer_size)
         .map_err(|_| "encode source upload buffer exceeds usize range".to_string())?;
@@ -5414,6 +5523,17 @@ fn write_hevc_encode_source_upload_pattern(
             })?;
             span.fill(fill_value);
         }
+        if let Some(source_nv12) = source_nv12 {
+            copy_hevc_encode_source_nv12(
+                bytes,
+                regions,
+                source_nv12,
+                usize::try_from(coded_width)
+                    .map_err(|_| "coded width exceeds usize".to_string())?,
+                usize::try_from(coded_height)
+                    .map_err(|_| "coded height exceeds usize".to_string())?,
+            )?;
+        }
         Ok(())
     })();
     // SAFETY: pointer was returned by map_memory for this allocation.
@@ -5421,6 +5541,116 @@ fn write_hevc_encode_source_upload_pattern(
         device.unmap_memory(memory);
     }
     result
+}
+
+fn copy_hevc_encode_source_nv12(
+    upload: &mut [u8],
+    regions: &[vk::BufferImageCopy],
+    source_nv12: &[u8],
+    coded_width: usize,
+    coded_height: usize,
+) -> Result<(), String> {
+    let y_size = coded_width
+        .checked_mul(coded_height)
+        .ok_or_else(|| "HEVC source NV12 Y size overflow".to_string())?;
+    let uv_height = coded_height.div_ceil(2);
+    let uv_size = coded_width
+        .checked_mul(uv_height)
+        .ok_or_else(|| "HEVC source NV12 UV size overflow".to_string())?;
+    let expected_len = y_size
+        .checked_add(uv_size)
+        .ok_or_else(|| "HEVC source NV12 size overflow".to_string())?;
+    if source_nv12.len() != expected_len {
+        return Err(format!(
+            "HEVC source NV12 size mismatch: expected {expected_len}, got {}",
+            source_nv12.len()
+        ));
+    }
+    let y_region = regions
+        .iter()
+        .find(|region| {
+            region
+                .image_subresource
+                .aspect_mask
+                .contains(vk::ImageAspectFlags::PLANE_0)
+        })
+        .ok_or_else(|| "HEVC source upload has no Y plane region".to_string())?;
+    let uv_region = regions
+        .iter()
+        .find(|region| {
+            region
+                .image_subresource
+                .aspect_mask
+                .contains(vk::ImageAspectFlags::PLANE_1)
+        })
+        .ok_or_else(|| "HEVC source upload has no UV plane region".to_string())?;
+    copy_hevc_encode_source_plane(
+        upload,
+        y_region,
+        &source_nv12[..y_size],
+        coded_width,
+        coded_height,
+        1,
+    )?;
+    copy_hevc_encode_source_plane(
+        upload,
+        uv_region,
+        &source_nv12[y_size..],
+        coded_width / 2,
+        uv_height,
+        2,
+    )
+}
+
+fn copy_hevc_encode_source_plane(
+    upload: &mut [u8],
+    region: &vk::BufferImageCopy,
+    source: &[u8],
+    source_width_texels: usize,
+    source_height: usize,
+    bytes_per_texel: usize,
+) -> Result<(), String> {
+    let dst_offset = usize::try_from(region.buffer_offset)
+        .map_err(|_| "HEVC source plane dst offset exceeds usize".to_string())?;
+    let dst_width_texels = usize::try_from(region.buffer_row_length)
+        .map_err(|_| "HEVC source plane row length exceeds usize".to_string())?;
+    let dst_height = usize::try_from(region.buffer_image_height)
+        .map_err(|_| "HEVC source plane image height exceeds usize".to_string())?;
+    if source_width_texels > dst_width_texels || source_height > dst_height {
+        return Err(format!(
+            "HEVC source plane {}x{} does not fit upload plane {}x{}",
+            source_width_texels, source_height, dst_width_texels, dst_height
+        ));
+    }
+    let src_row_bytes = source_width_texels
+        .checked_mul(bytes_per_texel)
+        .ok_or_else(|| "HEVC source plane row size overflow".to_string())?;
+    let dst_row_bytes = dst_width_texels
+        .checked_mul(bytes_per_texel)
+        .ok_or_else(|| "HEVC upload plane row size overflow".to_string())?;
+    for row in 0..source_height {
+        let src_start = row
+            .checked_mul(src_row_bytes)
+            .ok_or_else(|| "HEVC source plane row offset overflow".to_string())?;
+        let dst_start = dst_offset
+            .checked_add(
+                row.checked_mul(dst_row_bytes)
+                    .ok_or_else(|| "HEVC upload plane row offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "HEVC upload plane row start overflow".to_string())?;
+        let dst_end = dst_start
+            .checked_add(src_row_bytes)
+            .ok_or_else(|| "HEVC upload plane row end overflow".to_string())?;
+        upload
+            .get_mut(dst_start..dst_end)
+            .ok_or_else(|| "HEVC upload plane row outside buffer".to_string())?
+            .copy_from_slice(
+                source
+                    .get(src_start..src_start + src_row_bytes)
+                    .ok_or_else(|| "HEVC source plane row outside buffer".to_string())?,
+            );
+    }
+    Ok(())
 }
 
 fn write_hevc_encode_probe_dst_prefix(

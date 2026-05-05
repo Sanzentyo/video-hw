@@ -45,7 +45,7 @@ impl Backend {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Codec {
     H264,
     Hevc,
@@ -504,7 +504,15 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
             args.frame_count,
             total_rounds,
             args.warmup,
-            || vulkan_encode_command(&encode_bin, args, adapter.index, &null_sink),
+            || {
+                vulkan_encode_command(
+                    &encode_bin,
+                    args,
+                    adapter.index,
+                    ffmpeg_match.map(|adapter| adapter.index),
+                    &null_sink,
+                )
+            },
         ));
         if let Some(ffmpeg_adapter) = ffmpeg_match {
             cases.push(run_vulkan_case(
@@ -801,9 +809,47 @@ fn vulkan_encode_command(
     encode_bin: &Path,
     args: &Args,
     adapter_index: usize,
+    ffmpeg_adapter_index: Option<usize>,
     null_sink: &Path,
 ) -> Result<Command> {
     let mut command = Command::new(encode_bin);
+    if args.codec == Codec::Hevc {
+        let ffmpeg_adapter_index = ffmpeg_adapter_index.with_context(|| {
+            format!("no matching FFmpeg Vulkan adapter for video-hw adapter {adapter_index}")
+        })?;
+        let parameter_sample =
+            ensure_ffmpeg_vulkan_hevc_parameter_sample(args, ffmpeg_adapter_index)?;
+        command.env(
+            "VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH",
+            parameter_sample,
+        );
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE", "sample");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_VUI_SAFETY", "preserve");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SIZE_MODE", "sample");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_IMAGE_VIEW_MODE", "no-ycbcr");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_BYTES", "256");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_MODE", "ffmpeg");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_CONTROL_MODE", "ffmpeg");
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_BEGIN_PNEXT_MODE", "ffmpeg");
+        command.env(
+            "VIDEO_HW_VULKAN_HEVC_ENCODE_BEGIN_REFERENCE_SLOT_MODE",
+            "ffmpeg",
+        );
+        command.env(
+            "VIDEO_HW_VULKAN_HEVC_ENCODE_REFERENCE_SLOT_POINTER_MODE",
+            "ffmpeg",
+        );
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE", "none");
+        command.env(
+            "VIDEO_HW_VULKAN_HEVC_ENCODE_SOURCE_PICTURE_RESOURCE_EXTENT_MODE",
+            "coded",
+        );
+        command.env(
+            "VIDEO_HW_VULKAN_HEVC_ENCODE_SESSION_H265_CREATE_INFO_MODE",
+            "ffmpeg",
+        );
+        command.env("VIDEO_HW_VULKAN_HEVC_ENCODE_DST_RANGE_MODE", "ffmpeg");
+    }
     command.args([
         "--backend",
         "vulkan",
@@ -811,6 +857,10 @@ fn vulkan_encode_command(
         args.codec.as_cli(),
         "--frame-count",
         &args.frame_count.to_string(),
+        "--width",
+        &args.width.to_string(),
+        "--height",
+        &args.height.to_string(),
         "--discard-output",
         "--require-hardware",
         "--vulkan-adapter-index",
@@ -820,6 +870,47 @@ fn vulkan_encode_command(
         command.args(["--output", &null_sink.to_string_lossy()]);
     }
     Ok(command)
+}
+
+fn ensure_ffmpeg_vulkan_hevc_parameter_sample(
+    args: &Args,
+    adapter_index: usize,
+) -> Result<PathBuf> {
+    fs::create_dir_all(&args.output_dir)
+        .with_context(|| format!("create output directory: {}", args.output_dir.display()))?;
+    let path = args.output_dir.join(format!(
+        "ffmpeg-vulkan-hevc-parameter-{}x{}-adapter-{}.h265",
+        args.width, args.height, adapter_index
+    ));
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-init_hw_device",
+        &format!("vulkan:{adapter_index}"),
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "testsrc2=size={}x{}:rate=30:duration={}",
+            args.width,
+            args.height,
+            (1.0_f64 / 30.0).max(0.001)
+        ),
+        "-frames:v",
+        "1",
+        "-vf",
+        "format=nv12,hwupload",
+        "-c:v",
+        "hevc_vulkan",
+        "-f",
+        "hevc",
+        &path.to_string_lossy(),
+    ]);
+    run_inherited(&mut command)
+        .with_context(|| format!("generate FFmpeg Vulkan HEVC parameter sample: {}", path.display()))?;
+    Ok(path)
 }
 
 fn ffmpeg_vulkan_decode_command(args: &Args, adapter_index: usize, null_sink: &Path) -> Command {

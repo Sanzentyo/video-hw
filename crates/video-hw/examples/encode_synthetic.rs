@@ -25,6 +25,10 @@ struct Args {
     require_hardware: bool,
     #[arg(long, default_value_t = 30)]
     frame_count: usize,
+    #[arg(long, default_value_t = 640)]
+    width: usize,
+    #[arg(long, default_value_t = 360)]
+    height: usize,
     #[arg(long, default_value = "./encoded-output.bin")]
     output: PathBuf,
     #[arg(long, default_value_t = false)]
@@ -94,10 +98,10 @@ fn main() -> Result<()> {
 
     let mut total_packets = 0usize;
     let mut output_bytes = 0usize;
-    let dims = dims(640, 360)?;
+    let dims = dims(args.width as u32, args.height as u32)?;
 
     for i in 0..args.frame_count {
-        let argb = synthetic_argb(640, 360, i);
+        let argb = synthetic_argb(args.width, args.height, i);
         encoder.submit(EncodeFrame {
             dims,
             pts_90k: Some(Timestamp90k((i as i64) * 3000)),
