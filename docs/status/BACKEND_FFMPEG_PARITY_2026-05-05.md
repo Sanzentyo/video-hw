@@ -110,13 +110,16 @@ from the begin reference slot via `begin_reference_slot_mode=ffmpeg`, and can
 advance `dstBufferOffset` with `VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_BYTES`
 to model FFmpeg's sequence-header/filler prefix. Encode image views now also use
 an identity `VkSamplerYcbcrConversion` like FFmpeg, and
-`VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE=none` can omit the explicit DPB
-image layout barrier to mirror FFmpeg's non-layered DPB path. The default,
-FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, and combined FFmpeg-style
-probes all still fail at `vkEndCommandBuffer`, so the remaining blocker is after
-those picture resource / image view / output offset parity points. More complete
-HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
-`VulkanEncoderAdapter`.
+encode images now honor `vkGetImageMemoryRequirements2` dedicated allocation
+requirements. On this NVIDIA driver the probe reports
+`image_memory_dedicated=src:false|dpb:false`, so dedicated allocation is not the
+missing requirement. `VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE=none` can
+omit the explicit DPB image layout barrier to mirror FFmpeg's non-layered DPB
+path. The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, and
+combined FFmpeg-style probes all still fail at `vkEndCommandBuffer`, so the
+remaining blocker is after those picture resource / image view / allocation /
+output offset parity points. More complete HEVC command/resource wiring is still
+required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 
