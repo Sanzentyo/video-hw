@@ -152,6 +152,7 @@ struct ParsedHevcVps {
     vps_video_parameter_set_id: u8,
     vps_max_sub_layers_minus1: u8,
     vps_temporal_id_nesting_flag: bool,
+    profile_tier_level: StdVideoH265ProfileTierLevel,
     vps_sub_layer_ordering_info_present_flag: bool,
     vps_dec_pic_buf_mgr: StdVideoH265DecPicBufMgr,
     vps_timing_info_present_flag: bool,
@@ -325,6 +326,7 @@ pub(crate) struct HevcStdParameterSetStorage {
     sps: [StdVideoH265SequenceParameterSet; 1],
     pps: [StdVideoH265PictureParameterSet; 1],
     profile_tier_level: Box<StdVideoH265ProfileTierLevel>,
+    vps_profile_tier_level: Box<StdVideoH265ProfileTierLevel>,
     dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
     short_term_ref_pic_sets: Box<[StdVideoH265ShortTermRefPicSet]>,
     long_term_ref_pics_sps: Option<Box<StdVideoH265LongTermRefPicsSps>>,
@@ -3595,6 +3597,7 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         sps: [std_sps],
         pps: [std_pps],
         profile_tier_level: Box::new(profile_tier_level),
+        vps_profile_tier_level: Box::new(parsed_vps.profile_tier_level),
         dec_pic_buf_mgr: Box::new(dec_pic_buf_mgr),
         short_term_ref_pic_sets: short_term_ref_pic_sets.into_boxed_slice(),
         long_term_ref_pics_sps: long_term_ref_pics_sps.map(Box::new),
@@ -3603,10 +3606,12 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     };
 
     let profile_ptr = storage.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
+    let vps_profile_ptr =
+        storage.vps_profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
     let dec_pic_buf_mgr_ptr = storage.dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
     let vps_dec_pic_buf_mgr_ptr =
         storage.vps_dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
-    storage.vps[0].pProfileTierLevel = profile_ptr;
+    storage.vps[0].pProfileTierLevel = vps_profile_ptr;
     storage.vps[0].pDecPicBufMgr = vps_dec_pic_buf_mgr_ptr;
     storage.sps[0].pProfileTierLevel = profile_ptr;
     storage.sps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
@@ -3999,6 +4004,55 @@ fn skip_hevc_profile_tier_level(
     Ok(())
 }
 
+fn parse_hevc_profile_tier_level(
+    reader: &mut RbspBitReader<'_>,
+    max_sub_layers_minus1: usize,
+) -> Result<StdVideoH265ProfileTierLevel, String> {
+    let profile_space_tier_profile_idc = reader.read_bits(8)?;
+    let tier_flag = ((profile_space_tier_profile_idc >> 5) & 1) != 0;
+    let profile_idc = profile_space_tier_profile_idc & 0x1f;
+    let _general_profile_compatibility_flags = reader.read_bits(32)?;
+    let constraint_indicator_hi = reader.read_bits(32)?;
+    let _constraint_indicator_lo = reader.read_bits(16)?;
+    let general_level_idc = narrow_u32_to_u8(reader.read_bits(8)?, "general_level_idc")?;
+
+    let mut profile_tier_flags = empty_profile_tier_level_flags();
+    profile_tier_flags.set_general_tier_flag(bool_to_u32(tier_flag));
+    profile_tier_flags.set_general_progressive_source_flag((constraint_indicator_hi >> 31) & 1);
+    profile_tier_flags.set_general_interlaced_source_flag((constraint_indicator_hi >> 30) & 1);
+    profile_tier_flags.set_general_non_packed_constraint_flag((constraint_indicator_hi >> 29) & 1);
+    profile_tier_flags.set_general_frame_only_constraint_flag((constraint_indicator_hi >> 28) & 1);
+
+    let mut sub_layer_profile_present = [false; 7];
+    let mut sub_layer_level_present = [false; 7];
+    for i in 0..max_sub_layers_minus1 {
+        sub_layer_profile_present[i] = reader.read_flag()?;
+        sub_layer_level_present[i] = reader.read_flag()?;
+    }
+    if max_sub_layers_minus1 > 0 {
+        for _ in max_sub_layers_minus1..8 {
+            let _reserved_zero_2bits = reader.read_bits(2)?;
+        }
+    }
+    for i in 0..max_sub_layers_minus1 {
+        if sub_layer_profile_present[i] {
+            let _sub_layer_profile_space_tier_profile_idc = reader.read_bits(8)?;
+            let _sub_layer_profile_compatibility_flags = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_hi = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_lo = reader.read_bits(16)?;
+        }
+        if sub_layer_level_present[i] {
+            let _sub_layer_level_idc = reader.read_bits(8)?;
+        }
+    }
+
+    Ok(StdVideoH265ProfileTierLevel {
+        flags: profile_tier_flags,
+        general_profile_idc: StdVideoH265ProfileIdc::from(profile_idc),
+        general_level_idc: StdVideoH265LevelIdc::from(general_level_idc),
+    })
+}
+
 fn skip_hevc_scaling_list_data(reader: &mut RbspBitReader<'_>) -> Result<(), String> {
     for size_id in 0..4 {
         let matrix_count = if size_id == 3 { 2 } else { 6 };
@@ -4170,7 +4224,8 @@ fn parse_hevc_vps(vps_nalu: &[u8]) -> Result<ParsedHevcVps, String> {
         narrow_u32_to_u8(reader.read_bits(3)?, "vps_max_sub_layers_minus1")?;
     let vps_temporal_id_nesting_flag = reader.read_flag()?;
     let _vps_reserved_0xffff_16bits = reader.read_bits(16)?;
-    skip_hevc_profile_tier_level(&mut reader, usize::from(vps_max_sub_layers_minus1))?;
+    let profile_tier_level =
+        parse_hevc_profile_tier_level(&mut reader, usize::from(vps_max_sub_layers_minus1))?;
 
     let vps_sub_layer_ordering_info_present_flag = reader.read_flag()?;
     let mut vps_dec_pic_buf_mgr = StdVideoH265DecPicBufMgr {
@@ -4228,6 +4283,7 @@ fn parse_hevc_vps(vps_nalu: &[u8]) -> Result<ParsedHevcVps, String> {
         vps_video_parameter_set_id,
         vps_max_sub_layers_minus1,
         vps_temporal_id_nesting_flag,
+        profile_tier_level,
         vps_sub_layer_ordering_info_present_flag,
         vps_dec_pic_buf_mgr,
         vps_timing_info_present_flag,
@@ -5645,6 +5701,25 @@ mod tests {
         assert_eq!(
             std_parameter_sets.vps[0].vps_time_scale,
             parsed_vps.vps_time_scale
+        );
+        assert_eq!(
+            std_parameter_sets
+                .vps_profile_tier_level
+                .general_profile_idc,
+            parsed_vps.profile_tier_level.general_profile_idc
+        );
+        assert_eq!(
+            std_parameter_sets.vps_profile_tier_level.general_level_idc,
+            parsed_vps.profile_tier_level.general_level_idc
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].pProfileTierLevel,
+            std_parameter_sets.vps_profile_tier_level.as_ref()
+                as *const StdVideoH265ProfileTierLevel
+        );
+        assert_eq!(
+            std_parameter_sets.sps[0].pProfileTierLevel,
+            std_parameter_sets.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel
         );
         assert_eq!(
             std_parameter_sets.sps[0].sps_video_parameter_set_id,

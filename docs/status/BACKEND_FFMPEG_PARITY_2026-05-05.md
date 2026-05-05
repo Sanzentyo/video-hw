@@ -89,10 +89,12 @@ probe still fails, so that flag shape is not sufficient either. The
 pNext with FFmpeg-style flat regular GOP hints; that path still fails at
 `vkEndCommandBuffer` too. StdVideo SPS VUI construction no longer advertises
 HRD parameters or scaling lists while their pointer payloads are not populated;
-the 1920x1080 sample live probe still reports session-parameter feedback
-`ERROR_OUT_OF_HOST_MEMORY`, so further SPS/PPS/VPS parity work remains. More
-complete HEVC session parameter generation and picture info wiring are still
-required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+VPS StdVideo construction now also uses the VPS's own profile-tier-level instead
+of reusing the SPS profile-tier-level pointer. The 1920x1080 sample live probe
+still reports session-parameter feedback `ERROR_OUT_OF_HOST_MEMORY`, so further
+SPS/PPS/VPS parity work remains. More complete HEVC session parameter generation
+and picture info wiring are still required before enabling `Codec::Hevc` in
+`VulkanEncoderAdapter`.
 
 ## Notes
 
