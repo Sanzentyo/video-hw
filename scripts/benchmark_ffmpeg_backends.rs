@@ -551,11 +551,27 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
             ffmpeg_adapter.index, ffmpeg_adapter.name
         );
         let adapter_label = adapter_label(ffmpeg_adapter);
-        cases.push(unavailable_case(
-            "video-hw decode",
-            &adapter_label,
-            "adapter is not exposed by vk-video/video-hw",
-        ));
+        if args.codec == Codec::Hevc {
+            cases.push(run_vulkan_case(
+                ffmpeg_adapter.index,
+                &adapter_label,
+                "video-hw decode",
+                303,
+                total_rounds,
+                args.warmup,
+                || vulkan_hevc_physical_decode_command(
+                    &decode_bin,
+                    args,
+                    ffmpeg_adapter.index,
+                ),
+            ));
+        } else {
+            cases.push(unavailable_case(
+                "video-hw decode",
+                &adapter_label,
+                "adapter is not exposed by vk-video/video-hw",
+            ));
+        }
         cases.push(run_vulkan_case(
             ffmpeg_adapter.index,
             &adapter_label,
@@ -802,6 +818,20 @@ fn vulkan_decode_command(decode_bin: &Path, args: &Args, adapter_index: usize) -
         "--vulkan-adapter-index",
         &adapter_index.to_string(),
     ]);
+    Ok(command)
+}
+
+fn vulkan_hevc_physical_decode_command(
+    decode_bin: &Path,
+    args: &Args,
+    physical_device_index: usize,
+) -> Result<Command> {
+    let mut command = vulkan_decode_command(decode_bin, args, physical_device_index)?;
+    command.env(
+        "VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX",
+        physical_device_index.to_string(),
+    );
+    command.env("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB", "1");
     Ok(command)
 }
 

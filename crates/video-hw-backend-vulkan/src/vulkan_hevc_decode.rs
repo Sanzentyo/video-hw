@@ -261,6 +261,7 @@ struct HevcDecodeBootstrapCacheKey {
     bitstream_hash: u64,
     bitstream_len: usize,
     submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -673,7 +674,23 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
     bitstream: &[u8],
     submit_probe_access_unit_limit: Option<usize>,
 ) -> Result<HevcDecodeSessionBootstrap, String> {
-    let cache_key = hevc_decode_bootstrap_cache_key(bitstream, submit_probe_access_unit_limit);
+    probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+        bitstream,
+        submit_probe_access_unit_limit,
+        None,
+    )
+}
+
+pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+    bitstream: &[u8],
+    submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
+) -> Result<HevcDecodeSessionBootstrap, String> {
+    let cache_key = hevc_decode_bootstrap_cache_key(
+        bitstream,
+        submit_probe_access_unit_limit,
+        physical_device_index,
+    );
     if let Some(cached) = lookup_hevc_decode_bootstrap_cache(cache_key) {
         return Ok(cached);
     }
@@ -693,7 +710,7 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
         .map_err(|err| format!("failed to create Vulkan instance: {err}"))?;
 
     let bootstrap_result = (|| -> Result<HevcDecodeSessionBootstrap, String> {
-        let machine = machine.probe_capabilities(&entry, &instance)?;
+        let machine = machine.probe_capabilities(&entry, &instance, physical_device_index)?;
         let (
             session_probe,
             session_parameters_probe,
@@ -727,6 +744,7 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
 fn hevc_decode_bootstrap_cache_key(
     bitstream: &[u8],
     submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
 ) -> HevcDecodeBootstrapCacheKey {
     let mut hasher = DefaultHasher::new();
     bitstream.hash(&mut hasher);
@@ -734,6 +752,7 @@ fn hevc_decode_bootstrap_cache_key(
         bitstream_hash: hasher.finish(),
         bitstream_len: bitstream.len(),
         submit_probe_access_unit_limit,
+        physical_device_index,
     }
 }
 
@@ -780,6 +799,7 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
         self,
         entry: &ash::Entry,
         instance: &ash::Instance,
+        requested_physical_device_index: Option<usize>,
     ) -> Result<HevcSessionBootstrapMachine<CapabilityProbeComplete>, String> {
         let video_queue = ash::khr::video_queue::Instance::new(entry, instance);
 
@@ -792,7 +812,12 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
 
         let mut probe_errors = Vec::new();
         let mut selected_candidate: Option<(u32, CapabilityProbeComplete)> = None;
-        for physical_device in physical_devices {
+        for (physical_device_index, physical_device) in physical_devices.into_iter().enumerate() {
+            if let Some(requested_index) = requested_physical_device_index
+                && physical_device_index != requested_index
+            {
+                continue;
+            }
             let support = query_adapter_decode_support(instance, physical_device)
                 .map_err(|err| format!("failed to enumerate device extensions: {err}"))?;
             if !support.extensions.supports_hevc_decode() {
@@ -904,7 +929,12 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
         }
 
         if probe_errors.is_empty() {
-            Err("no Vulkan adapter passed HEVC decode bootstrap checks".to_string())
+            match requested_physical_device_index {
+                Some(index) => Err(format!(
+                    "Vulkan physical device index {index} did not pass HEVC decode bootstrap checks"
+                )),
+                None => Err("no Vulkan adapter passed HEVC decode bootstrap checks".to_string()),
+            }
         } else {
             Err(format!(
                 "HEVC decode bootstrap checks failed on all candidate adapters: {}",
@@ -6566,9 +6596,11 @@ mod tests {
     #[test]
     fn hevc_decode_bootstrap_cache_keys_on_access_unit_limit() {
         let bitstream = [0_u8, 0, 0, 1, 0x26, 0x01];
-        let uncapped_key = hevc_decode_bootstrap_cache_key(&bitstream, None);
-        let capped_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303));
+        let uncapped_key = hevc_decode_bootstrap_cache_key(&bitstream, None, None);
+        let capped_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303), None);
+        let adapter_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303), Some(1));
         assert_ne!(uncapped_key, capped_key);
+        assert_ne!(capped_key, adapter_key);
 
         let bootstrap = HevcDecodeSessionBootstrap {
             coded_width: 1920,

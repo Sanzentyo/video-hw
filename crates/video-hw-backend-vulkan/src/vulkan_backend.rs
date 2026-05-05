@@ -18,7 +18,7 @@ use crate::{
         HevcVideoSessionCreateProbe, HevcVideoSessionParametersCreateProbe,
         extract_hevc_access_unit_headers, extract_hevc_parameter_sets_annexb,
         probe_hevc_decode_prerequisites, probe_hevc_decode_session_bootstrap,
-        probe_hevc_decode_session_bootstrap_with_access_unit_limit,
+        probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index,
     },
     vulkan_hevc_encode::{
         HevcEncodePrerequisiteProbe, encode_hevc_idr_frames_annexb, probe_hevc_encode_prerequisites,
@@ -192,13 +192,25 @@ impl VulkanDecoderAdapter {
             ))
         })?;
         let submit_probe_access_unit_limit = (!metadata_only).then_some(access_unit_headers.len());
-        let bootstrap = probe_hevc_decode_session_bootstrap_with_access_unit_limit(
-            bitstream,
-            submit_probe_access_unit_limit,
-        )
-        .map_err(|_| {
-            BackendError::UnsupportedConfig(hevc_decode_blocker_message_with_bitstream(bitstream))
-        })?;
+        let physical_device_index = resolve_hevc_decode_physical_device_index();
+        let bootstrap =
+            probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                bitstream,
+                submit_probe_access_unit_limit,
+                physical_device_index,
+            )
+            .or_else(|_| {
+                probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                    bitstream,
+                    submit_probe_access_unit_limit,
+                    physical_device_index,
+                )
+            })
+            .map_err(|_| {
+                BackendError::UnsupportedConfig(hevc_decode_blocker_message_with_bitstream(
+                    bitstream,
+                ))
+            })?;
         let (
             output_format,
             coded_width,
@@ -645,6 +657,12 @@ fn hevc_encode_blocker_message_with_config(
             format!("{base}; extension probe failed: {details}")
         }
     }
+}
+
+fn resolve_hevc_decode_physical_device_index() -> Option<usize> {
+    std::env::var("VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
 }
 
 fn hevc_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {

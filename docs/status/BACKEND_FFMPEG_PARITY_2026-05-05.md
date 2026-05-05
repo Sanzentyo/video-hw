@@ -85,6 +85,17 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   - Full `vulkaninfo` extension scan: Intel exposes `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_queue`, and `VK_KHR_video_queue`, but does not expose `VK_KHR_video_encode_queue` / H.264 or H.265 encode extensions. NVIDIA exposes both decode and encode queues for H.264/H.265.
 - Interpretation: NV, Intel oneVPL, and the available `video-hw` Vulkan NVIDIA adapter are at FFmpeg parity or faster for the measured H.264/HEVC decode+encode cases. The remaining uncovered hardware is Intel Vulkan: it exists as a Vulkan physical device, but is not exposed by `vk-video` / `video-hw` on this driver, and FFmpeg's own Vulkan encode path fails on it. This is recorded as an environment/driver/backend availability gap, not a passing Vulkan parity case.
 
+### Intel Vulkan direct ash HEVC decode probe
+
+- Change: `VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX=<n>` can force the direct ash HEVC decode bootstrap to a Vulkan physical device index without changing the existing `--vulkan-adapter-index` / `vk-video` adapter semantics. The integrated Vulkan runner uses this only for `ffmpeg-only` HEVC decode candidates.
+- Command:
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec hevc --warmup 1 --repeat 3 --frame-count 30 --width 320 --height 180 --vulkan-adapter-indexes 0,1 --allow-failures true`
+- Integrated: `output/benchmark-backends-hevc-1777960871.md`
+  - NVIDIA Vulkan remains PASS: decode 680.183 fps vs FFmpeg Vulkan 531.841 fps; encode 135.721 fps vs FFmpeg Vulkan 88.375 fps
+  - Intel direct ash HEVC decode was attempted with physical device index 0 and failed at `vkGetVideoSessionMemoryRequirementsKHR returned no memory requirements`
+  - FFmpeg Vulkan HEVC decode on Intel still works, but FFmpeg Vulkan HEVC encode still fails with `Function not implemented`
+- Interpretation: Intel Vulkan is now actively probed instead of only being marked unavailable. The driver advertises HEVC decode capability, but the direct ash session bootstrap does not produce usable session memory requirements on this environment. This remains the Vulkan/Intel-specific blocker.
+
 ### H.264
 
 | Backend | Case | Result |
