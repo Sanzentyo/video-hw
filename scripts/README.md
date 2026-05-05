@@ -166,6 +166,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
 - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters` で `video-hw` / `vk-video` 側に見えている Vulkan adapter を確認できる。
 - adapter ごとに失敗理由も report に残すため、複数 GPU 環境では `--allow-failures true` で全候補を走査する。
+- Vulkan HEVC encode は direct Vulkan submit path が未完了のため、この環境では unavailable として report される。診断用には `cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture` を明示実行する。
 
 ### 12) fMP4 decode access pattern benchmark
 

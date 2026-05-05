@@ -82,6 +82,11 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   raw input where supported.
 - Vulkan metadata decode uses GPU texture decode and avoids CPU NV12 readback,
   matching FFmpeg Vulkan null-sink decode more closely.
+- Vulkan HEVC encode is still reported as unavailable by `video-hw` on this
+  environment. The backend contains an ignored live probe for driver/session
+  diagnostics, but `VulkanEncoderAdapter` must not claim HEVC encode support
+  until the direct Vulkan `cmdEncodeVideoKHR` path produces a non-empty
+  bitstream and passes FFmpeg decode verification.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

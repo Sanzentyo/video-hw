@@ -3638,9 +3638,21 @@ fn create_hevc_encode_feedback_query_pool(
         };
     let mut feedback_create_info =
         vk::QueryPoolVideoEncodeFeedbackCreateInfoKHR::default().encode_feedback_flags(flags);
+    let mut h265_profile = vk::VideoEncodeH265ProfileInfoKHR::default()
+        .std_profile_idc(StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN);
+    let mut encode_usage = vk::VideoEncodeUsageInfoKHR::default()
+        .video_usage_hints(vk::VideoEncodeUsageFlagsKHR::DEFAULT);
+    let mut profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::ENCODE_H265)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .push_next(&mut h265_profile)
+        .push_next(&mut encode_usage);
     let create_info = vk::QueryPoolCreateInfo::default()
         .query_type(vk::QueryType::VIDEO_ENCODE_FEEDBACK_KHR)
         .query_count(1)
+        .push_next(&mut profile)
         .push_next(&mut feedback_create_info);
     // SAFETY: query pool create info references stack data that lives through the call.
     unsafe { device.create_query_pool(&create_info, None) }
@@ -4721,6 +4733,36 @@ mod tests {
         let err = probe_hevc_encode_session_bootstrap(0, 720, 30)
             .expect_err("zero width must be rejected before Vulkan probing");
         assert!(err.contains("must be > 0"));
+    }
+
+    #[test]
+    #[ignore = "live Vulkan HEVC encode probe; may crash buggy drivers"]
+    fn live_hevc_encode_session_bootstrap_reports_submit_feedback() {
+        let width = live_hevc_encode_probe_u32_env("VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_WIDTH", 320);
+        let height = live_hevc_encode_probe_u32_env("VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_HEIGHT", 180);
+        let fps = live_hevc_encode_probe_u32_env("VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_FPS", 30);
+        let bootstrap = probe_hevc_encode_session_bootstrap(width, height, fps)
+            .expect("live HEVC encode session bootstrap should complete on supported drivers");
+        eprintln!("{bootstrap:#?}");
+        match bootstrap.encode_submit_execution_probe {
+            HevcEncodeSubmitExecutionProbe::Ready { bytes_written, .. } => {
+                assert!(bytes_written > 0, "HEVC encode produced no bytes");
+            }
+            HevcEncodeSubmitExecutionProbe::Failed(err) => {
+                panic!("HEVC encode submit probe failed: {err}");
+            }
+            HevcEncodeSubmitExecutionProbe::Skipped(reason) => {
+                panic!("HEVC encode submit probe skipped: {reason}");
+            }
+        }
+    }
+
+    fn live_hevc_encode_probe_u32_env(name: &str, default: u32) -> u32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
     }
 
     #[test]

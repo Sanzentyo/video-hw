@@ -52,6 +52,32 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 | Vulkan NVIDIA | HEVC encode | Not complete: `video-hw` reports `Vulkan HEVC encode initialization failed; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet`; FFmpeg Vulkan HEVC encode on the NVIDIA adapter succeeds at 87.55 fps |
 | Vulkan Intel | HEVC decode/encode | Decode works in FFmpeg Vulkan at 196.72 fps but is not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan encode fails with unsupported encode queue |
 
+### Vulkan HEVC encode live probe
+
+The direct ash-level Vulkan HEVC encode path remains blocked after the latest
+probe work. The live ignored test can be run explicitly:
+
+```sh
+cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture
+```
+
+Optional environment variables:
+
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_WIDTH`
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_HEIGHT`
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_LIVE_FPS`
+- `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_MODE`
+
+On the RTX 5070 Ti Laptop GPU, the HEVC encode feedback query pool now requires
+an explicit HEVC video profile in the query pool `pNext` chain; without it,
+`vkCreateQueryPool` fails. With that fixed, session and parameter creation
+complete, but the submit probe still fails at `vkEndCommandBuffer` whenever
+`cmdEncodeVideoKHR` is included. Both the 320x180 `empty-template` smoke case
+and the 1920x1080 sample-parameter case fail, so the blocker is not only the
+repository sample parameter set's coded size. More complete HEVC session
+parameter generation and picture info wiring are still required before enabling
+`Codec::Hevc` in `VulkanEncoderAdapter`.
+
 ## Notes
 
 - NV and Intel decode throughput comparisons use `--decode-output-mode metadata`
