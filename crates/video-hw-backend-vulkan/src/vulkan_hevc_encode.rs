@@ -348,6 +348,12 @@ enum HevcEncodeProbeSetupReferenceSlotMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeDpbBarrierMode {
+    With,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcEncodeProbeNaluMode {
     SingleSlice,
     Empty,
@@ -2022,6 +2028,31 @@ fn hevc_encode_probe_setup_reference_slot_mode_label(
     }
 }
 
+fn resolve_hevc_encode_probe_dpb_barrier_mode() -> HevcEncodeProbeDpbBarrierMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_dpb_barrier_mode(mode.as_deref())
+}
+
+fn parse_hevc_encode_probe_dpb_barrier_mode(mode: Option<&str>) -> HevcEncodeProbeDpbBarrierMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("none") | Some("off") | Some("disable") | Some("disabled") | Some("skip")
+        | Some("ffmpeg") => HevcEncodeProbeDpbBarrierMode::None,
+        _ => HevcEncodeProbeDpbBarrierMode::With,
+    }
+}
+
+fn hevc_encode_probe_dpb_barrier_mode_label(mode: HevcEncodeProbeDpbBarrierMode) -> &'static str {
+    match mode {
+        HevcEncodeProbeDpbBarrierMode::With => "with",
+        HevcEncodeProbeDpbBarrierMode::None => "none",
+    }
+}
+
 fn resolve_hevc_encode_probe_control_mode() -> HevcEncodeProbeControlMode {
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_CONTROL_MODE";
     let mode = std::env::var(ENV_VAR).ok();
@@ -2783,6 +2814,7 @@ fn probe_hevc_encode_submit_execution(
     let mut dpb_image = vk::Image::null();
     let mut dpb_image_memory = vk::DeviceMemory::null();
     let mut dpb_image_view = vk::ImageView::null();
+    let mut ycbcr_conversion = vk::SamplerYcbcrConversion::null();
     let mut dst_buffer = vk::Buffer::null();
     let mut dst_buffer_memory = vk::DeviceMemory::null();
     let mut query_pool = vk::QueryPool::null();
@@ -2849,10 +2881,13 @@ fn probe_hevc_encode_submit_execution(
             u64::from(config.picture_access_granularity.height.max(1)),
         ))
         .map_err(|_| "aligned encode source image height exceeds u32 range".to_string())?;
+        ycbcr_conversion =
+            create_hevc_encode_probe_ycbcr_conversion(device, config.picture_format)?;
         let (created_source_image, created_source_image_memory, created_source_image_view) =
             create_hevc_encode_probe_image(
                 device,
                 instance,
+                ycbcr_conversion,
                 HevcEncodeProbeImageConfig {
                     physical_device: config.physical_device,
                     queue_family_index: config.queue_family_index,
@@ -2870,6 +2905,7 @@ fn probe_hevc_encode_submit_execution(
             create_hevc_encode_probe_image(
                 device,
                 instance,
+                ycbcr_conversion,
                 HevcEncodeProbeImageConfig {
                     physical_device: config.physical_device,
                     queue_family_index: config.queue_family_index,
@@ -2928,6 +2964,7 @@ fn probe_hevc_encode_submit_execution(
         let rps_mode = resolve_hevc_encode_probe_rps_mode();
         let begin_reference_slot_mode = resolve_hevc_encode_probe_begin_reference_slot_mode();
         let setup_reference_slot_mode = resolve_hevc_encode_probe_setup_reference_slot_mode();
+        let dpb_barrier_mode = resolve_hevc_encode_probe_dpb_barrier_mode();
         let control_mode = resolve_hevc_encode_probe_control_mode();
         let nalu_mode = resolve_hevc_encode_probe_nalu_mode();
         let codec_info_mode = resolve_hevc_encode_probe_codec_info_mode();
@@ -2968,6 +3005,7 @@ fn probe_hevc_encode_submit_execution(
             hevc_encode_probe_begin_reference_slot_mode_label(begin_reference_slot_mode);
         let setup_reference_slot_mode_label =
             hevc_encode_probe_setup_reference_slot_mode_label(setup_reference_slot_mode);
+        let dpb_barrier_mode_label = hevc_encode_probe_dpb_barrier_mode_label(dpb_barrier_mode);
         let begin_session_parameters_mode =
             resolve_hevc_encode_probe_begin_session_parameters_mode();
         let begin_session_parameters_mode_label =
@@ -2995,7 +3033,7 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3030,6 +3068,7 @@ fn probe_hevc_encode_submit_execution(
             rps_mode_label,
             begin_reference_slot_mode_label,
             setup_reference_slot_mode_label,
+            dpb_barrier_mode_label,
             begin_session_parameters_mode_label,
             control_mode_label,
             nalu_mode_label,
@@ -3118,9 +3157,15 @@ fn probe_hevc_encode_submit_execution(
             .buffer(dst_buffer)
             .offset(0)
             .size(dst_buffer_size);
-        let encode_image_barriers = [source_image_encode_barrier, dpb_image_encode_barrier];
+        let encode_image_barriers_with_dpb =
+            [source_image_encode_barrier, dpb_image_encode_barrier];
+        let encode_image_barriers_without_dpb = [source_image_encode_barrier];
+        let encode_image_barriers = match dpb_barrier_mode {
+            HevcEncodeProbeDpbBarrierMode::With => encode_image_barriers_with_dpb.as_slice(),
+            HevcEncodeProbeDpbBarrierMode::None => encode_image_barriers_without_dpb.as_slice(),
+        };
         let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(&encode_image_barriers)
+            .image_memory_barriers(encode_image_barriers)
             .buffer_memory_barriers(std::slice::from_ref(&dst_buffer_barrier));
         // SAFETY: barriers reference resources created above and command buffer is recording.
         unsafe {
@@ -3731,6 +3776,9 @@ fn probe_hevc_encode_submit_execution(
         if dpb_image_memory != vk::DeviceMemory::null() {
             device.free_memory(dpb_image_memory, None);
         }
+        if ycbcr_conversion != vk::SamplerYcbcrConversion::null() {
+            device.destroy_sampler_ycbcr_conversion(ycbcr_conversion, None);
+        }
         if dst_buffer != vk::Buffer::null() {
             device.destroy_buffer(dst_buffer, None);
         }
@@ -3860,9 +3908,34 @@ fn read_hevc_encode_dst_head(
     Ok(head)
 }
 
+fn create_hevc_encode_probe_ycbcr_conversion(
+    device: &ash::Device,
+    picture_format: vk::Format,
+) -> Result<vk::SamplerYcbcrConversion, String> {
+    let create_info = vk::SamplerYcbcrConversionCreateInfo::default()
+        .format(picture_format)
+        .ycbcr_model(vk::SamplerYcbcrModelConversion::RGB_IDENTITY)
+        .ycbcr_range(vk::SamplerYcbcrRange::ITU_FULL)
+        .components(vk::ComponentMapping {
+            r: vk::ComponentSwizzle::IDENTITY,
+            g: vk::ComponentSwizzle::IDENTITY,
+            b: vk::ComponentSwizzle::IDENTITY,
+            a: vk::ComponentSwizzle::IDENTITY,
+        })
+        .x_chroma_offset(vk::ChromaLocation::COSITED_EVEN)
+        .y_chroma_offset(vk::ChromaLocation::COSITED_EVEN)
+        .chroma_filter(vk::Filter::NEAREST)
+        .force_explicit_reconstruction(false);
+    // SAFETY: create info references only stack data and uses the encode picture format.
+    unsafe { device.create_sampler_ycbcr_conversion(&create_info, None) }.map_err(|err| {
+        format!("vkCreateSamplerYcbcrConversion for encode image views failed: {err}")
+    })
+}
+
 fn create_hevc_encode_probe_image(
     device: &ash::Device,
     instance: &ash::Instance,
+    ycbcr_conversion: vk::SamplerYcbcrConversion,
     config: HevcEncodeProbeImageConfig,
 ) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
     let mut encode_h265_profile = vk::VideoEncodeH265ProfileInfoKHR::default()
@@ -3938,6 +4011,8 @@ fn create_hevc_encode_probe_image(
     } else {
         config.usage
     };
+    let mut ycbcr_conversion_info =
+        vk::SamplerYcbcrConversionInfo::default().conversion(ycbcr_conversion);
     let mut image_view_usage = vk::ImageViewUsageCreateInfo::default().usage(view_usage);
     let view_create_info = vk::ImageViewCreateInfo::default()
         .image(image)
@@ -3950,6 +4025,7 @@ fn create_hevc_encode_probe_image(
             base_array_layer: 0,
             layer_count: 1,
         })
+        .push_next(&mut ycbcr_conversion_info)
         .push_next(&mut image_view_usage);
     // SAFETY: image view create info references valid image and stack data.
     let image_view = unsafe { device.create_image_view(&view_create_info, None) }
@@ -4091,6 +4167,7 @@ fn run_hevc_encode_pre_encode_probe(
     let slice_type = hevc_encode_probe_slice_type(picture_info_mode);
     let temporal_id = hevc_encode_probe_temporal_id(picture_info_mode);
     let pic_order_cnt_val = hevc_encode_probe_pic_order_cnt_val(picture_info_mode);
+    let dpb_barrier_mode = resolve_hevc_encode_probe_dpb_barrier_mode();
     let resources = config.resources;
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -4156,9 +4233,15 @@ fn run_hevc_encode_pre_encode_probe(
         .buffer(resources.dst_buffer)
         .offset(0)
         .size(resources.dst_buffer_size);
-    let pre_encode_image_barriers = [source_image_encode_barrier, dpb_image_encode_barrier];
+    let pre_encode_image_barriers_with_dpb =
+        [source_image_encode_barrier, dpb_image_encode_barrier];
+    let pre_encode_image_barriers_without_dpb = [source_image_encode_barrier];
+    let pre_encode_image_barriers = match dpb_barrier_mode {
+        HevcEncodeProbeDpbBarrierMode::With => pre_encode_image_barriers_with_dpb.as_slice(),
+        HevcEncodeProbeDpbBarrierMode::None => pre_encode_image_barriers_without_dpb.as_slice(),
+    };
     let dependency_info = vk::DependencyInfo::default()
-        .image_memory_barriers(&pre_encode_image_barriers)
+        .image_memory_barriers(pre_encode_image_barriers)
         .buffer_memory_barriers(std::slice::from_ref(&dst_buffer_barrier));
     // SAFETY: barriers reference resources passed by the caller and command buffer is recording.
     unsafe {
@@ -6107,6 +6190,34 @@ mod tests {
             assert_eq!(
                 parse_hevc_encode_probe_setup_reference_slot_mode(Some(alias)),
                 HevcEncodeProbeSetupReferenceSlotMode::None
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dpb_barrier_mode_defaults_to_with() {
+        assert_eq!(
+            parse_hevc_encode_probe_dpb_barrier_mode(None),
+            HevcEncodeProbeDpbBarrierMode::With
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_dpb_barrier_mode(Some("")),
+            HevcEncodeProbeDpbBarrierMode::With
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_dpb_barrier_mode(Some("with")),
+            HevcEncodeProbeDpbBarrierMode::With
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dpb_barrier_mode_accepts_none_aliases() {
+        for alias in [
+            "none", "off", "disable", "disabled", "skip", "ffmpeg", " None ",
+        ] {
+            assert_eq!(
+                parse_hevc_encode_probe_dpb_barrier_mode(Some(alias)),
+                HevcEncodeProbeDpbBarrierMode::None
             );
         }
     }

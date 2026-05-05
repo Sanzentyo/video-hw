@@ -108,11 +108,14 @@ also mirrors FFmpeg's source picture resource extent by using the input image's
 aligned extent (`1920x1088` for the 1920x1080 sample), can omit codec-info pNext
 from the begin reference slot via `begin_reference_slot_mode=ffmpeg`, and can
 advance `dstBufferOffset` with `VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_BYTES`
-to model FFmpeg's sequence-header/filler prefix. The default, FFmpeg begin-slot,
-`dst_prefix=256`, and combined FFmpeg begin-slot + prefix probes all still fail
-at `vkEndCommandBuffer`, so the remaining blocker is after those picture
-resource / output offset parity points. More complete HEVC command/resource
-wiring is still required before enabling `Codec::Hevc` in
+to model FFmpeg's sequence-header/filler prefix. Encode image views now also use
+an identity `VkSamplerYcbcrConversion` like FFmpeg, and
+`VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE=none` can omit the explicit DPB
+image layout barrier to mirror FFmpeg's non-layered DPB path. The default,
+FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, and combined FFmpeg-style
+probes all still fail at `vkEndCommandBuffer`, so the remaining blocker is after
+those picture resource / image view / output offset parity points. More complete
+HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
 `VulkanEncoderAdapter`.
 
 ## Notes
