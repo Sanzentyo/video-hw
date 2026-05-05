@@ -98,6 +98,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   - A zero-count `vkBindVideoSessionMemoryKHR` experiment was run for the Intel direct ash HEVC decode path after the driver reported zero session memory requirements.
   - The Intel decode child process aborted with `0xc0000409` (`thread caused non-unwinding panic. aborting.`), matching the earlier unbound-session experiment's failure class.
   - Because both "skip session bind" and "bind zero entries" abort on this driver, the implementation keeps the safe diagnostic failure at `vkGetVideoSessionMemoryRequirementsKHR returned no memory requirements` instead of enabling either path.
+- Spec/source check:
+  - Vulkan's `vkBindVideoSessionMemoryKHR` valid usage requires `bindSessionMemoryInfoCount` to be greater than 0, so a zero-count bind is not a valid production workaround: <https://docs.vulkan.org/refpages/latest/refpages/source/vkBindVideoSessionMemoryKHR.html>
+  - FFmpeg's `ff_vk_video_common_init` follows the normal session-memory path: query `common->nb_mem`, allocate `VkVideoSessionMemoryRequirementsKHR` / `VkBindVideoSessionMemoryInfoKHR` arrays for that count, then call `BindVideoSessionMemoryKHR(..., common->nb_mem, bind_mem)`. No zero-count special case was found in the current upstream source: <https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/vulkan_video.c>
+  - Local FFmpeg build used for comparison: `N-121297-g3d7f0c46e7-g1a02412170+3`, built with `--enable-vulkan`, `--enable-libvpl`, `--enable-nvenc`, `--enable-cuvid`, `--enable-d3d11va`, and related Windows hardware paths.
 - Interpretation: Intel Vulkan is now actively probed instead of only being marked unavailable. The driver advertises HEVC decode capability, but the direct ash session bootstrap does not produce usable session memory requirements on this environment. This remains the Vulkan/Intel-specific blocker.
 
 ### H.264
