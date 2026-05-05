@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 default = ["backend-vt"]
 backend-vt = ["video-hw-core/backend-vt"]
-backend-nvidia = []
 unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
 
 [dependencies]

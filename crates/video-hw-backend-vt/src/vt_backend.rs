@@ -12,9 +12,10 @@ use crate::backend_transform_adapter::{DecodedUnit, VtTransformAdapter};
 use crate::bitstream::{AccessUnit, ParameterSetCache, StatefulBitstreamAssembler};
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
-    BackendError, CapabilityReport, Codec, ColorRequest, DecodeOutputMode, DecodeSummary,
-    DecoderConfig, EncodedPacket, Frame, SessionSwitchMode, SessionSwitchRequest, VideoDecoder,
-    VideoEncoder, VtSessionConfig,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
+    ColorRequest, DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
+    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder, VtDecoderOptions,
+    VtEncoderOptions, VtSessionConfig,
 };
 use core_foundation::{
     base::{CFAllocator, CFType, TCFType, kCFAllocatorSystemDefault},
@@ -42,7 +43,7 @@ use core_video::{
         CVColorPrimariesGetIntegerCodePointForString, CVImageBuffer, CVImageBufferKeys,
         CVTransferFunctionGetIntegerCodePointForString, CVYCbCrMatrixGetIntegerCodePointForString,
     },
-    pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_32BGRA},
+    pixel_buffer::{CVPixelBuffer, CVPixelBufferKeys, kCVPixelFormatType_32BGRA},
 };
 use video_toolbox::{
     compression_properties::{
@@ -126,6 +127,8 @@ impl VtDecoderSession {
         } else {
             None
         };
+        let destination_image_buffer_attributes =
+            decode_destination_image_buffer_attributes(config.output_mode);
 
         let mut decode_state = Box::new(Mutex::new(DecodeOutputState::default()));
         if let Ok(mut state) = decode_state.lock() {
@@ -142,7 +145,7 @@ impl VtDecoderSession {
             VTDecompressionSession::new_with_callback(
                 format_description.clone(),
                 decoder_specification,
-                None,
+                destination_image_buffer_attributes,
                 Some(&callback as *const VTDecompressionOutputCallbackRecord),
             )
         }
@@ -187,9 +190,13 @@ impl VtDecoderSession {
                     self.format_description.as_concrete_TypeRef(),
                 )
             };
+            let presentation_time_stamp = access_unit
+                .pts_90k
+                .map(cm_time_from_90k)
+                .unwrap_or_else(|| CMTime::make(self.next_pts(), fps));
             let timing = CMSampleTimingInfo {
                 duration: CMTime::make(1, fps),
-                presentationTimeStamp: CMTime::make(self.next_pts(), fps),
+                presentationTimeStamp: presentation_time_stamp,
                 decodeTimeStamp: unsafe { kCMTimeInvalid },
             };
             let sample_buffer = CMSampleBuffer::new_ready(
@@ -269,6 +276,7 @@ impl VtDecoderSession {
 
 pub struct VtDecoderAdapter {
     config: DecoderConfig,
+    report_metrics: bool,
     assembler: StatefulBitstreamAssembler,
     decoder: Option<VtDecoderSession>,
     last_summary: DecodeSummary,
@@ -278,9 +286,17 @@ pub struct VtDecoderAdapter {
 
 impl VtDecoderAdapter {
     pub fn new(config: DecoderConfig) -> Self {
+        let options = vt_decoder_options(&config);
+        let report_metrics = option_or_env_bool(options.report_metrics, "VIDEO_HW_VT_METRICS");
+        let pipeline_queue_capacity = option_or_env_usize(
+            options.pipeline_queue_capacity,
+            "VIDEO_HW_VT_PIPELINE_QUEUE",
+            8,
+        );
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
             config,
+            report_metrics,
             decoder: None,
             last_summary: DecodeSummary {
                 decoded_frames: 0,
@@ -289,8 +305,11 @@ impl VtDecoderAdapter {
                 pixel_format: None,
             },
             last_output_pts_90k: None,
-            pipeline_scheduler: if should_enable_pipeline_scheduler() {
-                let capacity = pipeline_queue_capacity();
+            pipeline_scheduler: if option_or_env_bool(
+                options.enable_pipeline_scheduler,
+                "VIDEO_HW_VT_PIPELINE",
+            ) {
+                let capacity = pipeline_queue_capacity;
                 Some(PipelineScheduler::new(
                     VtTransformAdapter::with_config(1, capacity),
                     capacity,
@@ -322,7 +341,7 @@ impl VtDecoderAdapter {
             let delta = frames.len();
             self.last_summary = summary.clone();
             let processed = self.preprocess_frames_via_pipeline(frames)?;
-            if should_report_metrics() {
+            if self.report_metrics {
                 let mut jitter_stats = SampleStats::default();
                 let expected_frame_ms = if self.config.fps > 0 {
                     1_000.0 / self.config.fps as f64
@@ -429,7 +448,7 @@ impl VideoDecoder for VtDecoderAdapter {
         {
             decoder.decode_access_units(&access_units, self.config.fps)?;
         }
-        if should_report_metrics() {
+        if self.report_metrics {
             eprintln!(
                 "[vt.decode.submit] flush=false, access_units={}, input_copy_bytes={}, submit_ms={:.3}",
                 access_unit_count,
@@ -453,7 +472,7 @@ impl VideoDecoder for VtDecoderAdapter {
         {
             decoder.decode_access_units(&access_units, self.config.fps)?;
         }
-        if should_report_metrics() {
+        if self.report_metrics {
             eprintln!(
                 "[vt.decode.submit] flush=true, access_units={}, input_copy_bytes={}, submit_ms={:.3}",
                 access_unit_count,
@@ -478,6 +497,7 @@ pub struct VtEncoderAdapter {
     codec: Codec,
     fps: i32,
     require_hardware: bool,
+    report_metrics: bool,
     pending_frames: Vec<Frame>,
     width: Option<usize>,
     height: Option<usize>,
@@ -549,10 +569,27 @@ impl SampleStats {
 
 impl VtEncoderAdapter {
     pub fn with_config(codec: Codec, fps: i32, require_hardware: bool) -> Self {
+        Self::with_config_and_options(codec, fps, require_hardware, BackendEncoderOptions::Default)
+    }
+
+    pub fn with_config_and_options(
+        codec: Codec,
+        fps: i32,
+        require_hardware: bool,
+        backend_options: BackendEncoderOptions,
+    ) -> Self {
+        let options = vt_encoder_options(backend_options);
+        let report_metrics = option_or_env_bool(options.report_metrics, "VIDEO_HW_VT_METRICS");
+        let pipeline_queue_capacity = option_or_env_usize(
+            options.pipeline_queue_capacity,
+            "VIDEO_HW_VT_PIPELINE_QUEUE",
+            8,
+        );
         Self {
             codec,
             fps,
             require_hardware,
+            report_metrics,
             pending_frames: Vec::new(),
             width: None,
             height: None,
@@ -561,8 +598,11 @@ impl VtEncoderAdapter {
             next_generation: 2,
             force_next_keyframe: false,
             session_reconfigure_pending: false,
-            pipeline_scheduler: if should_enable_pipeline_scheduler() {
-                let capacity = pipeline_queue_capacity();
+            pipeline_scheduler: if option_or_env_bool(
+                options.enable_pipeline_scheduler,
+                "VIDEO_HW_VT_PIPELINE",
+            ) {
+                let capacity = pipeline_queue_capacity;
                 Some(PipelineScheduler::new(
                     VtTransformAdapter::with_config(1, capacity),
                     capacity,
@@ -763,10 +803,6 @@ impl VtEncoderAdapter {
     }
 }
 
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
 fn expect_metadata_only_decoded_unit(
     unit: DecodedUnit,
     stage: &str,
@@ -776,19 +812,6 @@ fn expect_metadata_only_decoded_unit(
         other => Err(BackendError::Backend(format!(
             "unexpected pipeline output for {stage}: {other:?}"
         ))),
-    }
-}
-
-#[cfg(not(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-)))]
-fn expect_metadata_only_decoded_unit(
-    unit: DecodedUnit,
-    _stage: &str,
-) -> Result<Frame, BackendError> {
-    match unit {
-        DecodedUnit::MetadataOnly(frame) => Ok(frame),
     }
 }
 
@@ -980,7 +1003,7 @@ impl VideoEncoder for VtEncoderAdapter {
         pending_packets.sort_by_key(|p| p.frame_index);
         let packets: Vec<EncodedPacket> = pending_packets.into_iter().map(|p| p.packet).collect();
 
-        if should_report_metrics() {
+        if self.report_metrics {
             let output_bytes: usize = packets.iter().map(|p| p.data.len()).sum();
             let mut queue_stats = SampleStats::default();
             if let Ok(values) = queue_depth_samples.lock() {
@@ -1098,6 +1121,21 @@ fn empty_dictionary() -> CFDictionary<CFString, CFType> {
     CFMutableDictionary::<CFString, CFType>::new().to_immutable()
 }
 
+fn decode_destination_image_buffer_attributes(
+    output_mode: DecodeOutputMode,
+) -> Option<CFDictionary<CFString, CFType>> {
+    if matches!(output_mode, DecodeOutputMode::Metadata) {
+        return None;
+    }
+
+    let mut attributes = CFMutableDictionary::<CFString, CFType>::new();
+    attributes.add(
+        &CFString::from(CVPixelBufferKeys::PixelFormatType),
+        &CFNumber::from(kCVPixelFormatType_32BGRA as i32).as_CFType(),
+    );
+    Some(attributes.to_immutable())
+}
+
 fn make_bgra_frame(
     width: usize,
     height: usize,
@@ -1186,12 +1224,6 @@ fn cm_time_from_90k(pts_90k: i64) -> CMTime {
     CMTime::make(pts_90k.max(0), 90_000)
 }
 
-fn should_enable_pipeline_scheduler() -> bool {
-    std::env::var("VIDEO_HW_VT_PIPELINE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 fn update_peak(peak: &AtomicUsize, value: usize) {
     let mut current = peak.load(Ordering::Relaxed);
     while value > current {
@@ -1218,18 +1250,43 @@ fn update_jitter_samples(
     *last_pts_90k = Some(current);
 }
 
-fn should_report_metrics() -> bool {
-    std::env::var("VIDEO_HW_VT_METRICS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn vt_decoder_options(config: &DecoderConfig) -> VtDecoderOptions {
+    match &config.backend_options {
+        BackendDecoderOptions::VideoToolbox(options) => options.clone(),
+        BackendDecoderOptions::Default
+        | BackendDecoderOptions::Nvidia(_)
+        | BackendDecoderOptions::Intel(_)
+        | BackendDecoderOptions::Vulkan(_) => VtDecoderOptions::default(),
+    }
 }
 
-fn pipeline_queue_capacity() -> usize {
-    std::env::var("VIDEO_HW_VT_PIPELINE_QUEUE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
+fn vt_encoder_options(backend_options: BackendEncoderOptions) -> VtEncoderOptions {
+    match backend_options {
+        BackendEncoderOptions::VideoToolbox(options) => options,
+        BackendEncoderOptions::Default
+        | BackendEncoderOptions::Nvidia(_)
+        | BackendEncoderOptions::Intel(_)
+        | BackendEncoderOptions::Vulkan(_) => VtEncoderOptions::default(),
+    }
+}
+
+fn option_or_env_bool(option: Option<bool>, env_name: &str) -> bool {
+    option.unwrap_or_else(|| {
+        std::env::var(env_name)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn option_or_env_usize(option: Option<usize>, env_name: &str, default: usize) -> usize {
+    option
+        .or_else(|| {
+            std::env::var(env_name)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        })
         .map(|v| v.clamp(1, 1024))
-        .unwrap_or(8)
+        .unwrap_or(default)
 }
 
 fn packed_access_units_bytes(access_units: &[AccessUnit]) -> usize {
@@ -1687,5 +1744,40 @@ mod tests {
 
         adapter.sync_pipeline_generation(&scheduler);
         assert_eq!(adapter.pending_switch_generation(), Some(2));
+    }
+
+    #[test]
+    fn vt_encoder_options_control_metrics_and_pipeline_scheduler() {
+        let adapter = VtEncoderAdapter::with_config_and_options(
+            Codec::H264,
+            30,
+            false,
+            BackendEncoderOptions::VideoToolbox(VtEncoderOptions {
+                report_metrics: Some(true),
+                enable_pipeline_scheduler: Some(true),
+                pipeline_queue_capacity: Some(3),
+            }),
+        );
+
+        assert!(adapter.report_metrics);
+        assert!(adapter.pipeline_scheduler.is_some());
+    }
+
+    #[test]
+    fn vt_decoder_options_control_metrics_and_pipeline_scheduler() {
+        let adapter = VtDecoderAdapter::new(DecoderConfig {
+            codec: Codec::H264,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::VideoToolbox(VtDecoderOptions {
+                report_metrics: Some(true),
+                enable_pipeline_scheduler: Some(true),
+                pipeline_queue_capacity: Some(3),
+            }),
+        });
+
+        assert!(adapter.report_metrics);
+        assert!(adapter.pipeline_scheduler.is_some());
     }
 }

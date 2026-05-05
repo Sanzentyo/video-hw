@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use metal::{CompileOptions, Device, MTLResourceOptions, MTLSize};
+
 use crate::BackendError;
 use crate::pipeline::{BoundedQueueRx, QueueRecvError, QueueSendError, bounded_queue};
 
@@ -123,37 +125,95 @@ impl Drop for TransformDispatcher {
 fn run_job(job: TransformJob) -> Result<TransformResult, BackendError> {
     match job {
         TransformJob::Nv12ToRgb(frame) => {
-            let rgb = nv12_to_rgb24(&frame)?;
+            let rgb = match nv12_to_rgb24_metal(&frame) {
+                Ok(rgb) => rgb,
+                Err(_) => nv12_to_rgb24(&frame)?,
+            };
             Ok(TransformResult::Rgb(rgb))
         }
     }
 }
 
+pub fn nv12_to_rgb24_metal(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
+    validate_nv12_frame(frame)?;
+    let device = Device::system_default().ok_or_else(|| {
+        BackendError::UnsupportedConfig("Metal device is not available".to_string())
+    })?;
+    let options = CompileOptions::new();
+    let library = device
+        .new_library_with_source(NV12_TO_RGB_METAL, &options)
+        .map_err(|err| BackendError::Backend(format!("metal library compile failed: {err}")))?;
+    let function = library
+        .get_function("nv12_to_rgb", None)
+        .map_err(|err| BackendError::Backend(format!("metal function lookup failed: {err}")))?;
+    let pipeline = device
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|err| BackendError::Backend(format!("metal pipeline creation failed: {err}")))?;
+    let command_queue = device.new_command_queue();
+    let command_buffer = command_queue.new_command_buffer();
+    let encoder = command_buffer.new_compute_command_encoder();
+
+    let input_buffer = device.new_buffer_with_data(
+        frame.data.as_ptr().cast(),
+        frame.data.len() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let output_len = frame.width.saturating_mul(frame.height).saturating_mul(3);
+    let output_buffer = device.new_buffer(output_len as u64, MTLResourceOptions::StorageModeShared);
+    let params = [
+        frame.width as u32,
+        frame.height as u32,
+        frame.pitch as u32,
+        0_u32,
+    ];
+    let params_buffer = device.new_buffer_with_data(
+        params.as_ptr().cast(),
+        std::mem::size_of_val(&params) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(&input_buffer), 0);
+    encoder.set_buffer(1, Some(&output_buffer), 0);
+    encoder.set_buffer(2, Some(&params_buffer), 0);
+    encoder.dispatch_threads(
+        MTLSize::new(frame.width as u64, frame.height as u64, 1),
+        MTLSize::new(16, 16, 1),
+    );
+    encoder.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+
+    let mut data = vec![0_u8; output_len];
+    if output_len > 0 {
+        let src = output_buffer.contents().cast::<u8>();
+        if src.is_null() {
+            return Err(BackendError::Backend(
+                "metal output buffer contents is null".to_string(),
+            ));
+        }
+        // Metal shared buffers expose CPU-readable memory after the command buffer completes.
+        unsafe {
+            data.copy_from_slice(std::slice::from_raw_parts(src, output_len));
+        }
+    }
+
+    Ok(RgbFrame {
+        width: frame.width,
+        height: frame.height,
+        pts_90k: frame.pts_90k,
+        data,
+    })
+}
+
 pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
+    validate_nv12_frame(frame)?;
     let width = frame.width;
     let height = frame.height;
     let pitch = frame.pitch.max(width);
-    if width == 0 || height == 0 {
-        return Err(BackendError::InvalidInput(
-            "nv12 frame dimensions must be positive".to_string(),
-        ));
-    }
-    if width > pitch {
-        return Err(BackendError::InvalidInput(
-            "nv12 width exceeds pitch".to_string(),
-        ));
-    }
     let luma_size = pitch
         .checked_mul(height)
         .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
-    let total_size = luma_size
-        .checked_add(luma_size / 2)
-        .ok_or_else(|| BackendError::InvalidInput("nv12 total size overflow".to_string()))?;
-    if frame.data.len() < total_size {
-        return Err(BackendError::InvalidInput(
-            "nv12 data is smaller than expected".to_string(),
-        ));
-    }
 
     let uv_base = luma_size;
     let mut rgb = vec![0_u8; width.saturating_mul(height).saturating_mul(3)];
@@ -189,10 +249,81 @@ pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
     })
 }
 
+fn validate_nv12_frame(frame: &Nv12Frame) -> Result<(), BackendError> {
+    let width = frame.width;
+    let height = frame.height;
+    let pitch = frame.pitch.max(width);
+    if width == 0 || height == 0 {
+        return Err(BackendError::InvalidInput(
+            "nv12 frame dimensions must be positive".to_string(),
+        ));
+    }
+    if width > pitch {
+        return Err(BackendError::InvalidInput(
+            "nv12 width exceeds pitch".to_string(),
+        ));
+    }
+    let luma_size = pitch
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
+    let total_size = luma_size
+        .checked_add(luma_size / 2)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 total size overflow".to_string()))?;
+    if frame.data.len() < total_size {
+        return Err(BackendError::InvalidInput(
+            "nv12 data is smaller than expected".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[inline]
 fn clip_to_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
+
+const NV12_TO_RGB_METAL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct Params {
+    uint width;
+    uint height;
+    uint pitch;
+    uint _pad;
+};
+
+static inline uchar clip_to_uchar(int value) {
+    return (uchar)clamp(value, 0, 255);
+}
+
+kernel void nv12_to_rgb(
+    device const uchar* nv12 [[buffer(0)]],
+    device uchar* rgb [[buffer(1)]],
+    constant Params& params [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    uint y_index = gid.y * params.pitch + gid.x;
+    uint uv_base = params.pitch * params.height;
+    uint uv_index = uv_base + (gid.y / 2) * params.pitch + (gid.x & ~1u);
+    int y_value = int(nv12[y_index]);
+    int u_value = int(nv12[uv_index]);
+    int v_value = int(nv12[uv_index + 1]);
+
+    int c = max(y_value - 16, 0);
+    int d = u_value - 128;
+    int e = v_value - 128;
+    uint dst = (gid.y * params.width + gid.x) * 3;
+    rgb[dst] = clip_to_uchar((298 * c + 409 * e + 128) >> 8);
+    rgb[dst + 1] = clip_to_uchar((298 * c - 100 * d - 208 * e + 128) >> 8);
+    rgb[dst + 2] = clip_to_uchar((298 * c + 516 * d + 128) >> 8);
+}
+"#;
 
 pub fn make_argb_to_nv12_dummy(width: usize, height: usize) -> Nv12Frame {
     let pitch = width.max(1);
@@ -231,6 +362,24 @@ mod tests {
         assert_eq!(rgb.width, 64);
         assert_eq!(rgb.height, 36);
         assert_eq!(rgb.data.len(), 64 * 36 * 3);
+    }
+
+    #[test]
+    fn metal_nv12_to_rgb_matches_cpu_path() {
+        let frame = make_argb_to_nv12_dummy(32, 18);
+        let cpu = nv12_to_rgb24(&frame).unwrap();
+        let gpu = match nv12_to_rgb24_metal(&frame) {
+            Ok(gpu) => gpu,
+            Err(err) if err.is_runtime_unavailable() => {
+                eprintln!("skip: Metal unavailable: {err}");
+                return;
+            }
+            Err(err) => panic!("unexpected Metal transform error: {err:?}"),
+        };
+
+        assert_eq!(gpu.width, cpu.width);
+        assert_eq!(gpu.height, cpu.height);
+        assert_eq!(gpu.data, cpu.data);
     }
 
     #[test]

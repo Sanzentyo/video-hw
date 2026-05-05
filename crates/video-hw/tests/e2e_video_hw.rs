@@ -23,9 +23,12 @@ use std::{fs, path::PathBuf};
     )
 ))]
 use rstest::rstest;
-#[cfg(all(
-    any(feature = "backend-nvidia", feature = "backend-intel"),
-    any(target_os = "linux", target_os = "windows")
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(feature = "backend-nvidia", feature = "backend-intel"),
+        any(target_os = "linux", target_os = "windows")
+    )
 ))]
 use video_hw::BackendEncoderOptions;
 #[cfg(any(
@@ -68,8 +71,6 @@ use video_hw::NvidiaSessionConfig;
     )
 ))]
 use video_hw::Timestamp90k;
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
-use video_hw::VtSessionConfig;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -117,6 +118,8 @@ use video_hw::{NvDecoderAdapter, NvEncoderAdapter};
 use video_hw::{SessionSwitchMode, SessionSwitchRequest};
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 use video_hw::{VtDecoderAdapter, VtEncoderAdapter};
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::{VtEncoderOptions, VtSessionConfig};
 #[cfg(all(
     feature = "backend-vulkan",
     any(target_os = "linux", target_os = "windows")
@@ -1143,6 +1146,169 @@ fn e2e_vt_backend_accepts_explicit_session_switch_request() {
         mode: SessionSwitchMode::Immediate,
     });
     assert!(result.is_ok());
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_decode_and_encode_work() {
+    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::H264,
+        fps: 30,
+        require_hardware: false,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
+
+    let capability = decoder
+        .query_capability(Codec::H264)
+        .expect("capability query should not fail");
+    assert!(capability.decode_supported);
+    assert!(capability.encode_supported);
+
+    let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
+    let mut decoded_frames = 0usize;
+    for chunk in data.chunks(4096) {
+        decoder
+            .submit(BitstreamInput::AnnexBChunk {
+                chunk: chunk.to_vec(),
+                pts_90k: None,
+            })
+            .expect("decode chunk should succeed");
+        while decoder
+            .try_reap()
+            .expect("try_reap should succeed")
+            .is_some()
+        {
+            decoded_frames += 1;
+        }
+    }
+    decoded_frames += decoder.flush().expect("flush should succeed").len();
+    assert!(decoded_frames > 0);
+    assert_eq!(decoder.summary().decoded_frames, decoded_frames);
+
+    let mut encoder =
+        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    for i in 0..30 {
+        encoder
+            .submit(make_argb_frame(i as i64))
+            .expect("submit should succeed");
+    }
+    let packets = encoder.flush().expect("flush should succeed");
+    assert!(!packets.is_empty());
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_hevc_decode_sample() {
+    let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+        codec: Codec::Hevc,
+        fps: 30,
+        require_hardware: false,
+        output_mode: DecodeOutputMode::Metadata,
+        backend_options: BackendDecoderOptions::Default,
+    });
+
+    let data = fs::read(sample_path("sample-10s.h265")).expect("sample bitstream should exist");
+    let mut decoded_frames = 0usize;
+    for chunk in data.chunks(4096) {
+        decoder
+            .submit(BitstreamInput::AnnexBChunk {
+                chunk: chunk.to_vec(),
+                pts_90k: None,
+            })
+            .expect("decode chunk should succeed");
+        while decoder
+            .try_reap()
+            .expect("try_reap should succeed")
+            .is_some()
+        {
+            decoded_frames += 1;
+        }
+    }
+
+    decoded_frames += decoder.flush().expect("flush should succeed").len();
+    assert!(decoded_frames > 0);
+    assert_eq!(decoder.summary().decoded_frames, decoded_frames);
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_decode_returns_pixel_payloads() {
+    for (codec, sample) in [
+        (Codec::H264, "sample-10s.h264"),
+        (Codec::Hevc, "sample-10s.h265"),
+    ] {
+        for mode in [DecodeOutputMode::Nv12, DecodeOutputMode::Rgb24] {
+            let mut decoder = DecodeSession::<VtDecoderAdapter>::new(DecoderConfig {
+                codec,
+                fps: 30,
+                require_hardware: false,
+                output_mode: mode,
+                backend_options: BackendDecoderOptions::Default,
+            });
+            let data = fs::read(sample_path(sample)).expect("sample bitstream should exist");
+            let mut frames = Vec::new();
+            for chunk in data.chunks(4096) {
+                decoder
+                    .submit(BitstreamInput::AnnexBChunk {
+                        chunk: chunk.to_vec(),
+                        pts_90k: None,
+                    })
+                    .expect("decode chunk should succeed");
+                while let Some(frame) = decoder.try_reap().expect("try_reap should succeed") {
+                    frames.push(frame);
+                }
+            }
+            frames.extend(decoder.flush().expect("flush should succeed"));
+            assert!(
+                !frames.is_empty(),
+                "VT {codec:?} {mode:?} decode should produce frames"
+            );
+            for frame in frames {
+                match (mode, frame) {
+                    (
+                        DecodeOutputMode::Nv12,
+                        video_hw::DecodedFrame::Nv12 {
+                            dims, pitch, data, ..
+                        },
+                    ) => {
+                        let width = dims.width.get() as usize;
+                        let height = dims.height.get() as usize;
+                        assert!(pitch >= width);
+                        assert!(data.len() >= pitch * height + (pitch * height / 2));
+                    }
+                    (DecodeOutputMode::Rgb24, video_hw::DecodedFrame::Rgb24 { dims, data, .. }) => {
+                        assert_eq!(
+                            data.len(),
+                            dims.width.get() as usize * dims.height.get() as usize * 3
+                        );
+                    }
+                    (_, other) => panic!("unexpected decoded frame for {mode:?}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_encode_accepts_backend_specific_options() {
+    let mut config = EncoderConfig::new(Codec::H264, 30, false);
+    config.backend_options = BackendEncoderOptions::VideoToolbox(VtEncoderOptions {
+        report_metrics: Some(false),
+        enable_pipeline_scheduler: Some(false),
+        pipeline_queue_capacity: Some(4),
+    });
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(config);
+
+    for i in 0..30 {
+        encoder
+            .submit(make_argb_frame(i as i64))
+            .expect("submit should succeed");
+    }
+
+    let packets = encoder.flush().expect("flush should succeed");
+    assert!(!packets.is_empty());
 }
 
 #[cfg(all(

@@ -155,6 +155,7 @@ impl NvDecoderAdapter {
                 .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
                 .unwrap_or(false),
             BackendDecoderOptions::Default
+            | BackendDecoderOptions::VideoToolbox(_)
             | BackendDecoderOptions::Intel(_)
             | BackendDecoderOptions::Vulkan(_) => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
         };
@@ -402,6 +403,7 @@ impl NvEncoderAdapter {
         let options = match backend_options {
             BackendEncoderOptions::Nvidia(options) => options,
             BackendEncoderOptions::Default
+            | BackendEncoderOptions::VideoToolbox(_)
             | BackendEncoderOptions::Intel(_)
             | BackendEncoderOptions::Vulkan(_) => crate::NvidiaEncoderOptions::default(),
         };

@@ -40,6 +40,7 @@ impl VulkanDecoderAdapter {
         let options = match &config.backend_options {
             BackendDecoderOptions::Vulkan(options) => options.clone(),
             BackendDecoderOptions::Default
+            | BackendDecoderOptions::VideoToolbox(_)
             | BackendDecoderOptions::Nvidia(_)
             | BackendDecoderOptions::Intel(_) => VulkanDecoderOptions::default(),
         };
@@ -317,6 +318,7 @@ impl VulkanEncoderAdapter {
         let options = match backend_options {
             BackendEncoderOptions::Vulkan(options) => options,
             BackendEncoderOptions::Default
+            | BackendEncoderOptions::VideoToolbox(_)
             | BackendEncoderOptions::Nvidia(_)
             | BackendEncoderOptions::Intel(_) => VulkanEncoderOptions::default(),
         };

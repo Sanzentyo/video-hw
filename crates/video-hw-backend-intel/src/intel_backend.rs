@@ -34,6 +34,7 @@ impl IntelDecoderAdapter {
         let options = match &config.backend_options {
             BackendDecoderOptions::Intel(options) => options.clone(),
             BackendDecoderOptions::Default
+            | BackendDecoderOptions::VideoToolbox(_)
             | BackendDecoderOptions::Nvidia(_)
             | BackendDecoderOptions::Vulkan(_) => IntelDecoderOptions::default(),
         };
@@ -196,6 +197,7 @@ impl IntelEncoderAdapter {
         let options = match backend_options {
             BackendEncoderOptions::Intel(options) => options,
             BackendEncoderOptions::Default
+            | BackendEncoderOptions::VideoToolbox(_)
             | BackendEncoderOptions::Nvidia(_)
             | BackendEncoderOptions::Vulkan(_) => IntelEncoderOptions::default(),
         };

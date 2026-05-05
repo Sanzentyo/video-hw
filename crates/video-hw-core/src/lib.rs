@@ -241,6 +241,7 @@ impl Display for EncoderConfig {
 pub enum BackendDecoderOptions {
     #[default]
     Default,
+    VideoToolbox(VtDecoderOptions),
     Nvidia(NvidiaDecoderOptions),
     Intel(IntelDecoderOptions),
     Vulkan(VulkanDecoderOptions),
@@ -250,14 +251,29 @@ pub enum BackendDecoderOptions {
 pub enum BackendEncoderOptions {
     #[default]
     Default,
+    VideoToolbox(VtEncoderOptions),
     Nvidia(NvidiaEncoderOptions),
     Intel(IntelEncoderOptions),
     Vulkan(VulkanEncoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct VtDecoderOptions {
+    pub report_metrics: Option<bool>,
+    pub enable_pipeline_scheduler: Option<bool>,
+    pub pipeline_queue_capacity: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct NvidiaDecoderOptions {
     pub report_metrics: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VtEncoderOptions {
+    pub report_metrics: Option<bool>,
+    pub enable_pipeline_scheduler: Option<bool>,
+    pub pipeline_queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]

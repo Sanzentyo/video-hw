@@ -49,11 +49,7 @@ impl PipelineScheduler {
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(test)]
     pub(crate) fn submit(
         &self,
         input: DecodedUnit,
@@ -80,11 +76,7 @@ impl PipelineScheduler {
             .map_err(map_send_err)
     }
 
-    #[cfg(all(
-        test,
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -93,11 +85,7 @@ impl PipelineScheduler {
         self.generation.store(generation.max(1), Ordering::Relaxed);
     }
 
-    #[cfg(all(
-        test,
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(test)]
     pub(crate) fn advance_generation(&self) -> u64 {
         self.generation
             .fetch_add(1, Ordering::Relaxed)
@@ -209,17 +197,13 @@ fn map_send_err(err: QueueSendError) -> BackendError {
 }
 
 #[cfg(test)]
-#[cfg(all(
-    feature = "backend-nvidia",
-    any(target_os = "linux", target_os = "windows")
-))]
 mod tests {
     use super::*;
-    use crate::{Frame, Nv12Frame, backend_transform_adapter::NvidiaTransformAdapter};
+    use crate::{Frame, Nv12Frame, backend_transform_adapter::VtTransformAdapter};
 
     #[test]
     fn keep_native_frame_passes_through_scheduler() {
-        let scheduler = PipelineScheduler::new(NvidiaTransformAdapter::new(1, 4), 4);
+        let scheduler = PipelineScheduler::new(VtTransformAdapter::new(), 4);
         scheduler
             .submit(
                 DecodedUnit::MetadataOnly(Frame {
@@ -249,7 +233,7 @@ mod tests {
 
     #[test]
     fn rgb_request_reaps_async_result() {
-        let scheduler = PipelineScheduler::new(NvidiaTransformAdapter::new(1, 4), 4);
+        let scheduler = PipelineScheduler::new(VtTransformAdapter::new(), 4);
         let nv12 = Nv12Frame {
             width: 32,
             height: 18,
@@ -271,7 +255,7 @@ mod tests {
 
     #[test]
     fn stale_generation_is_dropped() {
-        let scheduler = PipelineScheduler::new(NvidiaTransformAdapter::new(1, 4), 4);
+        let scheduler = PipelineScheduler::new(VtTransformAdapter::new(), 4);
         let stale_generation = scheduler.generation();
         let _ = scheduler.advance_generation();
         scheduler

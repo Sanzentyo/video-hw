@@ -5,10 +5,7 @@ use crate::{BackendError, Codec};
 #[derive(Debug, Clone)]
 pub struct AccessUnit {
     pub nalus: Vec<Vec<u8>>,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     pub pts_90k: Option<i64>,
 }
 
@@ -28,6 +25,7 @@ pub struct StatefulBitstreamAssembler {
     saw_aud: bool,
     current_nalus: Vec<Vec<u8>>,
     current_has_vcl: bool,
+    current_pts_90k: Option<i64>,
     parameter_sets: ParameterSetCache,
 }
 
@@ -48,15 +46,19 @@ impl StatefulBitstreamAssembler {
         &mut self,
         chunk: &[u8],
         codec: Codec,
-        _pts_90k: Option<i64>,
+        pts_90k: Option<i64>,
     ) -> Result<(Vec<AccessUnit>, ParameterSetCache), BackendError> {
         self.codec = Some(codec);
         if !chunk.is_empty() {
             self.pending.extend_from_slice(chunk);
         }
 
-        let nalus = self.take_complete_nals(false);
-        let access_units = self.process_nals(codec, nalus);
+        let finalize_chunk = pts_90k.is_some();
+        let nalus = self.take_complete_nals(finalize_chunk);
+        let mut access_units = self.process_nals(codec, nalus, pts_90k);
+        if finalize_chunk && self.current_has_vcl && !self.current_nalus.is_empty() {
+            access_units.push(self.finish_current_access_unit(codec));
+        }
 
         Ok((access_units, self.parameter_sets.clone()))
     }
@@ -66,7 +68,7 @@ impl StatefulBitstreamAssembler {
             .codec
             .ok_or_else(|| BackendError::InvalidInput("codec is not set".to_string()))?;
         let nalus = self.take_complete_nals(true);
-        let mut access_units = self.process_nals(codec, nalus);
+        let mut access_units = self.process_nals(codec, nalus, None);
         if self.current_has_vcl && !self.current_nalus.is_empty() {
             access_units.push(self.finish_current_access_unit(codec));
         }
@@ -74,7 +76,12 @@ impl StatefulBitstreamAssembler {
         Ok((access_units, self.parameter_sets.clone()))
     }
 
-    fn process_nals(&mut self, codec: Codec, nalus: Vec<Vec<u8>>) -> Vec<AccessUnit> {
+    fn process_nals(
+        &mut self,
+        codec: Codec,
+        nalus: Vec<Vec<u8>>,
+        pts_90k: Option<i64>,
+    ) -> Vec<AccessUnit> {
         let mut out = Vec::new();
 
         for nal in nalus {
@@ -100,6 +107,9 @@ impl StatefulBitstreamAssembler {
             }
 
             let nal_is_vcl = is_vcl(codec, &nal);
+            if self.current_nalus.is_empty() {
+                self.current_pts_90k = pts_90k;
+            }
             self.current_nalus.push(nal);
             if nal_is_vcl {
                 self.record_vcl();
@@ -109,24 +119,18 @@ impl StatefulBitstreamAssembler {
         out
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
         let _ = codec;
         let au = AccessUnit {
             nalus: mem::take(&mut self.current_nalus),
-            pts_90k: None,
+            pts_90k: self.current_pts_90k.take(),
         };
         self.clear_current_flags();
         au
     }
 
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
+    #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
     fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
         let _ = codec;
         let au = AccessUnit {
@@ -136,36 +140,26 @@ impl StatefulBitstreamAssembler {
         au
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     fn record_vcl(&mut self) {
         self.current_has_vcl = true;
     }
 
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
+    #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
     fn record_vcl(&mut self) {
         self.current_has_vcl = true;
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     fn clear_current_flags(&mut self) {
         self.current_has_vcl = false;
+        self.current_pts_90k = None;
     }
 
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
+    #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
     fn clear_current_flags(&mut self) {
         self.current_has_vcl = false;
+        self.current_pts_90k = None;
     }
 
     fn take_complete_nals(&mut self, finalize: bool) -> Vec<Vec<u8>> {
@@ -331,10 +325,7 @@ mod tests {
 
         assert_eq!(emitted.len(), 2);
         assert!(!emitted[0].nalus.is_empty());
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         {
             assert!(emitted[0].pts_90k.is_none());
         }
@@ -349,5 +340,25 @@ mod tests {
 
         let params = cache.required_for_codec(Codec::H264).unwrap();
         assert_eq!(params.len(), 2);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    #[test]
+    fn timestamped_chunks_emit_access_units_with_matching_pts() {
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::H264);
+        let first = [0, 0, 0, 1, 0x09, 0xF0, 0, 0, 0, 1, 0x65, 0x88];
+        let second = [0, 0, 0, 1, 0x09, 0xF0, 0, 0, 0, 1, 0x41, 0x9A];
+
+        let (first_aus, _) = assembler
+            .push_chunk(&first, Codec::H264, Some(1_000))
+            .unwrap();
+        let (second_aus, _) = assembler
+            .push_chunk(&second, Codec::H264, Some(2_000))
+            .unwrap();
+
+        assert_eq!(first_aus.len(), 1);
+        assert_eq!(first_aus[0].pts_90k, Some(1_000));
+        assert_eq!(second_aus.len(), 1);
+        assert_eq!(second_aus[0].pts_90k, Some(2_000));
     }
 }

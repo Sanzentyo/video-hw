@@ -25,7 +25,7 @@ VideoToolbox backend へ同等レベルで適用する。
 2. transform adapter 実体
 - NV: CUDA 優先 + CPU fallback
 - VT: CPU worker fallback 実装済み（NV12->RGB）
-- VT: GPU 実経路（Metal/CoreImage）は未着手
+- VT: Metal compute 優先 + CPU worker fallback 実装済み（NV12->RGB）
 
 3. session / generation 運用
 - NV: `pending_switch` + generation 制御を実装
@@ -42,16 +42,24 @@ VideoToolbox backend へ同等レベルで適用する。
 | NV 側項目 | VT 側対応タスク | 完了条件 |
 |---|---|---|
 | NV-P1-004 | `PipelineScheduler` を VT decode/encode 本線へ接続 | 完了（`VIDEO_HW_VT_PIPELINE=1`） |
-| NV-P1-005 | VT TransformLayer（GPU優先 + CPU fallback） | CPU fallback 完了、GPU 実経路が未完 |
-| NV-P1-006 | `VtTransformAdapter` 実体（Metal/CoreImage） | CPU fallback 完了、Metal/CoreImage が未完 |
+| NV-P1-005 | VT TransformLayer（GPU優先 + CPU fallback） | 完了（Metal compute + CPU fallback） |
+| NV-P1-006 | `VtTransformAdapter` 実体（Metal/CoreImage） | 完了（Metal compute） |
 | session generation | VT 側 session switch + generation 制御 | 完了（encode 経路） |
 | metrics parity | VT encode/decode に stage + queue + jitter + copy 指標 | 完了（`VIDEO_HW_VT_METRICS=1`） |
 | benchmark parity | ffmpeg VT 比較スクリプトの repeat/verify/equal-input 運用 | h264/hevc で継続再現可能 |
 
+### 2026-05-04 追記
+
+- VT bitstream assembler は timestamped AnnexB chunk を AU 境界として確定し、AU に `pts_90k` を保持する。これにより NV decode と同じく、呼び出し側が渡した chunk PTS を backend decode timestamp に反映できる。
+- VT decode は non-metadata output mode で BGRA destination image buffer を要求し、`DecodeOutputMode::Nv12` / `Rgb24` を e2e で検証する。
+- `VtTransformAdapter` は passthrough stub ではなく `TransformDispatcher` worker を保持し、NV12->RGB の Metal compute 優先 + CPU worker fallback を `metal_nv12_to_rgb_matches_cpu_path` / `vt_nv12_rgb_request_runs_worker` で検証する。
+- `BackendDecoderOptions::VideoToolbox` / `BackendEncoderOptions::VideoToolbox` を追加し、VT も metrics / pipeline scheduler / queue capacity を config から指定できる。環境変数 `VIDEO_HW_VT_METRICS` / `VIDEO_HW_VT_PIPELINE` / `VIDEO_HW_VT_PIPELINE_QUEUE` は fallback として維持する。
+- 短時間 smoke として `benchmark_ffmpeg_vt_precise.rs --warmup 0 --repeat 1 --frame-count 30 --verify --equal-raw-input` を h264/hevc で通過。
+
 ## 5. 実装フェーズ（VTセッション）
 
-1. VT-P2: Transform 実体化（未完）
-- `VtTransformAdapter` に Metal/CoreImage 経路を実装
+1. VT-P2: Transform 実体化（完了）
+- `VtTransformAdapter` に Metal compute 経路を実装
 - CPU fallback を worker で維持し callback thread を保護
 
 2. VT-P4: 計測基盤の同等化（完了）

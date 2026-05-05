@@ -14,7 +14,8 @@ pub use contract::{
     DecoderConfig, Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig,
     IntelDecoderOptions, IntelEncoderOptions, NvidiaDecoderOptions, NvidiaEncoderOptions,
     NvidiaSessionConfig, RawFrameBuffer, SessionSwitchMode, SessionSwitchRequest, Timestamp90k,
-    VtSessionConfig, VulkanDecoderOptions, VulkanEncoderOptions,
+    VtDecoderOptions, VtEncoderOptions, VtSessionConfig, VulkanDecoderOptions,
+    VulkanEncoderOptions,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -1159,7 +1160,12 @@ impl EncoderBackend for vt_backend::VtEncoderAdapter {
     const BACKEND_KIND: BackendKind = BackendKind::VideoToolbox;
 
     fn from_encoder_config(config: EncoderConfig) -> Self {
-        Self::with_config(config.codec, config.fps, config.require_hardware)
+        Self::with_config_and_options(
+            config.codec,
+            config.fps,
+            config.require_hardware,
+            config.backend_options,
+        )
     }
 }
 
@@ -2174,13 +2180,18 @@ mod tests {
     ))]
     #[test]
     fn decode_reap_timeout_waits_until_deadline_when_empty() {
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        let mut session =
+            DecodeSession::<VtDecoderAdapter>::new(DecoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
         let mut session =
             DecodeSession::<NvDecoderAdapter>::new(DecoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
@@ -2188,6 +2199,7 @@ mod tests {
         let mut session =
             DecodeSession::<IntelDecoderAdapter>::new(DecoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
             not(feature = "backend-intel"),
             feature = "backend-vulkan",
@@ -2195,17 +2207,6 @@ mod tests {
         ))]
         let mut session =
             DecodeSession::<VulkanDecoderAdapter>::new(DecoderConfig::new(Codec::H264, 30, false));
-        #[cfg(all(
-            not(any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            )),
-            target_os = "macos",
-            feature = "backend-vt"
-        ))]
-        let mut session =
-            DecodeSession::<VtDecoderAdapter>::new(DecoderConfig::new(Codec::H264, 30, false));
         let timeout = Duration::from_millis(8);
         let start = std::time::Instant::now();
         let out = session.reap_timeout(timeout).unwrap();
@@ -2228,13 +2229,18 @@ mod tests {
     ))]
     #[test]
     fn encode_reap_timeout_waits_until_deadline_when_empty() {
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        let mut session =
+            EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
         let mut session =
             EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
@@ -2242,6 +2248,7 @@ mod tests {
         let mut session =
             EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
         #[cfg(all(
+            not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
             not(feature = "backend-intel"),
             feature = "backend-vulkan",
@@ -2249,17 +2256,6 @@ mod tests {
         ))]
         let mut session =
             EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
-        #[cfg(all(
-            not(any(
-                feature = "backend-nvidia",
-                feature = "backend-intel",
-                feature = "backend-vulkan"
-            )),
-            target_os = "macos",
-            feature = "backend-vt"
-        ))]
-        let mut session =
-            EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
         let timeout = Duration::from_millis(8);
         let start = std::time::Instant::now();
         let out = session.reap_timeout(timeout).unwrap();
