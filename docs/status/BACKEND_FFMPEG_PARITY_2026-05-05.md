@@ -23,6 +23,21 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 
 ## Result Summary
 
+### Latest integrated run after fixes
+
+- Command:
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codecs h264,hevc --warmup 1 --repeat 3 --frame-count 30 --width 320 --height 180 --vulkan-adapter-indexes 0,1 --allow-failures true --verify`
+- H.264 integrated: `output/benchmark-backends-h264-1777958931.md`
+  - NVIDIA: PASS
+  - Intel oneVPL: PASS
+  - Vulkan NVIDIA: H.264 decode 597.305 fps vs FFmpeg Vulkan 512.060 fps; H.264 encode 112.450 fps vs FFmpeg Vulkan 90.921 fps
+  - Vulkan Intel: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode exits `0xc0000005`, encode fails with `Function not implemented`
+- HEVC integrated: `output/benchmark-backends-hevc-1777958995.md`
+  - NVIDIA: PASS
+  - Intel oneVPL: PASS
+  - Vulkan NVIDIA: HEVC decode 680.103 fps vs FFmpeg Vulkan 495.702 fps; production HEVC encode remains unavailable in `VulkanEncoderAdapter`
+  - Vulkan Intel: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode works at 194.852 fps, encode fails with `Function not implemented`
+
 ### H.264
 
 | Backend | Case | Result |
