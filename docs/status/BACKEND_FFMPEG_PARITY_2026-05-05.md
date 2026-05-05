@@ -84,9 +84,12 @@ still fails at `vkEndCommandBuffer`, and session-parameter feedback still fails
 with `ERROR_OUT_OF_HOST_MEMORY`, so the blocker is not limited to missing VPS
 timing/DPB fields. The encode slice-header flags now also use an FFmpeg-like
 baseline, including an explicit `collocated_from_l0_flag=1`; the same 1920x1080
-probe still fails, so that flag shape is not sufficient either. More complete
-HEVC session parameter generation and picture info wiring are still required
-before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+probe still fails, so that flag shape is not sufficient either. The
+`control_mode=ffmpeg` path now also attaches an H.265-specific rate-control
+pNext with FFmpeg-style flat regular GOP hints; that path still fails at
+`vkEndCommandBuffer` too. More complete HEVC session parameter generation and
+picture info wiring are still required before enabling `Codec::Hevc` in
+`VulkanEncoderAdapter`.
 
 ## Notes
 

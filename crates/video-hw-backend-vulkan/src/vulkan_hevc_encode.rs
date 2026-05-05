@@ -2529,6 +2529,18 @@ fn hevc_encode_std_slice_segment_header_flags(
     flags
 }
 
+fn hevc_encode_h265_rate_control_info() -> vk::VideoEncodeH265RateControlInfoKHR<'static> {
+    vk::VideoEncodeH265RateControlInfoKHR::default()
+        .flags(
+            vk::VideoEncodeH265RateControlFlagsKHR::REFERENCE_PATTERN_FLAT
+                | vk::VideoEncodeH265RateControlFlagsKHR::REGULAR_GOP,
+        )
+        .gop_frame_count(30)
+        .idr_period(30)
+        .consecutive_b_frame_count(0)
+        .sub_layer_count(0)
+}
+
 fn hevc_encode_pre_encode_probe_mode_label(mode: HevcEncodePreEncodeProbeMode) -> &'static str {
     match mode {
         HevcEncodePreEncodeProbeMode::ScopeOnly => "scope-only",
@@ -3262,9 +3274,11 @@ fn probe_hevc_encode_submit_execution(
         let mut quality_level_info = vk::VideoEncodeQualityLevelInfoKHR::default()
             .quality_level(control_config.selected_quality_level);
         let mut issue_coding_control = true;
+        let h265_rate_control_info = hevc_encode_h265_rate_control_info();
         match control_config.control_mode {
             HevcEncodeProbeControlMode::Default => {
                 if rate_control_mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED {
+                    rate_control_info.p_next = std::ptr::from_ref(&h265_rate_control_info).cast();
                     rate_control_info = rate_control_info
                         .layers(std::slice::from_ref(&rate_control_layer))
                         .virtual_buffer_size_in_ms(1000)
@@ -3286,6 +3300,7 @@ fn probe_hevc_encode_submit_execution(
                 }
             }
             HevcEncodeProbeControlMode::Ffmpeg => {
+                rate_control_info.p_next = std::ptr::from_ref(&h265_rate_control_info).cast();
                 if rate_control_mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED {
                     rate_control_info = rate_control_info
                         .layers(std::slice::from_ref(&rate_control_layer))
@@ -3904,9 +3919,11 @@ fn run_hevc_encode_coding_scope_probe(
     let mut coding_control_info =
         vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
     let mut issue_coding_control = true;
+    let h265_rate_control_info = hevc_encode_h265_rate_control_info();
     match control_config.control_mode {
         HevcEncodeProbeControlMode::Default => {
             if rate_control_mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED {
+                rate_control_info.p_next = std::ptr::from_ref(&h265_rate_control_info).cast();
                 rate_control_info = rate_control_info
                     .layers(std::slice::from_ref(&rate_control_layer))
                     .virtual_buffer_size_in_ms(1000)
@@ -3928,6 +3945,7 @@ fn run_hevc_encode_coding_scope_probe(
             }
         }
         HevcEncodeProbeControlMode::Ffmpeg => {
+            rate_control_info.p_next = std::ptr::from_ref(&h265_rate_control_info).cast();
             if rate_control_mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED {
                 rate_control_info = rate_control_info
                     .layers(std::slice::from_ref(&rate_control_layer))
@@ -4856,6 +4874,23 @@ mod tests {
         assert_eq!(no_sao_flags.slice_sao_luma_flag(), 0);
         assert_eq!(no_sao_flags.slice_sao_chroma_flag(), 0);
         assert_eq!(no_sao_flags.collocated_from_l0_flag(), 1);
+    }
+
+    #[test]
+    fn hevc_encode_rate_control_info_matches_ffmpeg_baseline_shape() {
+        let info = hevc_encode_h265_rate_control_info();
+        assert!(
+            info.flags
+                .contains(vk::VideoEncodeH265RateControlFlagsKHR::REFERENCE_PATTERN_FLAT)
+        );
+        assert!(
+            info.flags
+                .contains(vk::VideoEncodeH265RateControlFlagsKHR::REGULAR_GOP)
+        );
+        assert_eq!(info.gop_frame_count, 30);
+        assert_eq!(info.idr_period, 30);
+        assert_eq!(info.consecutive_b_frame_count, 0);
+        assert_eq!(info.sub_layer_count, 0);
     }
 
     #[test]
