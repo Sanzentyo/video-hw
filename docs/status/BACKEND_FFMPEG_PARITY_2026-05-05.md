@@ -138,13 +138,16 @@ FFmpeg-style 320x180 probe.
 omit `VkVideoEncodeH265SessionCreateInfoKHR` from `vkCreateVideoSessionKHR`,
 matching FFmpeg's session-create shape more closely; this still fails at
 `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_BEGIN_PNEXT_MODE=rate-control` can attach the
+rate-control pNext chain to `cmd_begin_video_coding_khr`, matching FFmpeg's
+conditional begin-coding shape; this also still fails at `vkEndCommandBuffer`.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
 / image view / allocation / syntax-flag / output offset / zero-reference pointer
 / fixed-QP / quality-level / source-upload / source-resource-extent /
-session-H265-create-info parity points. More complete HEVC command/resource
-wiring is still required before enabling `Codec::Hevc` in
+session-H265-create-info / begin-rate-control-pNext parity points. More complete
+HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
 `VulkanEncoderAdapter`.
 
 ## Notes
