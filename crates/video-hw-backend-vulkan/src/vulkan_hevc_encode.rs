@@ -357,6 +357,12 @@ enum HevcEncodeProbeDpbBarrierMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeEncodeReferenceSlotPointerMode {
+    EmptySlice,
+    FfmpegNonNull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcEncodeProbeNaluMode {
     SingleSlice,
     Empty,
@@ -2080,6 +2086,37 @@ fn hevc_encode_probe_dpb_barrier_mode_label(mode: HevcEncodeProbeDpbBarrierMode)
     }
 }
 
+fn resolve_hevc_encode_probe_encode_reference_slot_pointer_mode()
+-> HevcEncodeProbeEncodeReferenceSlotPointerMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_REFERENCE_SLOT_POINTER_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_encode_reference_slot_pointer_mode(mode.as_deref())
+}
+
+fn parse_hevc_encode_probe_encode_reference_slot_pointer_mode(
+    mode: Option<&str>,
+) -> HevcEncodeProbeEncodeReferenceSlotPointerMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("ffmpeg") | Some("non-null") | Some("non_null") | Some("nonnull") => {
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::FfmpegNonNull
+        }
+        _ => HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice,
+    }
+}
+
+fn hevc_encode_probe_encode_reference_slot_pointer_mode_label(
+    mode: HevcEncodeProbeEncodeReferenceSlotPointerMode,
+) -> &'static str {
+    match mode {
+        HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice => "empty-slice",
+        HevcEncodeProbeEncodeReferenceSlotPointerMode::FfmpegNonNull => "ffmpeg-non-null",
+    }
+}
+
 fn resolve_hevc_encode_probe_control_mode() -> HevcEncodeProbeControlMode {
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_CONTROL_MODE";
     let mode = std::env::var(ENV_VAR).ok();
@@ -3004,6 +3041,8 @@ fn probe_hevc_encode_submit_execution(
         let begin_reference_slot_mode = resolve_hevc_encode_probe_begin_reference_slot_mode();
         let setup_reference_slot_mode = resolve_hevc_encode_probe_setup_reference_slot_mode();
         let dpb_barrier_mode = resolve_hevc_encode_probe_dpb_barrier_mode();
+        let encode_reference_slot_pointer_mode =
+            resolve_hevc_encode_probe_encode_reference_slot_pointer_mode();
         let control_mode = resolve_hevc_encode_probe_control_mode();
         let nalu_mode = resolve_hevc_encode_probe_nalu_mode();
         let codec_info_mode = resolve_hevc_encode_probe_codec_info_mode();
@@ -3045,6 +3084,10 @@ fn probe_hevc_encode_submit_execution(
         let setup_reference_slot_mode_label =
             hevc_encode_probe_setup_reference_slot_mode_label(setup_reference_slot_mode);
         let dpb_barrier_mode_label = hevc_encode_probe_dpb_barrier_mode_label(dpb_barrier_mode);
+        let encode_reference_slot_pointer_mode_label =
+            hevc_encode_probe_encode_reference_slot_pointer_mode_label(
+                encode_reference_slot_pointer_mode,
+            );
         let begin_session_parameters_mode =
             resolve_hevc_encode_probe_begin_session_parameters_mode();
         let begin_session_parameters_mode_label =
@@ -3072,7 +3115,7 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3110,6 +3153,7 @@ fn probe_hevc_encode_submit_execution(
             rps_mode_label,
             begin_reference_slot_mode_label,
             setup_reference_slot_mode_label,
+            encode_reference_slot_pointer_mode_label,
             dpb_barrier_mode_label,
             begin_session_parameters_mode_label,
             control_mode_label,
@@ -3630,6 +3674,16 @@ fn probe_hevc_encode_submit_execution(
             .src_picture_resource(src_picture_resource)
             .reference_slots(&[])
             .push_next(&mut h265_encode_info);
+        let encode_info = match encode_reference_slot_pointer_mode {
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice => encode_info,
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::FfmpegNonNull => {
+                vk::VideoEncodeInfoKHR {
+                    reference_slot_count: 0,
+                    p_reference_slots: begin_reference_slots.as_ptr(),
+                    ..encode_info
+                }
+            }
+        };
         let encode_info = match setup_reference_slot_mode {
             HevcEncodeProbeSetupReferenceSlotMode::SlotZero => {
                 encode_info.setup_reference_slot(&setup_reference_slot)
@@ -4225,6 +4279,8 @@ fn run_hevc_encode_pre_encode_probe(
     let temporal_id = hevc_encode_probe_temporal_id(picture_info_mode);
     let pic_order_cnt_val = hevc_encode_probe_pic_order_cnt_val(picture_info_mode);
     let dpb_barrier_mode = resolve_hevc_encode_probe_dpb_barrier_mode();
+    let encode_reference_slot_pointer_mode =
+        resolve_hevc_encode_probe_encode_reference_slot_pointer_mode();
     let resources = config.resources;
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -4589,6 +4645,16 @@ fn run_hevc_encode_pre_encode_probe(
             .dst_buffer_range(resources.dst_buffer_range)
             .src_picture_resource(src_picture_resource)
             .reference_slots(&[]);
+        let encode_info = match encode_reference_slot_pointer_mode {
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice => encode_info,
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::FfmpegNonNull => {
+                vk::VideoEncodeInfoKHR {
+                    reference_slot_count: 0,
+                    p_reference_slots: std::ptr::from_ref(&setup_reference_slot),
+                    ..encode_info
+                }
+            }
+        };
         let encode_info = match codec_info_mode {
             HevcEncodeProbeCodecInfoMode::WithH265Info => {
                 encode_info.push_next(&mut h265_encode_info)
@@ -6275,6 +6341,28 @@ mod tests {
             assert_eq!(
                 parse_hevc_encode_probe_dpb_barrier_mode(Some(alias)),
                 HevcEncodeProbeDpbBarrierMode::None
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_encode_reference_slot_pointer_mode_defaults_to_empty_slice() {
+        assert_eq!(
+            parse_hevc_encode_probe_encode_reference_slot_pointer_mode(None),
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_encode_reference_slot_pointer_mode(Some("")),
+            HevcEncodeProbeEncodeReferenceSlotPointerMode::EmptySlice
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_encode_reference_slot_pointer_mode_accepts_ffmpeg_aliases() {
+        for alias in ["ffmpeg", "non-null", "non_null", "nonnull", " FFmpeg "] {
+            assert_eq!(
+                parse_hevc_encode_probe_encode_reference_slot_pointer_mode(Some(alias)),
+                HevcEncodeProbeEncodeReferenceSlotPointerMode::FfmpegNonNull
             );
         }
     }

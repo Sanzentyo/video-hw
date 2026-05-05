@@ -119,12 +119,16 @@ SAO aligned with the capability bits, and forces
 `sps_temporal_mvp_enabled_flag=false` like FFmpeg. On this driver that yields
 `parameter_set_sao=true` and `parameter_set_temporal_mvp=false`, but submit still
 fails. `VIDEO_HW_VULKAN_HEVC_ENCODE_DPB_BARRIER_MODE=none` can omit the explicit
-DPB image layout barrier to mirror FFmpeg's non-layered DPB path. The default,
-FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, and combined FFmpeg-style
-probes all still fail at `vkEndCommandBuffer`, so the remaining blocker is after
-those picture resource / image view / allocation / syntax-flag / output offset
-parity points. More complete HEVC command/resource wiring is still required
-before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+DPB image layout barrier to mirror FFmpeg's non-layered DPB path.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_REFERENCE_SLOT_POINTER_MODE=ffmpeg` can also keep a
+non-null `pReferenceSlots` pointer while `referenceSlotCount=0`, matching
+FFmpeg's IDR encode-info shape more closely. The default, FFmpeg begin-slot,
+`dst_prefix=256`, DPB-barrier-none, FFmpeg reference-slot pointer, and combined
+FFmpeg-style probes all still fail at `vkEndCommandBuffer`, so the remaining
+blocker is after those picture resource / image view / allocation / syntax-flag
+/ output offset / zero-reference pointer parity points. More complete HEVC
+command/resource wiring is still required before enabling `Codec::Hevc` in
+`VulkanEncoderAdapter`.
 
 ## Notes
 
