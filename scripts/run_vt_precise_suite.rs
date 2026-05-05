@@ -65,9 +65,7 @@ fn run_one(codec: &str, args: &Args) -> Result<()> {
         &args.repeat.to_string(),
     ]);
 
-    if args.release {
-        cmd.arg("--release");
-    }
+    cmd.arg("--release").arg(args.release.to_string());
     if args.verify {
         cmd.arg("--verify");
     }

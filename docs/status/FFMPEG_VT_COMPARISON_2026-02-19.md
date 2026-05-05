@@ -132,3 +132,26 @@ cargo +nightly -Zscript scripts/run_vt_precise_suite.rs --warmup 1 --repeat 3 --
 - decode は今回も `video-hw` が `ffmpeg videotoolbox` より大幅に速い（約 4.9x〜5.0x）。
 - encode は今回も `video-hw` が `ffmpeg videotoolbox` より遅い（約 1.09x〜1.13x）。
 - 傾向は 2026-02-19 の計測と同じで、decode 優位 / encode 劣位の構図は不変。
+
+## 10. VT backend options 経由 smoke（2026-05-05）
+
+実行コマンド:
+
+```bash
+cargo +nightly -Zscript scripts/run_vt_precise_suite.rs --warmup 0 --repeat 1 --verify --equal-raw-input --include-internal-metrics --vt-enable-pipeline-scheduler true --vt-pipeline-queue-capacity 4
+```
+
+生成レポート:
+- `output/benchmark-vt-precise-h264-1777946079.md`
+- `output/benchmark-vt-precise-hevc-1777946084.md`
+
+結果（mean, 秒）:
+
+| Codec | video-hw decode | video-hw encode | ffmpeg decode | ffmpeg encode |
+|---|---:|---:|---:|---:|
+| H264 | 0.539 | 0.775 | 1.200 | 0.420 |
+| HEVC | 0.444 | 0.638 | 1.013 | 0.520 |
+
+検証メモ:
+- `--include-internal-metrics` は `VIDEO_HW_VT_METRICS` 環境変数ではなく、example CLI の `--vt-report-metrics true` 経由で有効化。
+- `--vt-enable-pipeline-scheduler true` / `--vt-pipeline-queue-capacity 4` を h264/hevc 双方へ渡し、video-hw / ffmpeg 出力はいずれも decode=ok。
