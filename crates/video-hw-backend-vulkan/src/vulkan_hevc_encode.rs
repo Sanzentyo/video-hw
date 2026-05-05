@@ -159,6 +159,8 @@ struct HevcEncodeSubmitExecutionConfig {
     parameter_set_coded_width: u32,
     parameter_set_coded_height: u32,
     parameter_set_pps_init_qp_minus26: i8,
+    parameter_set_sample_adaptive_offset_enabled: bool,
+    parameter_set_sps_temporal_mvp_enabled: bool,
     parameter_mode: HevcEncodeParameterMode,
     parameter_feedback_probe_summary: Option<String>,
     coded_width: u32,
@@ -210,6 +212,8 @@ struct HevcEncodePreEncodeProbeConfig {
     begin_session_parameters_mode: HevcEncodeProbeBeginSessionParametersMode,
     nalu_mode: HevcEncodeProbeNaluMode,
     codec_info_mode: HevcEncodeProbeCodecInfoMode,
+    sample_adaptive_offset_enabled: bool,
+    sps_temporal_mvp_enabled: bool,
     resources: HevcEncodePreEncodeProbeResources,
 }
 
@@ -382,6 +386,8 @@ struct HevcEncodeSessionParameters {
     coded_width: u32,
     coded_height: u32,
     pps_init_qp_minus26: i8,
+    sample_adaptive_offset_enabled: bool,
+    sps_temporal_mvp_enabled: bool,
     mode: HevcEncodeParameterMode,
     feedback_probe_summary: Option<String>,
 }
@@ -1276,6 +1282,10 @@ fn probe_single_hevc_encode_session_format(
                         parameter_set_coded_width: session_parameters.coded_width,
                         parameter_set_coded_height: session_parameters.coded_height,
                         parameter_set_pps_init_qp_minus26: session_parameters.pps_init_qp_minus26,
+                        parameter_set_sample_adaptive_offset_enabled: session_parameters
+                            .sample_adaptive_offset_enabled,
+                        parameter_set_sps_temporal_mvp_enabled: session_parameters
+                            .sps_temporal_mvp_enabled,
                         parameter_mode: session_parameters.mode,
                         parameter_feedback_probe_summary: session_parameters
                             .feedback_probe_summary
@@ -1539,6 +1549,8 @@ fn create_hevc_encode_video_session_parameters(
                 coded_width,
                 coded_height,
                 pps_init_qp_minus26: 0,
+                sample_adaptive_offset_enabled: false,
+                sps_temporal_mvp_enabled: false,
                 mode: parameter_mode,
                 feedback_probe_summary: Some("skipped(mode=empty-template)".to_string()),
             })
@@ -1589,6 +1601,10 @@ fn create_hevc_encode_video_session_parameters_from_sample(
     );
     let (vps_id, sps_id, pps_id) = std_parameter_storage.encode_parameter_set_ids();
     let pps_init_qp_minus26 = std_parameter_storage.encode_pps_init_qp_minus26();
+    let sample_adaptive_offset_enabled = parameter_sets
+        .parsed_sps
+        .sample_adaptive_offset_enabled_flag;
+    let sps_temporal_mvp_enabled = parameter_sets.parsed_sps.sps_temporal_mvp_enabled_flag;
     let encode_h265_session_parameters_add = hevc_encode_parameter_mode_add_info_filter(
         effective_parameter_mode,
     )
@@ -1646,6 +1662,8 @@ fn create_hevc_encode_video_session_parameters_from_sample(
         coded_width: parameter_sets.coded_width,
         coded_height: parameter_sets.coded_height,
         pps_init_qp_minus26,
+        sample_adaptive_offset_enabled,
+        sps_temporal_mvp_enabled,
         mode: effective_parameter_mode,
         feedback_probe_summary,
     })
@@ -2894,7 +2912,7 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -2918,6 +2936,8 @@ fn probe_hevc_encode_submit_execution(
             config.parameter_set_coded_width == config.coded_width
                 && config.parameter_set_coded_height == config.coded_height,
             config.parameter_set_pps_init_qp_minus26,
+            config.parameter_set_sample_adaptive_offset_enabled,
+            config.parameter_set_sps_temporal_mvp_enabled,
             parameter_feedback_probe,
             reference_list_mode_label,
             reference_index_mode_label,
@@ -3134,6 +3154,9 @@ fn probe_hevc_encode_submit_execution(
                         begin_session_parameters_mode,
                         nalu_mode,
                         codec_info_mode,
+                        sample_adaptive_offset_enabled: config
+                            .parameter_set_sample_adaptive_offset_enabled,
+                        sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                         resources: pre_encode_resources,
                     },
                 )
@@ -3158,6 +3181,9 @@ fn probe_hevc_encode_submit_execution(
                         begin_session_parameters_mode,
                         nalu_mode,
                         codec_info_mode,
+                        sample_adaptive_offset_enabled: config
+                            .parameter_set_sample_adaptive_offset_enabled,
+                        sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                         resources: pre_encode_resources,
                     },
                 )
@@ -3180,6 +3206,9 @@ fn probe_hevc_encode_submit_execution(
                         begin_session_parameters_mode,
                         nalu_mode,
                         codec_info_mode,
+                        sample_adaptive_offset_enabled: config
+                            .parameter_set_sample_adaptive_offset_enabled,
+                        sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                         resources: pre_encode_resources,
                     },
                 )
@@ -3279,6 +3308,12 @@ fn probe_hevc_encode_submit_execution(
             _bitfield_1: Default::default(),
         };
         std_slice_flags.set_first_slice_segment_in_pic_flag(1);
+        std_slice_flags.set_slice_sao_luma_flag(u32::from(
+            config.parameter_set_sample_adaptive_offset_enabled,
+        ));
+        std_slice_flags.set_slice_sao_chroma_flag(u32::from(
+            config.parameter_set_sample_adaptive_offset_enabled,
+        ));
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
             flags: std_slice_flags,
             slice_type,
@@ -3375,7 +3410,9 @@ fn probe_hevc_encode_submit_execution(
         std_picture_flags.set_IrapPicFlag(u32::from(is_reference));
         std_picture_flags.set_pic_output_flag(1);
         std_picture_flags.set_short_term_ref_pic_set_sps_flag(0);
-        std_picture_flags.set_slice_temporal_mvp_enabled_flag(0);
+        std_picture_flags.set_slice_temporal_mvp_enabled_flag(u32::from(
+            config.parameter_set_sps_temporal_mvp_enabled,
+        ));
         std_picture_flags.set_used_for_long_term_reference(0);
         std_picture_flags.set_discardable_flag(0);
         std_picture_flags.set_cross_layer_bla_flag(0);
@@ -3461,6 +3498,9 @@ fn probe_hevc_encode_submit_execution(
                     begin_session_parameters_mode,
                     nalu_mode,
                     codec_info_mode,
+                    sample_adaptive_offset_enabled: config
+                        .parameter_set_sample_adaptive_offset_enabled,
+                    sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
@@ -3488,6 +3528,9 @@ fn probe_hevc_encode_submit_execution(
                     begin_session_parameters_mode,
                     nalu_mode,
                     codec_info_mode,
+                    sample_adaptive_offset_enabled: config
+                        .parameter_set_sample_adaptive_offset_enabled,
+                    sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
@@ -3515,6 +3558,9 @@ fn probe_hevc_encode_submit_execution(
                     begin_session_parameters_mode,
                     nalu_mode,
                     codec_info_mode,
+                    sample_adaptive_offset_enabled: config
+                        .parameter_set_sample_adaptive_offset_enabled,
+                    sps_temporal_mvp_enabled: config.parameter_set_sps_temporal_mvp_enabled,
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
@@ -4192,7 +4238,8 @@ fn run_hevc_encode_pre_encode_probe(
         std_picture_flags.set_IrapPicFlag(u32::from(is_reference));
         std_picture_flags.set_pic_output_flag(1);
         std_picture_flags.set_short_term_ref_pic_set_sps_flag(0);
-        std_picture_flags.set_slice_temporal_mvp_enabled_flag(0);
+        std_picture_flags
+            .set_slice_temporal_mvp_enabled_flag(u32::from(config.sps_temporal_mvp_enabled));
         std_picture_flags.set_used_for_long_term_reference(0);
         std_picture_flags.set_discardable_flag(0);
         std_picture_flags.set_cross_layer_bla_flag(0);
@@ -4243,6 +4290,8 @@ fn run_hevc_encode_pre_encode_probe(
             _bitfield_1: Default::default(),
         };
         std_slice_flags.set_first_slice_segment_in_pic_flag(1);
+        std_slice_flags.set_slice_sao_luma_flag(u32::from(config.sample_adaptive_offset_enabled));
+        std_slice_flags.set_slice_sao_chroma_flag(u32::from(config.sample_adaptive_offset_enabled));
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
             flags: std_slice_flags,
             slice_type,

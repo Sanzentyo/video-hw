@@ -74,9 +74,11 @@ an explicit HEVC video profile in the query pool `pNext` chain; without it,
 complete, but the submit probe still fails at `vkEndCommandBuffer` whenever
 `cmdEncodeVideoKHR` is included. Both the 320x180 `empty-template` smoke case
 and the 1920x1080 sample-parameter case fail, so the blocker is not only the
-repository sample parameter set's coded size. More complete HEVC session
-parameter generation and picture info wiring are still required before enabling
-`Codec::Hevc` in `VulkanEncoderAdapter`.
+repository sample parameter set's coded size. The probe now carries SPS-derived
+SAO and temporal-MVP flags into H.265 slice/picture info, matching FFmpeg's
+Vulkan HEVC encode setup more closely, but that does not unblock submit on this
+driver. More complete HEVC session parameter generation and picture info wiring
+are still required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 
