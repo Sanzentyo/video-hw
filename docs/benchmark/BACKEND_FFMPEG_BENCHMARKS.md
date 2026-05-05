@@ -43,6 +43,11 @@ reports `Overall: FAIL` is surfaced as a failed backend in the aggregate report.
 The runner matches `video-hw` Vulkan adapters to FFmpeg Vulkan adapters by
 device name/vendor/device id because the two tools can use different numeric
 adapter indexes on hybrid-GPU systems.
+For the FFmpeg Vulkan command line, the runner uses unnamed physical-device
+selection (`-init_hw_device vulkan:<index>`). On the tested Windows hybrid-GPU
+machine, the named form (`vulkan=vk:<index>`) did not select the requested
+physical device and could silently route the encode case to Intel instead of
+NVIDIA.
 
 ## Backend-Specific Scripts
 
@@ -75,7 +80,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   NV script; Intel uses QSV paths in the Intel script; VT uses VideoToolbox on
   macOS. Vulkan uses FFmpeg `-hwaccel vulkan` for decode and
   `h264_vulkan` / `hevc_vulkan` for encode when the selected adapter supports
-  the operation.
+  the operation. The Vulkan FFmpeg path intentionally initializes devices as
+  `vulkan:<index>` rather than `vulkan=vk:<index>` so adapter selection follows
+  FFmpeg's physical-device index.
 - NV and Intel decode timing defaults to `--decode-output-mode metadata`, which
   matches FFmpeg null-sink decode and avoids measuring pixel readback when the
   comparison is backend throughput. NV and Intel encode timing defaults to equal

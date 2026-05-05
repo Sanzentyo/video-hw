@@ -139,6 +139,11 @@ command/resource wiring is still required before enabling `Codec::Hevc` in
 - Vulkan is now adapter-addressable in `video-hw` options and examples. The
   integrated runner matches adapters by name/device id instead of assuming
   `video-hw` and FFmpeg use the same numeric Vulkan index.
+- FFmpeg Vulkan device initialization now uses `-init_hw_device vulkan:<index>`
+  for the matched adapter. On this Windows hybrid-GPU machine,
+  `vulkan=vk:<index>` did not reliably select the requested physical device and
+  could send the NVIDIA encode comparison to Intel, where Vulkan encode queues
+  are unavailable.
 - `video-hw` / `vk-video` exposes the NVIDIA Vulkan video adapter on this
   machine. Intel Vulkan is listed by `vulkaninfo`, but is not usable by either
   `video-hw` or FFmpeg Vulkan in this environment; Intel hardware parity is
