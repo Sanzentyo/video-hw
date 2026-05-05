@@ -3312,8 +3312,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     sps_flags.set_sps_sub_layer_ordering_info_present_flag(bool_to_u32(
         inferred_sub_layer_ordering_present,
     ));
-    sps_flags.set_scaling_list_enabled_flag(bool_to_u32(sps.scaling_list_data.is_some()));
-    sps_flags.set_sps_scaling_list_data_present_flag(bool_to_u32(sps.scaling_list_data.is_some()));
+    // Do not advertise scaling lists until `pScalingLists` is populated below.
+    sps_flags.set_scaling_list_enabled_flag(0);
+    sps_flags.set_sps_scaling_list_data_present_flag(0);
     sps_flags.set_amp_enabled_flag(bool_to_u32(sps.amp_enabled_flag));
     sps_flags.set_sample_adaptive_offset_enabled_flag(bool_to_u32(
         sps.sample_adaptive_offset_enabled_flag,
@@ -3689,9 +3690,8 @@ fn build_std_sequence_parameter_set_vui(
     flags.set_vui_poc_proportional_to_timing_flag(bool_to_u32(
         timing_info.is_some_and(|timing| timing.poc_proportional_to_timing_flag),
     ));
-    flags.set_vui_hrd_parameters_present_flag(bool_to_u32(
-        timing_info.is_some_and(|timing| timing.hrd_parameters.is_some()),
-    ));
+    // Do not advertise HRD parameters until `pHrdParameters` is populated below.
+    flags.set_vui_hrd_parameters_present_flag(0);
 
     let bitstream_restriction_present = vui
         .bitstream_restriction
@@ -5612,6 +5612,17 @@ mod tests {
         assert!(!std_parameter_sets.vps[0].pDecPicBufMgr.is_null());
         assert!(!std_parameter_sets.sps[0].pProfileTierLevel.is_null());
         assert_eq!(
+            std_parameter_sets.sps[0].flags.scaling_list_enabled_flag(),
+            0
+        );
+        assert_eq!(
+            std_parameter_sets.sps[0]
+                .flags
+                .sps_scaling_list_data_present_flag(),
+            0
+        );
+        assert!(std_parameter_sets.sps[0].pScalingLists.is_null());
+        assert_eq!(
             std_parameter_sets.vps[0].vps_max_sub_layers_minus1,
             parsed_vps.vps_max_sub_layers_minus1
         );
@@ -5639,6 +5650,14 @@ mod tests {
             std_parameter_sets.sps[0].sps_video_parameter_set_id,
             parameter_sets.parsed_sps.sps_video_parameter_set_id
         );
+        if !std_parameter_sets.sps[0].pSequenceParameterSetVui.is_null() {
+            let vui = std_parameter_sets
+                .sequence_parameter_set_vui
+                .as_ref()
+                .unwrap();
+            assert_eq!(vui.flags.vui_hrd_parameters_present_flag(), 0);
+            assert!(vui.pHrdParameters.is_null());
+        }
     }
 
     #[test]
