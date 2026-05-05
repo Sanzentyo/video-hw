@@ -197,6 +197,8 @@ struct HevcEncodeSessionFormatProbeConfig {
 struct HevcEncodePreEncodeProbeResources {
     source_image: vk::Image,
     source_image_view: vk::ImageView,
+    source_upload_buffer: vk::Buffer,
+    source_upload_buffer_size: u64,
     dpb_image: vk::Image,
     dpb_image_view: vk::ImageView,
     source_picture_resource_width: u32,
@@ -3406,6 +3408,8 @@ fn probe_hevc_encode_submit_execution(
         let pre_encode_resources = HevcEncodePreEncodeProbeResources {
             source_image,
             source_image_view,
+            source_upload_buffer,
+            source_upload_buffer_size,
             dpb_image,
             dpb_image_view,
             source_picture_resource_width: image_width,
@@ -3788,6 +3792,8 @@ fn probe_hevc_encode_submit_execution(
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
+                        source_upload_buffer,
+                        source_upload_buffer_size,
                         dpb_image,
                         dpb_image_view,
                         source_picture_resource_width: image_width,
@@ -3822,6 +3828,8 @@ fn probe_hevc_encode_submit_execution(
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
+                        source_upload_buffer,
+                        source_upload_buffer_size,
                         dpb_image,
                         dpb_image_view,
                         source_picture_resource_width: image_width,
@@ -3856,6 +3864,8 @@ fn probe_hevc_encode_submit_execution(
                     resources: HevcEncodePreEncodeProbeResources {
                         source_image,
                         source_image_view,
+                        source_upload_buffer,
+                        source_upload_buffer_size,
                         dpb_image,
                         dpb_image_view,
                         source_picture_resource_width: image_width,
@@ -4360,9 +4370,23 @@ fn run_hevc_encode_pre_encode_probe(
             base_array_layer: 0,
             layer_count: 1,
         });
+    let source_upload_regions = build_hevc_encode_source_upload_regions(
+        vk::Format::G8_B8R8_2PLANE_420_UNORM,
+        resources.source_picture_resource_width,
+        resources.source_picture_resource_height,
+    )?
+    .1;
+    let source_upload_buffer_barrier = vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::HOST)
+        .src_access_mask(vk::AccessFlags2::HOST_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+        .buffer(resources.source_upload_buffer)
+        .offset(0)
+        .size(resources.source_upload_buffer_size);
     let source_prepare_dependency = vk::DependencyInfo::default()
-        .image_memory_barriers(std::slice::from_ref(&source_image_prepare_barrier));
-    let clear_color = vk::ClearColorValue { uint32: [0; 4] };
+        .image_memory_barriers(std::slice::from_ref(&source_image_prepare_barrier))
+        .buffer_memory_barriers(std::slice::from_ref(&source_upload_buffer_barrier));
     let clear_range = vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,
         base_mip_level: 0,
@@ -4413,12 +4437,12 @@ fn run_hevc_encode_pre_encode_probe(
     // SAFETY: barriers reference resources passed by the caller and command buffer is recording.
     unsafe {
         device.cmd_pipeline_barrier2(command_buffer, &source_prepare_dependency);
-        device.cmd_clear_color_image(
+        device.cmd_copy_buffer_to_image(
             command_buffer,
+            resources.source_upload_buffer,
             resources.source_image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &clear_color,
-            std::slice::from_ref(&clear_range),
+            &source_upload_regions,
         );
         device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
     }
