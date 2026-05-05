@@ -182,6 +182,7 @@ struct HevcEncodeSubmitExecutionConfig {
     session_dpb_mode: HevcEncodeProbeSessionDpbMode,
     session_max_dpb_slots: u32,
     session_max_active_reference_pictures: u32,
+    session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -191,6 +192,7 @@ struct HevcEncodeSessionFormatProbeConfig {
     reference_picture_format: vk::Format,
     maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
     session_dpb_mode: HevcEncodeProbeSessionDpbMode,
+    session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -305,6 +307,12 @@ enum HevcEncodeProbeMaintenance1Mode {
 enum HevcEncodeProbeSessionDpbMode {
     Default,
     MinimalOne,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeSessionH265CreateInfoMode {
+    WithMaxLevel,
+    Without,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -623,6 +631,7 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
     let (instance, validation_debug_state) = create_hevc_encode_probe_instance(&entry)?;
     let maintenance1_mode = resolve_hevc_encode_probe_maintenance1_mode();
     let session_dpb_mode = resolve_hevc_encode_probe_session_dpb_mode();
+    let session_h265_create_info_mode = resolve_hevc_encode_probe_session_h265_create_info_mode();
 
     let bootstrap_result = (|| -> Result<HevcEncodeSessionBootstrap, String> {
         let video_queue = ash::khr::video_queue::Instance::new(&entry, &instance);
@@ -806,6 +815,7 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
             coded_height,
             maintenance1_mode,
             session_dpb_mode,
+            session_h265_create_info_mode,
         );
         let selected_properties =
             unsafe { instance.get_physical_device_properties(candidate.physical_device) };
@@ -1095,6 +1105,7 @@ fn probe_hevc_encode_video_session_and_parameters_creation(
     coded_height: u32,
     maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
     session_dpb_mode: HevcEncodeProbeSessionDpbMode,
+    session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
 ) -> (
     HevcEncodeVideoSessionCreateProbe,
     HevcEncodeVideoSessionParametersCreateProbe,
@@ -1150,6 +1161,7 @@ fn probe_hevc_encode_video_session_and_parameters_creation(
                         reference_picture_format,
                         maintenance1_mode,
                         session_dpb_mode,
+                        session_h265_create_info_mode,
                     },
                 ) {
                     Ok((
@@ -1246,9 +1258,6 @@ fn probe_single_hevc_encode_session_format(
         .push_next(&mut encode_usage)
         .push_next(&mut encode_h265_profile);
 
-    let mut encode_h265_session_create = vk::VideoEncodeH265SessionCreateInfoKHR::default()
-        .use_max_level_idc(true)
-        .max_level_idc(candidate.capability_snapshot.max_level_idc);
     let (session_max_dpb_slots, session_max_active_reference_pictures) =
         resolve_hevc_encode_probe_session_dpb_limits(
             config.session_dpb_mode,
@@ -1263,8 +1272,16 @@ fn probe_single_hevc_encode_session_format(
         .reference_picture_format(config.reference_picture_format)
         .max_dpb_slots(session_max_dpb_slots)
         .max_active_reference_pictures(session_max_active_reference_pictures)
-        .std_header_version(&candidate.capability_snapshot.std_header_version)
-        .push_next(&mut encode_h265_session_create);
+        .std_header_version(&candidate.capability_snapshot.std_header_version);
+    let mut encode_h265_session_create = vk::VideoEncodeH265SessionCreateInfoKHR::default()
+        .use_max_level_idc(true)
+        .max_level_idc(candidate.capability_snapshot.max_level_idc);
+    let create_info = match config.session_h265_create_info_mode {
+        HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel => {
+            create_info.push_next(&mut encode_h265_session_create)
+        }
+        HevcEncodeProbeSessionH265CreateInfoMode::Without => create_info,
+    };
     let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
     let video_encode_device = ash::khr::video_encode_queue::Device::new(instance, device);
     let mut video_session = vk::VideoSessionKHR::null();
@@ -1359,6 +1376,7 @@ fn probe_single_hevc_encode_session_format(
                         session_dpb_mode: config.session_dpb_mode,
                         session_max_dpb_slots,
                         session_max_active_reference_pictures,
+                        session_h265_create_info_mode: config.session_h265_create_info_mode,
                     },
                 );
                 // SAFETY: handle was created from this device and is not reused afterwards.
@@ -2179,6 +2197,13 @@ fn resolve_hevc_encode_probe_session_dpb_mode() -> HevcEncodeProbeSessionDpbMode
     parse_hevc_encode_probe_session_dpb_mode(mode.as_deref())
 }
 
+fn resolve_hevc_encode_probe_session_h265_create_info_mode()
+-> HevcEncodeProbeSessionH265CreateInfoMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_SESSION_H265_CREATE_INFO_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_session_h265_create_info_mode(mode.as_deref())
+}
+
 fn resolve_hevc_encode_probe_begin_session_parameters_mode()
 -> HevcEncodeProbeBeginSessionParametersMode {
     const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_BEGIN_SESSION_PARAMETERS_MODE";
@@ -2233,6 +2258,22 @@ fn parse_hevc_encode_probe_session_dpb_mode(mode: Option<&str>) -> HevcEncodePro
         Some("minimal") | Some("minimal-one") | Some("minimal_1") | Some("minimal1")
         | Some("one") | Some("1") => HevcEncodeProbeSessionDpbMode::MinimalOne,
         _ => HevcEncodeProbeSessionDpbMode::Default,
+    }
+}
+
+fn parse_hevc_encode_probe_session_h265_create_info_mode(
+    mode: Option<&str>,
+) -> HevcEncodeProbeSessionH265CreateInfoMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("without") | Some("none") | Some("off") | Some("disable") | Some("disabled")
+        | Some("ffmpeg") | Some("ffmpeg-like") | Some("ffmpeg_like") | Some("0") => {
+            HevcEncodeProbeSessionH265CreateInfoMode::Without
+        }
+        _ => HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel,
     }
 }
 
@@ -2311,6 +2352,15 @@ fn hevc_encode_probe_session_dpb_mode_label(mode: HevcEncodeProbeSessionDpbMode)
     match mode {
         HevcEncodeProbeSessionDpbMode::Default => "default",
         HevcEncodeProbeSessionDpbMode::MinimalOne => "minimal-one",
+    }
+}
+
+fn hevc_encode_probe_session_h265_create_info_mode_label(
+    mode: HevcEncodeProbeSessionH265CreateInfoMode,
+) -> &'static str {
+    match mode {
+        HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel => "with-max-level",
+        HevcEncodeProbeSessionH265CreateInfoMode::Without => "without",
     }
 }
 
@@ -3180,6 +3230,10 @@ fn probe_hevc_encode_submit_execution(
         let picture_info_mode_label = hevc_encode_probe_picture_info_mode_label(picture_info_mode);
         let session_dpb_mode_label =
             hevc_encode_probe_session_dpb_mode_label(config.session_dpb_mode);
+        let session_h265_create_info_mode_label =
+            hevc_encode_probe_session_h265_create_info_mode_label(
+                config.session_h265_create_info_mode,
+            );
         let picture_resource_extent_mode = resolve_hevc_encode_probe_picture_resource_extent_mode();
         let (picture_resource_coded_width, picture_resource_coded_height) =
             match picture_resource_extent_mode {
@@ -3208,7 +3262,7 @@ fn probe_hevc_encode_submit_execution(
                 source_picture_resource_extent_mode,
             );
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3268,6 +3322,7 @@ fn probe_hevc_encode_submit_execution(
             hevc_encode_probe_maintenance1_mode_label(config.maintenance1_mode),
             config.maintenance1_feature_enabled,
             session_dpb_mode_label,
+            session_h265_create_info_mode_label,
             config.session_max_dpb_slots,
             config.session_max_active_reference_pictures,
         );
@@ -6470,6 +6525,40 @@ mod tests {
             assert_eq!(
                 parse_hevc_encode_probe_picture_resource_extent_mode(Some(alias)),
                 HevcEncodeProbePictureResourceExtentMode::ImageAligned
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_session_h265_create_info_mode_defaults_to_with_max_level() {
+        assert_eq!(
+            parse_hevc_encode_probe_session_h265_create_info_mode(None),
+            HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_session_h265_create_info_mode(Some("")),
+            HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_session_h265_create_info_mode(Some("with")),
+            HevcEncodeProbeSessionH265CreateInfoMode::WithMaxLevel
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_session_h265_create_info_mode_accepts_without_aliases() {
+        for alias in [
+            "without",
+            "none",
+            "off",
+            "disabled",
+            "ffmpeg",
+            "ffmpeg-like",
+            "0",
+        ] {
+            assert_eq!(
+                parse_hevc_encode_probe_session_h265_create_info_mode(Some(alias)),
+                HevcEncodeProbeSessionH265CreateInfoMode::Without
             );
         }
     }

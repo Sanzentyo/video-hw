@@ -101,8 +101,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   uses a VPS-owned profile-tier-level pointer, defaults disabled rate-control
   fixed QP to FFmpeg's 18, defaults encode quality level to FFmpeg's 0,
   initializes the source image by uploading NV12 planes, exposes source
-  picture-resource extent selection for FFmpeg parity probes, and maps CBR/VBR
-  slice `constant_qp` / `slice_qp_delta` to FFmpeg's shape. Session creation now also
+  picture-resource extent selection for FFmpeg parity probes, can omit the
+  H.265-specific session-create pNext to match FFmpeg, and maps CBR/VBR slice
+  `constant_qp` / `slice_qp_delta` to FFmpeg's shape. Session creation now also
   uses the device max coded extent like FFmpeg, and profile pNext chain ordering
   now matches FFmpeg's H.265-profile-before-usage shape. Those parity
   improvements do not yet unblock NVIDIA HEVC encode submit on this driver.

@@ -134,12 +134,17 @@ multi-plane image to encode.
 can also switch `srcPictureResource.codedExtent` independently; both 320x180 and
 320x192 source resource extents still fail at `vkEndCommandBuffer` in the
 FFmpeg-style 320x180 probe.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_SESSION_H265_CREATE_INFO_MODE=without` can also
+omit `VkVideoEncodeH265SessionCreateInfoKHR` from `vkCreateVideoSessionKHR`,
+matching FFmpeg's session-create shape more closely; this still fails at
+`vkEndCommandBuffer`.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
 / image view / allocation / syntax-flag / output offset / zero-reference pointer
-/ fixed-QP / quality-level / source-upload / source-resource-extent parity
-points. More complete HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
+/ fixed-QP / quality-level / source-upload / source-resource-extent /
+session-H265-create-info parity points. More complete HEVC command/resource
+wiring is still required before enabling `Codec::Hevc` in
 `VulkanEncoderAdapter`.
 
 ## Notes
