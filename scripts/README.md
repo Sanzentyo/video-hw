@@ -166,6 +166,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - Windows/Linux では `nv,intel,vulkan`、macOS では `vt` が既定。
 - NV/Intel/VT は子レポートの parity / verification 結果も統合statusへ反映する。
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
+- Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
 - FFmpeg Vulkan の adapter 指定は `-init_hw_device vulkan:<index>` を使う。Windows hybrid GPU 環境では `vulkan=vk:<index>` が指定した物理デバイスを選ばず、NVIDIA encode ケースが Intel 側へ流れることがあった。
 - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters` で `video-hw` / `vk-video` 側に見えている Vulkan adapter を確認できる。
 - `ffmpeg-only` Vulkan adapter のHEVC decodeでは、runnerが `VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX=<index>` を設定して direct ash HEVC decode bootstrap も試す。これは `--vulkan-adapter-index` の既存意味を変えず、Intel decode-only capability の切り分けに使う。

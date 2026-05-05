@@ -59,17 +59,24 @@ impl Codec {
         }
     }
 
-    fn annexb_input(self) -> &'static str {
-        match self {
-            Self::H264 => "sample-videos/sample-10s.h264",
-            Self::Hevc => "sample-videos/sample-10s.h265",
-        }
-    }
-
     fn ffmpeg_demuxer(self) -> &'static str {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+        }
+    }
+
+    fn software_encoder(self) -> &'static str {
+        match self {
+            Self::H264 => "libx264",
+            Self::Hevc => "libx265",
+        }
+    }
+
+    fn annexb_extension(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "h265",
         }
     }
 }
@@ -217,6 +224,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
+    }
+    if args.frame_count == 0 {
+        bail!("--frame-count must be >= 1");
     }
 
     fs::create_dir_all(&args.output_dir)
@@ -444,6 +454,7 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
     let list_adapters_bin = example_bin_path(profile, "list_vulkan_adapters");
     let null_sink = null_sink();
     let total_rounds = args.warmup + args.repeat;
+    let decode_input = ensure_vulkan_decode_input(args)?;
     let ffmpeg_adapters = discover_vulkaninfo_adapters().unwrap_or_else(|err| {
         eprintln!("failed to discover Vulkan adapters via vulkaninfo: {err:#}");
         Vec::new()
@@ -471,21 +482,22 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
             adapter.index,
             &video_hw_adapter_label,
             "video-hw decode",
-            303,
+            args.frame_count,
             total_rounds,
             args.warmup,
-            || vulkan_decode_command(&decode_bin, args, adapter.index),
+            || vulkan_decode_command(&decode_bin, args, &decode_input, adapter.index),
         ));
         if let Some(ffmpeg_adapter) = ffmpeg_match {
             cases.push(run_vulkan_case(
                 ffmpeg_adapter.index,
                 &adapter_label(ffmpeg_adapter),
                 "ffmpeg vulkan decode",
-                303,
+                args.frame_count,
                 total_rounds,
                 args.warmup,
                 || Ok(ffmpeg_vulkan_decode_command(
                     args,
+                    &decode_input,
                     ffmpeg_adapter.index,
                     &null_sink,
                 )),
@@ -556,14 +568,17 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
                 ffmpeg_adapter.index,
                 &adapter_label,
                 "video-hw decode",
-                303,
+                args.frame_count,
                 total_rounds,
                 args.warmup,
-                || vulkan_hevc_physical_decode_command(
-                    &decode_bin,
-                    args,
-                    ffmpeg_adapter.index,
-                ),
+                || {
+                    vulkan_hevc_physical_decode_command(
+                        &decode_bin,
+                        args,
+                        &decode_input,
+                        ffmpeg_adapter.index,
+                    )
+                },
             ));
         } else {
             cases.push(unavailable_case(
@@ -576,11 +591,12 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
             ffmpeg_adapter.index,
             &adapter_label,
             "ffmpeg vulkan decode",
-            303,
+            args.frame_count,
             total_rounds,
             args.warmup,
             || Ok(ffmpeg_vulkan_decode_command(
                 args,
+                &decode_input,
                 ffmpeg_adapter.index,
                 &null_sink,
             )),
@@ -610,7 +626,7 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
         "benchmark-vulkan-{}-{now_secs}.md",
         args.codec.as_cli()
     ));
-    write_vulkan_report(&report_path, args, &cases)?;
+    write_vulkan_report(&report_path, args, &decode_input, &cases)?;
     let status = if cases
         .iter()
         .any(|case| case.status.starts_with("failed:") || case.status.starts_with("unavailable:"))
@@ -799,15 +815,84 @@ fn unavailable_case(label: &str, adapter_name: &str, reason: &str) -> CaseSummar
     }
 }
 
-fn vulkan_decode_command(decode_bin: &Path, args: &Args, adapter_index: usize) -> Result<Command> {
+fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
+    fs::create_dir_all(&args.output_dir)
+        .with_context(|| format!("create output directory: {}", args.output_dir.display()))?;
+    let path = args.output_dir.join(format!(
+        "benchmark-vulkan-decode-input-{}-{}x{}-{}f.{}",
+        args.codec.as_cli(),
+        args.width,
+        args.height,
+        args.frame_count,
+        args.codec.annexb_extension()
+    ));
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "testsrc2=size={}x{}:rate=30:duration={}",
+            args.width,
+            args.height,
+            (args.frame_count as f64 / 30.0).max(0.001)
+        ),
+        "-frames:v",
+        &args.frame_count.to_string(),
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-c:v",
+        args.codec.software_encoder(),
+    ]);
+    match args.codec {
+        Codec::H264 => {
+            command.args([
+                "-preset",
+                "veryfast",
+                "-tune",
+                "zerolatency",
+                "-x264-params",
+                "keyint=30:min-keyint=30:scenecut=0",
+            ]);
+        }
+        Codec::Hevc => {
+            command.args([
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "log-level=error:keyint=30:min-keyint=30:bframes=0",
+            ]);
+        }
+    }
+    command.args([
+        "-f",
+        args.codec.ffmpeg_demuxer(),
+        &path.to_string_lossy(),
+    ]);
+    run_inherited(&mut command)
+        .with_context(|| format!("generate Vulkan decode input: {}", path.display()))?;
+    Ok(path)
+}
+
+fn vulkan_decode_command(
+    decode_bin: &Path,
+    args: &Args,
+    decode_input: &Path,
+    adapter_index: usize,
+) -> Result<Command> {
     let mut command = Command::new(decode_bin);
+    let decode_input = decode_input.to_string_lossy().to_string();
     command.args([
         "--backend",
         "vulkan",
         "--codec",
         args.codec.as_cli(),
         "--input",
-        args.codec.annexb_input(),
+        &decode_input,
         "--input-format",
         "annexb",
         "--output-mode",
@@ -824,9 +909,10 @@ fn vulkan_decode_command(decode_bin: &Path, args: &Args, adapter_index: usize) -
 fn vulkan_hevc_physical_decode_command(
     decode_bin: &Path,
     args: &Args,
+    decode_input: &Path,
     physical_device_index: usize,
 ) -> Result<Command> {
-    let mut command = vulkan_decode_command(decode_bin, args, physical_device_index)?;
+    let mut command = vulkan_decode_command(decode_bin, args, decode_input, physical_device_index)?;
     command.env(
         "VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX",
         physical_device_index.to_string(),
@@ -943,8 +1029,14 @@ fn ensure_ffmpeg_vulkan_hevc_parameter_sample(
     Ok(path)
 }
 
-fn ffmpeg_vulkan_decode_command(args: &Args, adapter_index: usize, null_sink: &Path) -> Command {
+fn ffmpeg_vulkan_decode_command(
+    args: &Args,
+    decode_input: &Path,
+    adapter_index: usize,
+    null_sink: &Path,
+) -> Command {
     let mut command = Command::new("ffmpeg");
+    let decode_input = decode_input.to_string_lossy().to_string();
     command.args([
         "-v",
         "error",
@@ -957,7 +1049,7 @@ fn ffmpeg_vulkan_decode_command(args: &Args, adapter_index: usize, null_sink: &P
         "-f",
         args.codec.ffmpeg_demuxer(),
         "-i",
-        args.codec.annexb_input(),
+        &decode_input,
         "-f",
         "null",
         &null_sink.to_string_lossy(),
@@ -1100,12 +1192,21 @@ fn write_integrated_report(args: &Args, reports: &[BackendReport]) -> Result<Pat
     Ok(path)
 }
 
-fn write_vulkan_report(path: &Path, args: &Args, cases: &[CaseSummary]) -> Result<()> {
+fn write_vulkan_report(
+    path: &Path,
+    args: &Args,
+    decode_input: &Path,
+    cases: &[CaseSummary],
+) -> Result<()> {
     let mut report = String::new();
     writeln!(&mut report, "# Vulkan Backend Benchmark Report")?;
     writeln!(&mut report, "codec: {}", args.codec.as_cli())?;
     writeln!(&mut report, "warmup: {}", args.warmup)?;
     writeln!(&mut report, "repeat: {}", args.repeat)?;
+    writeln!(&mut report, "frame_count: {}", args.frame_count)?;
+    writeln!(&mut report, "width: {}", args.width)?;
+    writeln!(&mut report, "height: {}", args.height)?;
+    writeln!(&mut report, "decode_input: {}", decode_input.display())?;
     writeln!(&mut report)?;
     writeln!(
         &mut report,
