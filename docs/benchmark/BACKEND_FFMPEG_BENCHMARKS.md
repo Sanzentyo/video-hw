@@ -94,10 +94,12 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   same-size parameter/header sample, prepends those leading non-VCL NAL units to
   the direct Vulkan `cmdEncodeVideoKHR` slice output, and emits IDR-only Annex-B
   packets. This is decodable by FFmpeg, but it is not performance parity yet:
-  the current implementation recreates the Vulkan video session for each input
-  frame and does not encode a reference-frame GOP. The 2026-05-05 smoke run at
-  640x360 / 3 frames measured video-hw Vulkan HEVC encode at 1.868 fps versus
-  FFmpeg Vulkan HEVC encode at 9.164 fps on the NVIDIA adapter.
+  the current implementation reuses the Vulkan video session and session
+  parameters within one `flush`, but still emits IDR-only packets and rebuilds
+  per-submit resources instead of using a long-lived production encoder. The
+  2026-05-05 640x360 / 30-frame batch run measured video-hw Vulkan HEVC encode
+  at 18.519 fps versus FFmpeg Vulkan HEVC encode at 84.270 fps on the NVIDIA
+  adapter.
   The current probe also maps
   VPS sub-layer ordering and timing fields into StdVideo session parameters;
   it also uses an FFmpeg-like H.265 slice-header flag baseline and H.265
@@ -124,9 +126,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   parameter/header NAL prefix is prepended, FFmpeg decodes the one-frame stream
   and the flat NV12 probe input compares at MSE=0 / PSNR=inf. This is still a
   one-frame diagnostic path. `VulkanEncoderAdapter` now uses the same slice
-  extraction and header-prefix packetization for an experimental multi-packet
-  IDR-only path, but persistent-session multi-frame encode is still the next
-  performance blocker.
+  extraction and header-prefix packetization for an experimental batched
+  IDR-only path, but a long-lived encoder with reusable per-frame resources and
+  reference-frame GOP encode is still required for performance parity.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

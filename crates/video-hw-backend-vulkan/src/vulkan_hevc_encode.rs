@@ -101,6 +101,7 @@ pub(crate) enum HevcEncodeSubmitExecutionProbe {
         bytes_written: u32,
         head16: String,
         bitstream: Vec<u8>,
+        bitstreams: Vec<Vec<u8>>,
     },
     Failed(String),
     Skipped(String),
@@ -198,7 +199,7 @@ struct HevcEncodeVideoSessionProbeConfig<'a> {
     maintenance1_mode: HevcEncodeProbeMaintenance1Mode,
     session_dpb_mode: HevcEncodeProbeSessionDpbMode,
     session_h265_create_info_mode: HevcEncodeProbeSessionH265CreateInfoMode,
-    source_nv12: Option<&'a [u8]>,
+    source_nv12_frames: &'a [Vec<u8>],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -690,7 +691,7 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
     coded_height: u32,
     fps: u32,
 ) -> Result<HevcEncodeSessionBootstrap, String> {
-    run_hevc_encode_session_bootstrap(coded_width, coded_height, fps, None)
+    run_hevc_encode_session_bootstrap(coded_width, coded_height, fps, Vec::new())
 }
 
 pub(crate) fn encode_hevc_idr_frame_annexb(
@@ -699,38 +700,72 @@ pub(crate) fn encode_hevc_idr_frame_annexb(
     fps: u32,
     source_nv12: &[u8],
 ) -> Result<Vec<u8>, String> {
+    let mut packets =
+        encode_hevc_idr_frames_annexb(coded_width, coded_height, fps, &[source_nv12.to_vec()])?;
+    packets
+        .pop()
+        .ok_or_else(|| "HEVC encode produced no output packets".to_string())
+}
+
+pub(crate) fn encode_hevc_idr_frames_annexb(
+    coded_width: u32,
+    coded_height: u32,
+    fps: u32,
+    source_nv12_frames: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>, String> {
     let expected_len = usize::try_from(u64::from(coded_width) * u64::from(coded_height) * 3 / 2)
         .map_err(|_| "HEVC encode source NV12 size exceeds usize".to_string())?;
-    if source_nv12.len() != expected_len {
-        return Err(format!(
-            "HEVC encode source NV12 size mismatch: expected {expected_len}, got {}",
-            source_nv12.len()
-        ));
+    if source_nv12_frames.is_empty() {
+        return Err("HEVC encode requires at least one source frame".to_string());
+    }
+    for (index, source_nv12) in source_nv12_frames.iter().enumerate() {
+        if source_nv12.len() != expected_len {
+            return Err(format!(
+                "HEVC encode source NV12 size mismatch at frame {index}: expected {expected_len}, got {}",
+                source_nv12.len()
+            ));
+        }
     }
     let bootstrap = run_hevc_encode_session_bootstrap(
         coded_width,
         coded_height,
         fps,
-        Some(source_nv12.to_vec()),
+        source_nv12_frames.to_vec(),
     )?;
-    let bitstream = match bootstrap.encode_submit_execution_probe {
-        HevcEncodeSubmitExecutionProbe::Ready { bitstream, .. } => bitstream,
+    let bitstreams = match bootstrap.encode_submit_execution_probe {
+        HevcEncodeSubmitExecutionProbe::Ready { bitstreams, .. } => bitstreams,
         HevcEncodeSubmitExecutionProbe::Failed(err) => return Err(err),
         HevcEncodeSubmitExecutionProbe::Skipped(reason) => return Err(reason),
     };
-    if bitstream.is_empty() {
-        return Err("HEVC encode produced an empty bitstream".to_string());
+    if bitstreams.len() != source_nv12_frames.len() {
+        return Err(format!(
+            "HEVC encode produced {} bitstreams for {} source frames",
+            bitstreams.len(),
+            source_nv12_frames.len()
+        ));
     }
-    let mut output = hevc_encode_parameter_header_prefix()?;
-    output.extend_from_slice(&bitstream);
-    Ok(output)
+    let header_prefix = hevc_encode_parameter_header_prefix()?;
+    bitstreams
+        .into_iter()
+        .enumerate()
+        .map(|(index, bitstream)| {
+            if bitstream.is_empty() {
+                return Err(format!(
+                    "HEVC encode produced an empty bitstream at frame {index}"
+                ));
+            }
+            let mut output = header_prefix.clone();
+            output.extend_from_slice(&bitstream);
+            Ok(output)
+        })
+        .collect()
 }
 
 fn run_hevc_encode_session_bootstrap(
     coded_width: u32,
     coded_height: u32,
     _fps: u32,
-    source_nv12: Option<Vec<u8>>,
+    source_nv12_frames: Vec<Vec<u8>>,
 ) -> Result<HevcEncodeSessionBootstrap, String> {
     if coded_width == 0 || coded_height == 0 {
         return Err(format!(
@@ -933,7 +968,7 @@ fn run_hevc_encode_session_bootstrap(
                 maintenance1_mode,
                 session_dpb_mode,
                 session_h265_create_info_mode,
-                source_nv12: source_nv12.as_deref(),
+                source_nv12_frames: &source_nv12_frames,
             },
         );
         let selected_properties =
@@ -1275,7 +1310,7 @@ fn probe_hevc_encode_video_session_and_parameters_creation(
                         session_dpb_mode: config.session_dpb_mode,
                         session_h265_create_info_mode: config.session_h265_create_info_mode,
                     },
-                    config.source_nv12,
+                    config.source_nv12_frames,
                 ) {
                     Ok((
                         HevcEncodeVideoSessionParametersCreateProbe::Created,
@@ -1352,7 +1387,7 @@ fn probe_single_hevc_encode_session_format(
     instance: &ash::Instance,
     candidate: &HevcEncodeCapabilityCandidate,
     config: HevcEncodeSessionFormatProbeConfig,
-    source_nv12: Option<&[u8]>,
+    source_nv12_frames: &[Vec<u8>],
 ) -> Result<
     (
         HevcEncodeVideoSessionParametersCreateProbe,
@@ -1438,70 +1473,106 @@ fn probe_single_hevc_encode_session_format(
             },
         ) {
             Ok(session_parameters) => {
-                let submit_execution_probe = probe_hevc_encode_submit_execution(
-                    device,
-                    instance,
-                    HevcEncodeSubmitExecutionConfig {
-                        physical_device: candidate.physical_device,
-                        queue_family_index: candidate.queue_family_index,
-                        video_session,
-                        video_session_parameters: session_parameters.handle,
-                        parameter_set_ids: session_parameters.parameter_set_ids,
-                        parameter_set_coded_width: session_parameters.coded_width,
-                        parameter_set_coded_height: session_parameters.coded_height,
-                        parameter_set_pps_init_qp_minus26: session_parameters.pps_init_qp_minus26,
-                        parameter_set_sample_adaptive_offset_enabled: session_parameters
-                            .sample_adaptive_offset_enabled,
-                        parameter_set_sps_temporal_mvp_enabled: session_parameters
-                            .sps_temporal_mvp_enabled,
-                        parameter_mode: session_parameters.mode,
-                        parameter_feedback_probe_summary: session_parameters
-                            .feedback_probe_summary
-                            .clone(),
-                        parameter_size_mode: session_parameters.size_mode,
-                        parameter_vui_safety_mode: session_parameters.vui_safety_mode,
-                        encode_h265_std_syntax_flags: candidate
-                            .capability_snapshot
-                            .encode_h265_std_syntax_flags,
-                        coded_width: config.coded_extent.width,
-                        coded_height: config.coded_extent.height,
-                        picture_format: config.picture_format,
-                        reference_picture_format: config.reference_picture_format,
-                        picture_access_granularity: candidate
-                            .capability_snapshot
-                            .picture_access_granularity,
-                        rate_control_modes: candidate.capability_snapshot.rate_control_modes,
-                        max_rate_control_layers: candidate
-                            .capability_snapshot
-                            .max_rate_control_layers,
-                        max_quality_levels: candidate.capability_snapshot.max_quality_levels,
-                        supported_encode_feedback_flags: candidate
-                            .capability_snapshot
-                            .supported_encode_feedback_flags,
-                        min_bitstream_buffer_offset_alignment: candidate
-                            .capability_snapshot
-                            .min_bitstream_buffer_offset_alignment,
-                        min_bitstream_buffer_size_alignment: candidate
-                            .capability_snapshot
-                            .min_bitstream_buffer_size_alignment,
-                        maintenance1_mode: config.maintenance1_mode,
-                        maintenance1_feature_enabled:
-                            resolve_hevc_encode_probe_maintenance1_feature_enabled(
-                                config.maintenance1_mode,
-                                candidate
-                                    .capability_snapshot
-                                    .video_maintenance1_extension_available,
-                                candidate
-                                    .capability_snapshot
-                                    .video_maintenance1_feature_supported,
-                            ),
-                        session_dpb_mode: config.session_dpb_mode,
-                        session_max_dpb_slots,
-                        session_max_active_reference_pictures,
-                        session_h265_create_info_mode: config.session_h265_create_info_mode,
-                        source_nv12: source_nv12.map(<[u8]>::to_vec),
-                    },
-                );
+                let source_frames = if source_nv12_frames.is_empty() {
+                    vec![None]
+                } else {
+                    source_nv12_frames
+                        .iter()
+                        .map(|source| Some(source.as_slice()))
+                        .collect::<Vec<_>>()
+                };
+                let mut first_ready_probe = None;
+                let mut bitstreams = Vec::new();
+                for source_nv12 in source_frames {
+                    let submit_execution_probe = probe_hevc_encode_submit_execution(
+                        device,
+                        instance,
+                        HevcEncodeSubmitExecutionConfig {
+                            physical_device: candidate.physical_device,
+                            queue_family_index: candidate.queue_family_index,
+                            video_session,
+                            video_session_parameters: session_parameters.handle,
+                            parameter_set_ids: session_parameters.parameter_set_ids,
+                            parameter_set_coded_width: session_parameters.coded_width,
+                            parameter_set_coded_height: session_parameters.coded_height,
+                            parameter_set_pps_init_qp_minus26: session_parameters
+                                .pps_init_qp_minus26,
+                            parameter_set_sample_adaptive_offset_enabled: session_parameters
+                                .sample_adaptive_offset_enabled,
+                            parameter_set_sps_temporal_mvp_enabled: session_parameters
+                                .sps_temporal_mvp_enabled,
+                            parameter_mode: session_parameters.mode,
+                            parameter_feedback_probe_summary: session_parameters
+                                .feedback_probe_summary
+                                .clone(),
+                            parameter_size_mode: session_parameters.size_mode,
+                            parameter_vui_safety_mode: session_parameters.vui_safety_mode,
+                            encode_h265_std_syntax_flags: candidate
+                                .capability_snapshot
+                                .encode_h265_std_syntax_flags,
+                            coded_width: config.coded_extent.width,
+                            coded_height: config.coded_extent.height,
+                            picture_format: config.picture_format,
+                            reference_picture_format: config.reference_picture_format,
+                            picture_access_granularity: candidate
+                                .capability_snapshot
+                                .picture_access_granularity,
+                            rate_control_modes: candidate.capability_snapshot.rate_control_modes,
+                            max_rate_control_layers: candidate
+                                .capability_snapshot
+                                .max_rate_control_layers,
+                            max_quality_levels: candidate.capability_snapshot.max_quality_levels,
+                            supported_encode_feedback_flags: candidate
+                                .capability_snapshot
+                                .supported_encode_feedback_flags,
+                            min_bitstream_buffer_offset_alignment: candidate
+                                .capability_snapshot
+                                .min_bitstream_buffer_offset_alignment,
+                            min_bitstream_buffer_size_alignment: candidate
+                                .capability_snapshot
+                                .min_bitstream_buffer_size_alignment,
+                            maintenance1_mode: config.maintenance1_mode,
+                            maintenance1_feature_enabled:
+                                resolve_hevc_encode_probe_maintenance1_feature_enabled(
+                                    config.maintenance1_mode,
+                                    candidate
+                                        .capability_snapshot
+                                        .video_maintenance1_extension_available,
+                                    candidate
+                                        .capability_snapshot
+                                        .video_maintenance1_feature_supported,
+                                ),
+                            session_dpb_mode: config.session_dpb_mode,
+                            session_max_dpb_slots,
+                            session_max_active_reference_pictures,
+                            session_h265_create_info_mode: config.session_h265_create_info_mode,
+                            source_nv12: source_nv12.map(<[u8]>::to_vec),
+                        },
+                    );
+                    if let HevcEncodeSubmitExecutionProbe::Ready { bitstream, .. } =
+                        &submit_execution_probe
+                    {
+                        bitstreams.push(bitstream.clone());
+                        if first_ready_probe.is_none() {
+                            first_ready_probe = Some(submit_execution_probe);
+                        }
+                    } else {
+                        first_ready_probe = Some(submit_execution_probe);
+                        break;
+                    }
+                }
+                let mut submit_execution_probe = first_ready_probe.unwrap_or_else(|| {
+                    HevcEncodeSubmitExecutionProbe::Skipped(
+                        "encode submit execution probe skipped: no source frames".to_string(),
+                    )
+                });
+                if let HevcEncodeSubmitExecutionProbe::Ready {
+                    bitstreams: ready_bitstreams,
+                    ..
+                } = &mut submit_execution_probe
+                {
+                    *ready_bitstreams = bitstreams;
+                }
                 // SAFETY: handle was created from this device and is not reused afterwards.
                 unsafe {
                     (video_queue_device.fp().destroy_video_session_parameters_khr)(
@@ -4567,6 +4638,7 @@ fn probe_hevc_encode_submit_execution(
             bytes_written: query_result.bytes_written,
             head16: dst_head16,
             bitstream: output_bitstream,
+            bitstreams: Vec::new(),
         },
         Err(err) => {
             HevcEncodeSubmitExecutionProbe::Failed(append_hevc_encode_validation_messages(err))

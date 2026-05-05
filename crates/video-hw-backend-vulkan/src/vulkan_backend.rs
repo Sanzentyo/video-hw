@@ -21,7 +21,7 @@ use crate::{
         probe_hevc_decode_session_bootstrap_with_access_unit_limit,
     },
     vulkan_hevc_encode::{
-        HevcEncodePrerequisiteProbe, encode_hevc_idr_frame_annexb, probe_hevc_encode_prerequisites,
+        HevcEncodePrerequisiteProbe, encode_hevc_idr_frames_annexb, probe_hevc_encode_prerequisites,
     },
 };
 
@@ -496,7 +496,8 @@ impl VulkanEncoderAdapter {
             BackendError::InvalidInput("frame height does not fit in u32".to_string())
         })?;
         let fps = u32::try_from(self.fps.max(1)).unwrap_or(30);
-        let mut packets = Vec::new();
+        let mut source_frames = Vec::with_capacity(pending_frames.len());
+        let mut pts_values = Vec::with_capacity(pending_frames.len());
         for frame in pending_frames {
             if frame.width != width || frame.height != height {
                 return Err(BackendError::InvalidInput(format!(
@@ -505,24 +506,31 @@ impl VulkanEncoderAdapter {
                 )));
             }
             let raw = frame_to_nv12_payload(frame, width, height)?;
-            let data = encode_hevc_idr_frame_annexb(coded_width, coded_height, fps, &raw.frame)
-                .map_err(|err| {
-                    BackendError::UnsupportedConfig(format!(
-                        "{}; experimental HEVC IDR encode failed: {err}",
-                        hevc_encode_blocker_message_with_config(
-                            coded_width,
-                            coded_height,
-                            self.fps
-                        )
-                    ))
-                })?;
-            packets.push(EncodedPacket {
+            source_frames.push(raw.frame);
+            pts_values.push(frame.pts_90k);
+        }
+        let encoded_frames = encode_hevc_idr_frames_annexb(
+            coded_width,
+            coded_height,
+            fps,
+            &source_frames,
+        )
+        .map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "{}; experimental HEVC IDR encode failed: {err}",
+                hevc_encode_blocker_message_with_config(coded_width, coded_height, self.fps)
+            ))
+        })?;
+        let packets = encoded_frames
+            .into_iter()
+            .zip(pts_values)
+            .map(|(data, pts_90k)| EncodedPacket {
                 codec: self.codec,
                 data,
-                pts_90k: frame.pts_90k,
+                pts_90k,
                 is_keyframe: true,
-            });
-        }
+            })
+            .collect::<Vec<_>>();
         if packets.is_empty() {
             return Err(BackendError::Backend(
                 "Vulkan HEVC encoder produced no output packets".to_string(),
