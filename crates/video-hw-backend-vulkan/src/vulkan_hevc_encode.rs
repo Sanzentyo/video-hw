@@ -245,6 +245,7 @@ struct HevcEncodeProbeImageConfig {
     queue_family_index: EncodeQueueFamilyIndex,
     image_width: u32,
     image_height: u32,
+    image_view_mode: HevcEncodeProbeImageViewMode,
     picture_format: vk::Format,
     usage: vk::ImageUsageFlags,
 }
@@ -338,6 +339,12 @@ enum HevcEncodeProbeDstRangeMode {
 enum HevcEncodeProbeParameterSizeMode {
     Sample,
     Coded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HevcEncodeProbeImageViewMode {
+    YcbcrConversion,
+    NoYcbcrConversion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1795,6 +1802,12 @@ fn resolve_hevc_encode_probe_parameter_size_mode() -> HevcEncodeProbeParameterSi
     parse_hevc_encode_probe_parameter_size_mode(mode.as_deref())
 }
 
+fn resolve_hevc_encode_probe_image_view_mode() -> HevcEncodeProbeImageViewMode {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_IMAGE_VIEW_MODE";
+    let mode = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_image_view_mode(mode.as_deref())
+}
+
 fn parse_hevc_encode_parameter_mode(mode: Option<&str>) -> HevcEncodeParameterMode {
     let normalized_mode = mode
         .map(str::trim)
@@ -1892,6 +1905,30 @@ fn hevc_encode_probe_parameter_size_mode_label(
     match mode {
         HevcEncodeProbeParameterSizeMode::Sample => "sample",
         HevcEncodeProbeParameterSizeMode::Coded => "coded",
+    }
+}
+
+fn parse_hevc_encode_probe_image_view_mode(mode: Option<&str>) -> HevcEncodeProbeImageViewMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match normalized.as_deref() {
+        Some("no-ycbcr")
+        | Some("no_ycbcr")
+        | Some("without-ycbcr")
+        | Some("without_ycbcr")
+        | Some("plain")
+        | Some("ffmpeg-no-ycbcr")
+        | Some("ffmpeg_no_ycbcr") => HevcEncodeProbeImageViewMode::NoYcbcrConversion,
+        _ => HevcEncodeProbeImageViewMode::YcbcrConversion,
+    }
+}
+
+fn hevc_encode_probe_image_view_mode_label(mode: HevcEncodeProbeImageViewMode) -> &'static str {
+    match mode {
+        HevcEncodeProbeImageViewMode::YcbcrConversion => "ycbcr-conversion",
+        HevcEncodeProbeImageViewMode::NoYcbcrConversion => "no-ycbcr-conversion",
     }
 }
 
@@ -3200,8 +3237,15 @@ fn probe_hevc_encode_submit_execution(
             u64::from(config.picture_access_granularity.height.max(1)),
         ))
         .map_err(|_| "aligned encode source image height exceeds u32 range".to_string())?;
-        ycbcr_conversion =
-            create_hevc_encode_probe_ycbcr_conversion(device, config.picture_format)?;
+        let image_view_mode = resolve_hevc_encode_probe_image_view_mode();
+        let image_view_mode_label = hevc_encode_probe_image_view_mode_label(image_view_mode);
+        if matches!(
+            image_view_mode,
+            HevcEncodeProbeImageViewMode::YcbcrConversion
+        ) {
+            ycbcr_conversion =
+                create_hevc_encode_probe_ycbcr_conversion(device, config.picture_format)?;
+        }
         let (
             created_source_image,
             created_source_image_memory,
@@ -3216,6 +3260,7 @@ fn probe_hevc_encode_submit_execution(
                 queue_family_index: config.queue_family_index,
                 image_width,
                 image_height,
+                image_view_mode,
                 picture_format: config.picture_format,
                 usage: vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
                     | vk::ImageUsageFlags::TRANSFER_DST,
@@ -3260,6 +3305,7 @@ fn probe_hevc_encode_submit_execution(
                 queue_family_index: config.queue_family_index,
                 image_width,
                 image_height,
+                image_view_mode,
                 picture_format: config.reference_picture_format,
                 usage: vk::ImageUsageFlags::VIDEO_ENCODE_DPB_KHR,
             },
@@ -3418,7 +3464,7 @@ fn probe_hevc_encode_submit_execution(
                 source_picture_resource_extent_mode,
             );
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, src_picture_resource_extent_mode={}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_mode={}, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_alloc_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, dst_range_mode={}, parameter_mode={}, parameter_size_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, begin_pnext_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_h265_create_info_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3431,6 +3477,7 @@ fn probe_hevc_encode_submit_execution(
             picture_resource_extent_mode_label,
             config.picture_format,
             config.reference_picture_format,
+            image_view_mode_label,
             source_image_dedicated_allocation,
             dpb_image_dedicated_allocation,
             dst_buffer_offset,
@@ -4507,8 +4554,13 @@ fn create_hevc_encode_probe_image(
             base_array_layer: 0,
             layer_count: 1,
         })
-        .push_next(&mut ycbcr_conversion_info)
         .push_next(&mut image_view_usage);
+    let view_create_info = match config.image_view_mode {
+        HevcEncodeProbeImageViewMode::YcbcrConversion => {
+            view_create_info.push_next(&mut ycbcr_conversion_info)
+        }
+        HevcEncodeProbeImageViewMode::NoYcbcrConversion => view_create_info,
+    };
     // SAFETY: image view create info references valid image and stack data.
     let image_view = unsafe { device.create_image_view(&view_create_info, None) }
         .map_err(|err| format!("vkCreateImageView for encode submit source image failed: {err}"))?;
@@ -5707,6 +5759,28 @@ mod tests {
             assert_eq!(
                 parse_hevc_encode_probe_parameter_size_mode(Some(alias)),
                 HevcEncodeProbeParameterSizeMode::Coded
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_image_view_mode_defaults_to_ycbcr_conversion() {
+        assert_eq!(
+            parse_hevc_encode_probe_image_view_mode(None),
+            HevcEncodeProbeImageViewMode::YcbcrConversion
+        );
+        assert_eq!(
+            parse_hevc_encode_probe_image_view_mode(Some("")),
+            HevcEncodeProbeImageViewMode::YcbcrConversion
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_image_view_mode_accepts_no_ycbcr_aliases() {
+        for alias in ["no-ycbcr", "no_ycbcr", "without-ycbcr", "plain"] {
+            assert_eq!(
+                parse_hevc_encode_probe_image_view_mode(Some(alias)),
+                HevcEncodeProbeImageViewMode::NoYcbcrConversion
             );
         }
     }

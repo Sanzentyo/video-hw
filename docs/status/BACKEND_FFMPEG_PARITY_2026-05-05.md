@@ -154,15 +154,19 @@ As an additional check, FFmpeg `hevc_vulkan` on Vulkan adapter 1 generated a
 `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH` also reaches
 `parameter_set_coded=320x180` / `parameter_set_coded_match=true`, but still
 fails at `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_IMAGE_VIEW_MODE=no-ycbcr` can omit
+`VkSamplerYcbcrConversionInfo` from encode image views; image view creation
+succeeds in this mode, but the FFmpeg-generated-parameter probe still fails at
+`vkEndCommandBuffer`.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
 / image view / allocation / syntax-flag / output offset / zero-reference pointer
 / fixed-QP / quality-level / source-upload / source-resource-extent /
 session-H265-create-info / begin-rate-control-pNext / dst-range-reserve /
-parameter-size / FFmpeg-generated-parameter-sample parity points. More complete
-HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
-`VulkanEncoderAdapter`.
+parameter-size / FFmpeg-generated-parameter-sample / image-view-pNext parity
+points. More complete HEVC command/resource wiring is still required before
+enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 
