@@ -196,9 +196,13 @@ struct HevcEncodePreEncodeProbeResources {
     source_image_view: vk::ImageView,
     dpb_image: vk::Image,
     dpb_image_view: vk::ImageView,
+    source_picture_resource_width: u32,
+    source_picture_resource_height: u32,
     picture_resource_coded_width: u32,
     picture_resource_coded_height: u32,
     dst_buffer: vk::Buffer,
+    dst_buffer_offset: u64,
+    dst_buffer_range: u64,
     dst_buffer_size: u64,
 }
 
@@ -333,6 +337,7 @@ enum HevcEncodeProbeRpsMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HevcEncodeProbeBeginReferenceSlotMode {
     SlotMinusOne,
+    SlotMinusOneNoCodecInfo,
     None,
 }
 
@@ -1963,6 +1968,11 @@ fn parse_hevc_encode_probe_begin_reference_slot_mode(
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase);
     match normalized.as_deref() {
+        Some("slot-minus-one-no-codec-info")
+        | Some("slot_minus_one_no_codec_info")
+        | Some("slot-minus-one-null-pnext")
+        | Some("slot_minus_one_null_pnext")
+        | Some("ffmpeg") => HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOneNoCodecInfo,
         Some("none") | Some("off") | Some("disable") | Some("disabled") => {
             HevcEncodeProbeBeginReferenceSlotMode::None
         }
@@ -1975,6 +1985,9 @@ fn hevc_encode_probe_begin_reference_slot_mode_label(
 ) -> &'static str {
     match mode {
         HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOne => "slot-minus-one",
+        HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOneNoCodecInfo => {
+            "slot-minus-one-no-codec-info"
+        }
         HevcEncodeProbeBeginReferenceSlotMode::None => "none",
     }
 }
@@ -2635,6 +2648,20 @@ fn hevc_encode_probe_parameter_sample_override_path() -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
+fn resolve_hevc_encode_probe_dst_prefix_bytes() -> u64 {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_DST_PREFIX_BYTES";
+    let value = std::env::var(ENV_VAR).ok();
+    parse_hevc_encode_probe_dst_prefix_bytes(value.as_deref())
+}
+
+fn parse_hevc_encode_probe_dst_prefix_bytes(value: Option<&str>) -> u64 {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn load_hevc_encode_probe_parameter_sample() -> Result<Vec<u8>, String> {
     let override_path = hevc_encode_probe_parameter_sample_override_path();
     load_hevc_encode_probe_parameter_sample_from_path(override_path.as_deref())
@@ -2860,8 +2887,11 @@ fn probe_hevc_encode_submit_execution(
             .saturating_mul(4)
             .max(1_048_576);
         let dst_offset_alignment = config.min_bitstream_buffer_offset_alignment.max(1);
-        let synthetic_prefix_bytes = 0_u64;
-        let dst_buffer_offset = 0_u64;
+        let synthetic_prefix_bytes = align_up(
+            resolve_hevc_encode_probe_dst_prefix_bytes(),
+            dst_offset_alignment,
+        );
+        let dst_buffer_offset = synthetic_prefix_bytes;
         if !dst_buffer_offset.is_multiple_of(dst_offset_alignment) {
             return Err(format!(
                 "encode dst buffer offset {dst_buffer_offset} is not aligned to {dst_offset_alignment}"
@@ -2965,9 +2995,11 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
+            image_width,
+            image_height,
             image_width,
             image_height,
             picture_resource_coded_width,
@@ -3142,6 +3174,9 @@ fn probe_hevc_encode_submit_execution(
             .slot_index(-1)
             .picture_resource(&reconstructed_picture_resource)
             .push_next(&mut begin_dpb_slot_info)];
+        let begin_reference_slots_no_codec_info = [vk::VideoReferenceSlotInfoKHR::default()
+            .slot_index(-1)
+            .picture_resource(&reconstructed_picture_resource)];
 
         let begin_coding_info_base = vk::VideoBeginCodingInfoKHR::default()
             .video_session(config.video_session)
@@ -3149,6 +3184,9 @@ fn probe_hevc_encode_submit_execution(
         let begin_coding_info_with_ref_slots = match begin_reference_slot_mode {
             HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOne => {
                 begin_coding_info_base.reference_slots(&begin_reference_slots)
+            }
+            HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOneNoCodecInfo => {
+                begin_coding_info_base.reference_slots(&begin_reference_slots_no_codec_info)
             }
             HevcEncodeProbeBeginReferenceSlotMode::None => begin_coding_info_base,
         };
@@ -3160,6 +3198,10 @@ fn probe_hevc_encode_submit_execution(
                 HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOne => {
                     begin_coding_info_without_session_parameters
                         .reference_slots(&begin_reference_slots)
+                }
+                HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOneNoCodecInfo => {
+                    begin_coding_info_without_session_parameters
+                        .reference_slots(&begin_reference_slots_no_codec_info)
                 }
                 HevcEncodeProbeBeginReferenceSlotMode::None => {
                     begin_coding_info_without_session_parameters
@@ -3187,9 +3229,13 @@ fn probe_hevc_encode_submit_execution(
             source_image_view,
             dpb_image,
             dpb_image_view,
+            source_picture_resource_width: image_width,
+            source_picture_resource_height: image_height,
             picture_resource_coded_width,
             picture_resource_coded_height,
             dst_buffer,
+            dst_buffer_offset,
+            dst_buffer_range,
             dst_buffer_size,
         };
         match primary_probe_mode {
@@ -3485,8 +3531,8 @@ fn probe_hevc_encode_submit_execution(
         let src_picture_resource = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D::default())
             .coded_extent(vk::Extent2D {
-                width: picture_resource_coded_width,
-                height: picture_resource_coded_height,
+                width: image_width,
+                height: image_height,
             })
             .base_array_layer(0)
             .image_view_binding(source_image_view);
@@ -3495,6 +3541,7 @@ fn probe_hevc_encode_submit_execution(
             .dst_buffer_offset(dst_buffer_offset)
             .dst_buffer_range(dst_buffer_range)
             .src_picture_resource(src_picture_resource)
+            .reference_slots(&[])
             .push_next(&mut h265_encode_info);
         let encode_info = match setup_reference_slot_mode {
             HevcEncodeProbeSetupReferenceSlotMode::SlotZero => {
@@ -3554,9 +3601,13 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         dpb_image,
                         dpb_image_view,
+                        source_picture_resource_width: image_width,
+                        source_picture_resource_height: image_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
+                        dst_buffer_offset,
+                        dst_buffer_range,
                         dst_buffer_size,
                     },
                 },
@@ -3584,9 +3635,13 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         dpb_image,
                         dpb_image_view,
+                        source_picture_resource_width: image_width,
+                        source_picture_resource_height: image_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
+                        dst_buffer_offset,
+                        dst_buffer_range,
                         dst_buffer_size,
                     },
                 },
@@ -3614,9 +3669,13 @@ fn probe_hevc_encode_submit_execution(
                         source_image_view,
                         dpb_image,
                         dpb_image_view,
+                        source_picture_resource_width: image_width,
+                        source_picture_resource_height: image_height,
                         picture_resource_coded_width,
                         picture_resource_coded_height,
                         dst_buffer,
+                        dst_buffer_offset,
+                        dst_buffer_range,
                         dst_buffer_size,
                     },
                 },
@@ -4379,16 +4438,17 @@ fn run_hevc_encode_pre_encode_probe(
         let src_picture_resource = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D::default())
             .coded_extent(vk::Extent2D {
-                width: resources.picture_resource_coded_width,
-                height: resources.picture_resource_coded_height,
+                width: resources.source_picture_resource_width,
+                height: resources.source_picture_resource_height,
             })
             .base_array_layer(0)
             .image_view_binding(resources.source_image_view);
         let encode_info = vk::VideoEncodeInfoKHR::default()
             .dst_buffer(resources.dst_buffer)
-            .dst_buffer_offset(0)
-            .dst_buffer_range(resources.dst_buffer_size)
-            .src_picture_resource(src_picture_resource);
+            .dst_buffer_offset(resources.dst_buffer_offset)
+            .dst_buffer_range(resources.dst_buffer_range)
+            .src_picture_resource(src_picture_resource)
+            .reference_slots(&[]);
         let encode_info = match codec_info_mode {
             HevcEncodeProbeCodecInfoMode::WithH265Info => {
                 encode_info.push_next(&mut h265_encode_info)
@@ -4878,6 +4938,21 @@ mod tests {
         let err = load_hevc_encode_probe_parameter_sample_from_path(Some(&missing_path_str))
             .expect_err("missing override path must surface an explicit read error");
         assert!(err.contains("failed to read HEVC encode probe parameter sample"));
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dst_prefix_bytes_defaults_to_zero() {
+        assert_eq!(parse_hevc_encode_probe_dst_prefix_bytes(None), 0);
+        assert_eq!(parse_hevc_encode_probe_dst_prefix_bytes(Some("")), 0);
+        assert_eq!(
+            parse_hevc_encode_probe_dst_prefix_bytes(Some("not-a-number")),
+            0
+        );
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_dst_prefix_bytes_accepts_decimal_bytes() {
+        assert_eq!(parse_hevc_encode_probe_dst_prefix_bytes(Some(" 256 ")), 256);
     }
 
     #[test]
@@ -5958,6 +6033,22 @@ mod tests {
             assert_eq!(
                 parse_hevc_encode_probe_begin_reference_slot_mode(Some(alias)),
                 HevcEncodeProbeBeginReferenceSlotMode::None
+            );
+        }
+    }
+
+    #[test]
+    fn parse_hevc_encode_probe_begin_reference_slot_mode_accepts_ffmpeg_aliases() {
+        for alias in [
+            "slot-minus-one-no-codec-info",
+            "slot_minus_one_no_codec_info",
+            "slot-minus-one-null-pnext",
+            "ffmpeg",
+            " FFmpeg ",
+        ] {
+            assert_eq!(
+                parse_hevc_encode_probe_begin_reference_slot_mode(Some(alias)),
+                HevcEncodeProbeBeginReferenceSlotMode::SlotMinusOneNoCodecInfo
             );
         }
     }
