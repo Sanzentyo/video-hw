@@ -2507,6 +2507,28 @@ fn hevc_encode_probe_pic_order_cnt_val(mode: HevcEncodeProbePictureInfoMode) -> 
     }
 }
 
+fn hevc_encode_std_slice_segment_header_flags(
+    sample_adaptive_offset_enabled: bool,
+) -> StdVideoEncodeH265SliceSegmentHeaderFlags {
+    let mut flags = StdVideoEncodeH265SliceSegmentHeaderFlags {
+        _bitfield_align_1: [],
+        _bitfield_1: Default::default(),
+    };
+    flags.set_first_slice_segment_in_pic_flag(1);
+    flags.set_dependent_slice_segment_flag(0);
+    flags.set_slice_sao_luma_flag(u32::from(sample_adaptive_offset_enabled));
+    flags.set_slice_sao_chroma_flag(u32::from(sample_adaptive_offset_enabled));
+    flags.set_num_ref_idx_active_override_flag(0);
+    flags.set_mvd_l1_zero_flag(0);
+    flags.set_cabac_init_flag(0);
+    flags.set_cu_chroma_qp_offset_enabled_flag(0);
+    flags.set_deblocking_filter_override_flag(0);
+    flags.set_slice_deblocking_filter_disabled_flag(0);
+    flags.set_collocated_from_l0_flag(1);
+    flags.set_slice_loop_filter_across_slices_enabled_flag(0);
+    flags
+}
+
 fn hevc_encode_pre_encode_probe_mode_label(mode: HevcEncodePreEncodeProbeMode) -> &'static str {
     match mode {
         HevcEncodePreEncodeProbeMode::ScopeOnly => "scope-only",
@@ -3303,17 +3325,9 @@ fn probe_hevc_encode_submit_execution(
             }
         }
 
-        let mut std_slice_flags = StdVideoEncodeH265SliceSegmentHeaderFlags {
-            _bitfield_align_1: [],
-            _bitfield_1: Default::default(),
-        };
-        std_slice_flags.set_first_slice_segment_in_pic_flag(1);
-        std_slice_flags.set_slice_sao_luma_flag(u32::from(
+        let std_slice_flags = hevc_encode_std_slice_segment_header_flags(
             config.parameter_set_sample_adaptive_offset_enabled,
-        ));
-        std_slice_flags.set_slice_sao_chroma_flag(u32::from(
-            config.parameter_set_sample_adaptive_offset_enabled,
-        ));
+        );
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
             flags: std_slice_flags,
             slice_type,
@@ -4285,13 +4299,8 @@ fn run_hevc_encode_pre_encode_probe(
             pShortTermRefPicSet: std::ptr::null(),
             pLongTermRefPics: std::ptr::null(),
         };
-        let mut std_slice_flags = StdVideoEncodeH265SliceSegmentHeaderFlags {
-            _bitfield_align_1: [],
-            _bitfield_1: Default::default(),
-        };
-        std_slice_flags.set_first_slice_segment_in_pic_flag(1);
-        std_slice_flags.set_slice_sao_luma_flag(u32::from(config.sample_adaptive_offset_enabled));
-        std_slice_flags.set_slice_sao_chroma_flag(u32::from(config.sample_adaptive_offset_enabled));
+        let std_slice_flags =
+            hevc_encode_std_slice_segment_header_flags(config.sample_adaptive_offset_enabled);
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
             flags: std_slice_flags,
             slice_type,
@@ -4829,6 +4838,24 @@ mod tests {
         let err = load_hevc_encode_probe_parameter_sample_from_path(Some(&missing_path_str))
             .expect_err("missing override path must surface an explicit read error");
         assert!(err.contains("failed to read HEVC encode probe parameter sample"));
+    }
+
+    #[test]
+    fn hevc_encode_slice_header_flags_match_ffmpeg_baseline_shape() {
+        let flags = hevc_encode_std_slice_segment_header_flags(true);
+        assert_eq!(flags.first_slice_segment_in_pic_flag(), 1);
+        assert_eq!(flags.dependent_slice_segment_flag(), 0);
+        assert_eq!(flags.slice_sao_luma_flag(), 1);
+        assert_eq!(flags.slice_sao_chroma_flag(), 1);
+        assert_eq!(flags.num_ref_idx_active_override_flag(), 0);
+        assert_eq!(flags.cabac_init_flag(), 0);
+        assert_eq!(flags.collocated_from_l0_flag(), 1);
+        assert_eq!(flags.slice_loop_filter_across_slices_enabled_flag(), 0);
+
+        let no_sao_flags = hevc_encode_std_slice_segment_header_flags(false);
+        assert_eq!(no_sao_flags.slice_sao_luma_flag(), 0);
+        assert_eq!(no_sao_flags.slice_sao_chroma_flag(), 0);
+        assert_eq!(no_sao_flags.collocated_from_l0_flag(), 1);
     }
 
     #[test]
