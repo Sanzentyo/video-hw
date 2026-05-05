@@ -634,8 +634,8 @@ pub(crate) fn probe_hevc_encode_session_bootstrap(
                 .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
                 .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
                 .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-                .push_next(&mut encode_h265_profile)
-                .push_next(&mut encode_usage);
+                .push_next(&mut encode_usage)
+                .push_next(&mut encode_h265_profile);
 
             let mut encode_capabilities = vk::VideoEncodeCapabilitiesKHR::default();
             let mut encode_h265_capabilities = vk::VideoEncodeH265CapabilitiesKHR::default();
@@ -1214,8 +1214,8 @@ fn probe_single_hevc_encode_session_format(
         .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
         .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
         .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-        .push_next(&mut encode_h265_profile)
-        .push_next(&mut encode_usage);
+        .push_next(&mut encode_usage)
+        .push_next(&mut encode_h265_profile);
 
     let mut encode_h265_session_create = vk::VideoEncodeH265SessionCreateInfoKHR::default()
         .use_max_level_idc(true)
@@ -3741,8 +3741,8 @@ fn create_hevc_encode_feedback_query_pool(
         .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
         .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
         .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-        .push_next(&mut h265_profile)
-        .push_next(&mut encode_usage);
+        .push_next(&mut encode_usage)
+        .push_next(&mut h265_profile);
     let create_info = vk::QueryPoolCreateInfo::default()
         .query_type(vk::QueryType::VIDEO_ENCODE_FEEDBACK_KHR)
         .query_count(1)
@@ -3815,8 +3815,8 @@ fn create_hevc_encode_probe_image(
         .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
         .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
         .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-        .push_next(&mut encode_h265_profile)
-        .push_next(&mut encode_usage);
+        .push_next(&mut encode_usage)
+        .push_next(&mut encode_h265_profile);
     let profiles = [profile];
     let mut profile_list = vk::VideoProfileListInfoKHR::default().profiles(&profiles);
     let create_info = vk::ImageCreateInfo::default()
@@ -4453,8 +4453,8 @@ fn create_hevc_encode_probe_dst_buffer(
         .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
         .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
         .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-        .push_next(&mut encode_h265_profile)
-        .push_next(&mut encode_usage);
+        .push_next(&mut encode_usage)
+        .push_next(&mut encode_h265_profile);
     let profiles = [profile];
     let mut profile_list = vk::VideoProfileListInfoKHR::default().profiles(&profiles);
     let create_info = vk::BufferCreateInfo::default()

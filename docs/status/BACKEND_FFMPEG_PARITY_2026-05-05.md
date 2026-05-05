@@ -92,7 +92,9 @@ HRD parameters or scaling lists while their payload flags are off, but now keeps
 zeroed HRD payload pointers wired like FFmpeg's H.265 Vulkan conversion. VPS
 StdVideo construction now also uses the VPS's own profile-tier-level instead of
 reusing the SPS profile-tier-level pointer, and session creation now uses the
-device max coded extent like FFmpeg instead of the requested probe extent. With
+device max coded extent like FFmpeg instead of the requested probe extent. HEVC
+encode video profile pNext chains now also place H.265 profile info before
+encode usage info, matching FFmpeg's profile chain order. With
 `rate_control_mode=cbr` and `control_mode=ffmpeg`, slice `constant_qp=0` and
 `slice_qp_delta=-26` now match FFmpeg's rate-control shape, but the 1920x1080
 sample live probe still reports session-parameter feedback
