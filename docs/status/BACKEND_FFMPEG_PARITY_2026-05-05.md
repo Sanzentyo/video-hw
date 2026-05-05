@@ -23,6 +23,8 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 
 ## Result Summary
 
+### H.264
+
 | Backend | Case | Result |
 |---|---|---|
 | NVIDIA | H.264 decode | PASS: video-hw 1053.93 fps vs FFmpeg CUDA/CUVID 615.37 fps |
@@ -32,6 +34,23 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 | Vulkan NVIDIA | H.264 decode | PASS: video-hw 603.68 fps vs FFmpeg Vulkan 512.49 fps |
 | Vulkan NVIDIA | H.264 encode | PASS: video-hw 112.89 fps vs FFmpeg Vulkan 89.06 fps |
 | Vulkan Intel | H.264 decode/encode | Not usable here: not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan decode exits 0xc0000005 and encode fails with unsupported encode queue |
+
+### HEVC audit
+
+- Integrated: `output/benchmark-backends-hevc-1777949168.md`
+- NVIDIA detail: `output/benchmark-nv-precise-hevc-1777949113.md`
+- Intel detail: `output/benchmark-intel-precise-hevc-1777949151.md`
+- Vulkan detail: `output/benchmark-vulkan-hevc-1777949168.md`
+
+| Backend | Case | Result |
+|---|---|---|
+| NVIDIA | HEVC decode | PASS: video-hw 1003.27 fps vs FFmpeg CUDA/CUVID 604.55 fps |
+| NVIDIA | HEVC encode | PASS: video-hw 201.17 fps vs FFmpeg NVENC 208.88 fps (-3.69%) |
+| Intel oneVPL | HEVC decode | PASS: video-hw 1358.28 fps vs FFmpeg QSV 1403.59 fps (-3.23%) |
+| Intel oneVPL | HEVC encode | PASS: video-hw 71.27 fps vs FFmpeg QSV 71.77 fps (-0.71%) |
+| Vulkan NVIDIA | HEVC decode | PASS: video-hw 690.15 fps vs FFmpeg Vulkan 511.34 fps |
+| Vulkan NVIDIA | HEVC encode | Not complete: `video-hw` reports `Vulkan HEVC encode initialization failed; runtime prerequisites are present, but the direct ash-level HEVC encode submit path is not wired yet`; FFmpeg Vulkan HEVC encode on the NVIDIA adapter succeeds at 87.55 fps |
+| Vulkan Intel | HEVC decode/encode | Decode works in FFmpeg Vulkan at 196.72 fps but is not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan encode fails with unsupported encode queue |
 
 ## Notes
 
