@@ -89,9 +89,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   bitstream and passes FFmpeg decode verification. The current probe also maps
   VPS sub-layer ordering and timing fields into StdVideo session parameters;
   it also uses an FFmpeg-like H.265 slice-header flag baseline and H.265
-  rate-control pNext when the FFmpeg control probe mode is selected. Those
-  parity improvements, plus stricter suppression of unpopulated SPS VUI HRD
-  and scaling-list pointer payloads and a VPS-owned profile-tier-level pointer,
+  rate-control pNext when the FFmpeg control probe mode is selected. It also
+  wires zeroed SPS/VPS HRD payload pointers while keeping HRD-present flags off,
+  uses a VPS-owned profile-tier-level pointer, and maps CBR/VBR slice
+  `constant_qp` / `slice_qp_delta` to FFmpeg's shape. Those parity improvements
   do not yet unblock NVIDIA HEVC encode submit on this driver.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or

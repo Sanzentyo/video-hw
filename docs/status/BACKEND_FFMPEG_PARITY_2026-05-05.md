@@ -88,13 +88,17 @@ probe still fails, so that flag shape is not sufficient either. The
 `control_mode=ffmpeg` path now also attaches an H.265-specific rate-control
 pNext with FFmpeg-style flat regular GOP hints; that path still fails at
 `vkEndCommandBuffer` too. StdVideo SPS VUI construction no longer advertises
-HRD parameters or scaling lists while their pointer payloads are not populated;
-VPS StdVideo construction now also uses the VPS's own profile-tier-level instead
-of reusing the SPS profile-tier-level pointer. The 1920x1080 sample live probe
-still reports session-parameter feedback `ERROR_OUT_OF_HOST_MEMORY`, so further
-SPS/PPS/VPS parity work remains. More complete HEVC session parameter generation
-and picture info wiring are still required before enabling `Codec::Hevc` in
-`VulkanEncoderAdapter`.
+HRD parameters or scaling lists while their payload flags are off, but now keeps
+zeroed HRD payload pointers wired like FFmpeg's H.265 Vulkan conversion. VPS
+StdVideo construction now also uses the VPS's own profile-tier-level instead of
+reusing the SPS profile-tier-level pointer. With `rate_control_mode=cbr` and
+`control_mode=ffmpeg`, slice `constant_qp=0` and `slice_qp_delta=-26` now match
+FFmpeg's rate-control shape, but the 1920x1080 sample live probe still reports
+session-parameter feedback `ERROR_OUT_OF_HOST_MEMORY` and fails at
+`vkEndCommandBuffer`. The aligned `1920x1088` `empty-template` probe also still
+fails, so coded-size granularity is not the remaining blocker. More complete
+HEVC session parameter generation and picture info wiring are still required
+before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 

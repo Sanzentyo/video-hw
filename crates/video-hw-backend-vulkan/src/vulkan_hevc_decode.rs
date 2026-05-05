@@ -15,8 +15,9 @@ use ash::vk::native::{
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_422,
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_444,
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_MONOCHROME,
-    StdVideoH265DecPicBufMgr, StdVideoH265LevelIdc, StdVideoH265LongTermRefPicsSps,
-    StdVideoH265PictureParameterSet, StdVideoH265PpsFlags, StdVideoH265ProfileIdc,
+    StdVideoH265DecPicBufMgr, StdVideoH265HrdFlags, StdVideoH265HrdParameters,
+    StdVideoH265LevelIdc, StdVideoH265LongTermRefPicsSps, StdVideoH265PictureParameterSet,
+    StdVideoH265PpsFlags, StdVideoH265ProfileIdc,
     StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN, StdVideoH265ProfileTierLevel,
     StdVideoH265ProfileTierLevelFlags, StdVideoH265SequenceParameterSet,
     StdVideoH265SequenceParameterSetVui, StdVideoH265ShortTermRefPicSet,
@@ -331,7 +332,9 @@ pub(crate) struct HevcStdParameterSetStorage {
     short_term_ref_pic_sets: Box<[StdVideoH265ShortTermRefPicSet]>,
     long_term_ref_pics_sps: Option<Box<StdVideoH265LongTermRefPicsSps>>,
     sequence_parameter_set_vui: Option<Box<StdVideoH265SequenceParameterSetVui>>,
+    sequence_parameter_set_vui_hrd: Option<Box<StdVideoH265HrdParameters>>,
     vps_dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
+    vps_hrd_parameters: Box<StdVideoH265HrdParameters>,
 }
 
 impl HevcStdParameterSetStorage {
@@ -3300,6 +3303,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     let short_term_ref_pic_sets = build_std_short_term_ref_pic_sets(&parameter_sets.sps, sps)?;
     let long_term_ref_pics_sps = build_std_long_term_ref_pics_sps(sps)?;
     let sequence_parameter_set_vui = build_std_sequence_parameter_set_vui(sps)?;
+    let sequence_parameter_set_vui_hrd = sequence_parameter_set_vui
+        .as_ref()
+        .map(|_| Box::new(empty_hrd_parameters()));
 
     let has_conformance_window = sps.conformance_window.conf_win_left_offset != 0
         || sps.conformance_window.conf_win_right_offset != 0
@@ -3602,7 +3608,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         short_term_ref_pic_sets: short_term_ref_pic_sets.into_boxed_slice(),
         long_term_ref_pics_sps: long_term_ref_pics_sps.map(Box::new),
         sequence_parameter_set_vui: sequence_parameter_set_vui.map(Box::new),
+        sequence_parameter_set_vui_hrd,
         vps_dec_pic_buf_mgr: Box::new(parsed_vps.vps_dec_pic_buf_mgr),
+        vps_hrd_parameters: Box::new(empty_hrd_parameters()),
     };
 
     let profile_ptr = storage.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
@@ -3613,6 +3621,8 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         storage.vps_dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
     storage.vps[0].pProfileTierLevel = vps_profile_ptr;
     storage.vps[0].pDecPicBufMgr = vps_dec_pic_buf_mgr_ptr;
+    storage.vps[0].pHrdParameters =
+        storage.vps_hrd_parameters.as_ref() as *const StdVideoH265HrdParameters;
     storage.sps[0].pProfileTierLevel = profile_ptr;
     storage.sps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
 
@@ -3633,6 +3643,12 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         .map_or(std::ptr::null(), |vui| {
             vui.as_ref() as *const StdVideoH265SequenceParameterSetVui
         });
+    if let (Some(vui), Some(hrd)) = (
+        storage.sequence_parameter_set_vui.as_mut(),
+        storage.sequence_parameter_set_vui_hrd.as_ref(),
+    ) {
+        vui.pHrdParameters = hrd.as_ref() as *const StdVideoH265HrdParameters;
+    }
 
     Ok(storage)
 }
@@ -5129,6 +5145,33 @@ fn empty_sps_vui_flags() -> StdVideoH265SpsVuiFlags {
     }
 }
 
+fn empty_hrd_flags() -> StdVideoH265HrdFlags {
+    StdVideoH265HrdFlags {
+        _bitfield_align_1: [],
+        _bitfield_1: Default::default(),
+    }
+}
+
+fn empty_hrd_parameters() -> StdVideoH265HrdParameters {
+    StdVideoH265HrdParameters {
+        flags: empty_hrd_flags(),
+        tick_divisor_minus2: 0,
+        du_cpb_removal_delay_increment_length_minus1: 0,
+        dpb_output_delay_du_length_minus1: 0,
+        bit_rate_scale: 0,
+        cpb_size_scale: 0,
+        cpb_size_du_scale: 0,
+        initial_cpb_removal_delay_length_minus1: 0,
+        au_cpb_removal_delay_length_minus1: 0,
+        dpb_output_delay_length_minus1: 0,
+        cpb_cnt_minus1: [0; 7],
+        elemental_duration_in_tc_minus1: [0; 7],
+        reserved: [0; 3],
+        pSubLayerHrdParametersNal: std::ptr::null(),
+        pSubLayerHrdParametersVcl: std::ptr::null(),
+    }
+}
+
 fn empty_pps_flags() -> StdVideoH265PpsFlags {
     StdVideoH265PpsFlags {
         _bitfield_align_1: [],
@@ -5718,6 +5761,17 @@ mod tests {
                 as *const StdVideoH265ProfileTierLevel
         );
         assert_eq!(
+            std_parameter_sets.vps[0].pHrdParameters,
+            std_parameter_sets.vps_hrd_parameters.as_ref() as *const StdVideoH265HrdParameters
+        );
+        assert_eq!(
+            std_parameter_sets
+                .vps_hrd_parameters
+                .flags
+                .nal_hrd_parameters_present_flag(),
+            0
+        );
+        assert_eq!(
             std_parameter_sets.sps[0].pProfileTierLevel,
             std_parameter_sets.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel
         );
@@ -5731,7 +5785,15 @@ mod tests {
                 .as_ref()
                 .unwrap();
             assert_eq!(vui.flags.vui_hrd_parameters_present_flag(), 0);
-            assert!(vui.pHrdParameters.is_null());
+            let hrd = std_parameter_sets
+                .sequence_parameter_set_vui_hrd
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                vui.pHrdParameters,
+                hrd.as_ref() as *const StdVideoH265HrdParameters
+            );
+            assert_eq!(hrd.flags.nal_hrd_parameters_present_flag(), 0);
         }
     }
 

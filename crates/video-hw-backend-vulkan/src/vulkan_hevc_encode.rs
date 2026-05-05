@@ -2507,6 +2507,30 @@ fn hevc_encode_probe_pic_order_cnt_val(mode: HevcEncodeProbePictureInfoMode) -> 
     }
 }
 
+fn hevc_encode_probe_constant_qp(
+    selected_rate_control_mode: Option<vk::VideoEncodeRateControlModeFlagsKHR>,
+) -> i32 {
+    if selected_rate_control_mode
+        .is_some_and(|mode| mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED)
+    {
+        0
+    } else {
+        26
+    }
+}
+
+fn hevc_encode_probe_slice_qp_delta(
+    constant_qp: i32,
+    pps_init_qp_minus26: i8,
+) -> Result<i8, String> {
+    let pps_init_qp = i32::from(pps_init_qp_minus26) + 26;
+    i8::try_from(constant_qp - pps_init_qp).map_err(|_| {
+        format!(
+            "slice_qp_delta is out of range for constant_qp={constant_qp}, pps_init_qp_minus26={pps_init_qp_minus26}"
+        )
+    })
+}
+
 fn hevc_encode_std_slice_segment_header_flags(
     sample_adaptive_offset_enabled: bool,
 ) -> StdVideoEncodeH265SliceSegmentHeaderFlags {
@@ -2897,15 +2921,10 @@ fn probe_hevc_encode_submit_execution(
         let requested_rate_control_mode_label =
             hevc_encode_probe_rate_control_mode_label(requested_rate_control_mode);
         let parameter_mode_label = hevc_encode_parameter_mode_label(config.parameter_mode);
-        let constant_qp = 26_i32;
+        let constant_qp = hevc_encode_probe_constant_qp(selected_rate_control_mode);
         let slice_qp_delta =
-            i8::try_from(26_i16 - (i16::from(config.parameter_set_pps_init_qp_minus26) + 26_i16))
-                .map_err(|_| {
-                format!(
-                    "slice_qp_delta is out of range for parameter-set pps_init_qp_minus26={}",
-                    config.parameter_set_pps_init_qp_minus26
-                )
-            })?;
+            hevc_encode_probe_slice_qp_delta(constant_qp, config.parameter_set_pps_init_qp_minus26)
+                .map_err(|err| format!("{err} for submit probe"))?;
         let parameter_feedback_probe = config
             .parameter_feedback_probe_summary
             .clone()
@@ -4319,6 +4338,9 @@ fn run_hevc_encode_pre_encode_probe(
         };
         let std_slice_flags =
             hevc_encode_std_slice_segment_header_flags(config.sample_adaptive_offset_enabled);
+        let constant_qp = hevc_encode_probe_constant_qp(control_config.selected_rate_control_mode);
+        let slice_qp_delta = hevc_encode_probe_slice_qp_delta(constant_qp, 0)
+            .map_err(|err| format!("{err} for pre-encode probe"))?;
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
             flags: std_slice_flags,
             slice_type,
@@ -4332,12 +4354,12 @@ fn run_hevc_encode_pre_encode_probe(
             slice_act_y_qp_offset: 0,
             slice_act_cb_qp_offset: 0,
             slice_act_cr_qp_offset: 0,
-            slice_qp_delta: 0,
+            slice_qp_delta,
             reserved1: 0,
             pWeightTable: std::ptr::null(),
         };
         let nalu_slice_entries = [vk::VideoEncodeH265NaluSliceSegmentInfoKHR::default()
-            .constant_qp(26)
+            .constant_qp(constant_qp)
             .std_slice_segment_header(&std_slice_header)];
         let nalu_entries: &[vk::VideoEncodeH265NaluSliceSegmentInfoKHR] = match nalu_mode {
             HevcEncodeProbeNaluMode::SingleSlice => &nalu_slice_entries,
@@ -4891,6 +4913,30 @@ mod tests {
         assert_eq!(info.idr_period, 30);
         assert_eq!(info.consecutive_b_frame_count, 0);
         assert_eq!(info.sub_layer_count, 0);
+    }
+
+    #[test]
+    fn hevc_encode_constant_qp_matches_ffmpeg_rate_control_shape() {
+        assert_eq!(hevc_encode_probe_constant_qp(None), 26);
+        assert_eq!(
+            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED)),
+            26
+        );
+        assert_eq!(
+            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::CBR)),
+            0
+        );
+        assert_eq!(
+            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::VBR)),
+            0
+        );
+    }
+
+    #[test]
+    fn hevc_encode_slice_qp_delta_matches_ffmpeg_formula() {
+        assert_eq!(hevc_encode_probe_slice_qp_delta(26, 0).unwrap(), 0);
+        assert_eq!(hevc_encode_probe_slice_qp_delta(0, 0).unwrap(), -26);
+        assert_eq!(hevc_encode_probe_slice_qp_delta(26, -2).unwrap(), 2);
     }
 
     #[test]
