@@ -152,6 +152,13 @@ struct ParsedHevcVps {
     vps_video_parameter_set_id: u8,
     vps_max_sub_layers_minus1: u8,
     vps_temporal_id_nesting_flag: bool,
+    vps_sub_layer_ordering_info_present_flag: bool,
+    vps_dec_pic_buf_mgr: StdVideoH265DecPicBufMgr,
+    vps_timing_info_present_flag: bool,
+    vps_num_units_in_tick: u32,
+    vps_time_scale: u32,
+    vps_poc_proportional_to_timing_flag: bool,
+    vps_num_ticks_poc_diff_one_minus1: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +329,7 @@ pub(crate) struct HevcStdParameterSetStorage {
     short_term_ref_pic_sets: Box<[StdVideoH265ShortTermRefPicSet]>,
     long_term_ref_pics_sps: Option<Box<StdVideoH265LongTermRefPicsSps>>,
     sequence_parameter_set_vui: Option<Box<StdVideoH265SequenceParameterSetVui>>,
+    vps_dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
 }
 
 impl HevcStdParameterSetStorage {
@@ -3474,6 +3482,14 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     let mut vps_flags = empty_vps_flags();
     vps_flags
         .set_vps_temporal_id_nesting_flag(bool_to_u32(parsed_vps.vps_temporal_id_nesting_flag));
+    vps_flags.set_vps_sub_layer_ordering_info_present_flag(bool_to_u32(
+        parsed_vps.vps_sub_layer_ordering_info_present_flag,
+    ));
+    vps_flags
+        .set_vps_timing_info_present_flag(bool_to_u32(parsed_vps.vps_timing_info_present_flag));
+    vps_flags.set_vps_poc_proportional_to_timing_flag(bool_to_u32(
+        parsed_vps.vps_poc_proportional_to_timing_flag,
+    ));
 
     let std_vps = StdVideoH265VideoParameterSet {
         flags: vps_flags,
@@ -3481,9 +3497,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         vps_max_sub_layers_minus1: parsed_vps.vps_max_sub_layers_minus1,
         reserved1: 0,
         reserved2: 0,
-        vps_num_units_in_tick: 0,
-        vps_time_scale: 0,
-        vps_num_ticks_poc_diff_one_minus1: 0,
+        vps_num_units_in_tick: parsed_vps.vps_num_units_in_tick,
+        vps_time_scale: parsed_vps.vps_time_scale,
+        vps_num_ticks_poc_diff_one_minus1: parsed_vps.vps_num_ticks_poc_diff_one_minus1,
         reserved3: 0,
         pDecPicBufMgr: std::ptr::null(),
         pHrdParameters: std::ptr::null(),
@@ -3582,12 +3598,15 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         short_term_ref_pic_sets: short_term_ref_pic_sets.into_boxed_slice(),
         long_term_ref_pics_sps: long_term_ref_pics_sps.map(Box::new),
         sequence_parameter_set_vui: sequence_parameter_set_vui.map(Box::new),
+        vps_dec_pic_buf_mgr: Box::new(parsed_vps.vps_dec_pic_buf_mgr),
     };
 
     let profile_ptr = storage.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
     let dec_pic_buf_mgr_ptr = storage.dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
+    let vps_dec_pic_buf_mgr_ptr =
+        storage.vps_dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
     storage.vps[0].pProfileTierLevel = profile_ptr;
-    storage.vps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
+    storage.vps[0].pDecPicBufMgr = vps_dec_pic_buf_mgr_ptr;
     storage.sps[0].pProfileTierLevel = profile_ptr;
     storage.sps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
 
@@ -4151,11 +4170,71 @@ fn parse_hevc_vps(vps_nalu: &[u8]) -> Result<ParsedHevcVps, String> {
         narrow_u32_to_u8(reader.read_bits(3)?, "vps_max_sub_layers_minus1")?;
     let vps_temporal_id_nesting_flag = reader.read_flag()?;
     let _vps_reserved_0xffff_16bits = reader.read_bits(16)?;
+    skip_hevc_profile_tier_level(&mut reader, usize::from(vps_max_sub_layers_minus1))?;
+
+    let vps_sub_layer_ordering_info_present_flag = reader.read_flag()?;
+    let mut vps_dec_pic_buf_mgr = StdVideoH265DecPicBufMgr {
+        max_latency_increase_plus1: [0; 7],
+        max_dec_pic_buffering_minus1: [0; 7],
+        max_num_reorder_pics: [0; 7],
+    };
+    let first_ordering_index = if vps_sub_layer_ordering_info_present_flag {
+        0
+    } else {
+        usize::from(vps_max_sub_layers_minus1)
+    };
+    for index in first_ordering_index..=usize::from(vps_max_sub_layers_minus1) {
+        vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[index] =
+            narrow_u32_to_u8(reader.read_ue()?, "vps_max_dec_pic_buffering_minus1")?;
+        vps_dec_pic_buf_mgr.max_num_reorder_pics[index] =
+            narrow_u32_to_u8(reader.read_ue()?, "vps_max_num_reorder_pics")?;
+        vps_dec_pic_buf_mgr.max_latency_increase_plus1[index] = reader.read_ue()?;
+    }
+    if !vps_sub_layer_ordering_info_present_flag {
+        let inferred_index = usize::from(vps_max_sub_layers_minus1);
+        for index in 0..inferred_index {
+            vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[index] =
+                vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[inferred_index];
+            vps_dec_pic_buf_mgr.max_num_reorder_pics[index] =
+                vps_dec_pic_buf_mgr.max_num_reorder_pics[inferred_index];
+            vps_dec_pic_buf_mgr.max_latency_increase_plus1[index] =
+                vps_dec_pic_buf_mgr.max_latency_increase_plus1[inferred_index];
+        }
+    }
+
+    let vps_max_layer_id = reader.read_bits(6)?;
+    let vps_num_layer_sets_minus1 = reader.read_ue()?;
+    for _ in 1..=vps_num_layer_sets_minus1 {
+        for _ in 0..=vps_max_layer_id {
+            let _layer_id_included_flag = reader.read_flag()?;
+        }
+    }
+
+    let vps_timing_info_present_flag = reader.read_flag()?;
+    let mut vps_num_units_in_tick = 0;
+    let mut vps_time_scale = 0;
+    let mut vps_poc_proportional_to_timing_flag = false;
+    let mut vps_num_ticks_poc_diff_one_minus1 = 0;
+    if vps_timing_info_present_flag {
+        vps_num_units_in_tick = reader.read_bits(32)?;
+        vps_time_scale = reader.read_bits(32)?;
+        vps_poc_proportional_to_timing_flag = reader.read_flag()?;
+        if vps_poc_proportional_to_timing_flag {
+            vps_num_ticks_poc_diff_one_minus1 = reader.read_ue()?;
+        }
+    }
 
     Ok(ParsedHevcVps {
         vps_video_parameter_set_id,
         vps_max_sub_layers_minus1,
         vps_temporal_id_nesting_flag,
+        vps_sub_layer_ordering_info_present_flag,
+        vps_dec_pic_buf_mgr,
+        vps_timing_info_present_flag,
+        vps_num_units_in_tick,
+        vps_time_scale,
+        vps_poc_proportional_to_timing_flag,
+        vps_num_ticks_poc_diff_one_minus1,
     })
 }
 
@@ -5524,10 +5603,38 @@ mod tests {
 
         let std_parameter_sets = build_hevc_std_parameter_set_storage(&parameter_sets)
             .expect("sample parameter sets should map to StdVideo structs");
+        let parsed_vps = parse_hevc_vps(&parameter_sets.vps)
+            .expect("repository VPS should expose StdVideo VPS fields");
         assert_eq!(std_parameter_sets.vps.len(), 1);
         assert_eq!(std_parameter_sets.sps.len(), 1);
         assert_eq!(std_parameter_sets.pps.len(), 1);
+        assert!(!std_parameter_sets.vps[0].pProfileTierLevel.is_null());
+        assert!(!std_parameter_sets.vps[0].pDecPicBufMgr.is_null());
         assert!(!std_parameter_sets.sps[0].pProfileTierLevel.is_null());
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_max_sub_layers_minus1,
+            parsed_vps.vps_max_sub_layers_minus1
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0]
+                .flags
+                .vps_sub_layer_ordering_info_present_flag(),
+            bool_to_u32(parsed_vps.vps_sub_layer_ordering_info_present_flag)
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0]
+                .flags
+                .vps_timing_info_present_flag(),
+            bool_to_u32(parsed_vps.vps_timing_info_present_flag)
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_num_units_in_tick,
+            parsed_vps.vps_num_units_in_tick
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_time_scale,
+            parsed_vps.vps_time_scale
+        );
         assert_eq!(
             std_parameter_sets.sps[0].sps_video_parameter_set_id,
             parameter_sets.parsed_sps.sps_video_parameter_set_id

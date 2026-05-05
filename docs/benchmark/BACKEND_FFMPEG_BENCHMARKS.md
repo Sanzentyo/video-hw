@@ -86,7 +86,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   environment. The backend contains an ignored live probe for driver/session
   diagnostics, but `VulkanEncoderAdapter` must not claim HEVC encode support
   until the direct Vulkan `cmdEncodeVideoKHR` path produces a non-empty
-  bitstream and passes FFmpeg decode verification.
+  bitstream and passes FFmpeg decode verification. The current probe also maps
+  VPS sub-layer ordering and timing fields into StdVideo session parameters;
+  that improves parity with FFmpeg-style parameter setup but does not yet
+  unblock NVIDIA HEVC encode submit on this driver.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

@@ -77,8 +77,14 @@ and the 1920x1080 sample-parameter case fail, so the blocker is not only the
 repository sample parameter set's coded size. The probe now carries SPS-derived
 SAO and temporal-MVP flags into H.265 slice/picture info, matching FFmpeg's
 Vulkan HEVC encode setup more closely, but that does not unblock submit on this
-driver. More complete HEVC session parameter generation and picture info wiring
-are still required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+driver. VPS parsing now also feeds VPS sub-layer ordering, timing flags, timing
+values, and a VPS-owned `StdVideoH265DecPicBufMgr` into the StdVideo parameter
+storage instead of reusing only SPS-derived DPB data. The 1920x1080 live probe
+still fails at `vkEndCommandBuffer`, and session-parameter feedback still fails
+with `ERROR_OUT_OF_HOST_MEMORY`, so the blocker is not limited to missing VPS
+timing/DPB fields. More complete HEVC session parameter generation and picture
+info wiring are still required before enabling `Codec::Hevc` in
+`VulkanEncoderAdapter`.
 
 ## Notes
 
