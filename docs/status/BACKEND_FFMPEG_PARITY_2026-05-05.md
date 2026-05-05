@@ -91,14 +91,16 @@ pNext with FFmpeg-style flat regular GOP hints; that path still fails at
 HRD parameters or scaling lists while their payload flags are off, but now keeps
 zeroed HRD payload pointers wired like FFmpeg's H.265 Vulkan conversion. VPS
 StdVideo construction now also uses the VPS's own profile-tier-level instead of
-reusing the SPS profile-tier-level pointer. With `rate_control_mode=cbr` and
-`control_mode=ffmpeg`, slice `constant_qp=0` and `slice_qp_delta=-26` now match
-FFmpeg's rate-control shape, but the 1920x1080 sample live probe still reports
-session-parameter feedback `ERROR_OUT_OF_HOST_MEMORY` and fails at
-`vkEndCommandBuffer`. The aligned `1920x1088` `empty-template` probe also still
-fails, so coded-size granularity is not the remaining blocker. More complete
-HEVC session parameter generation and picture info wiring are still required
-before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
+reusing the SPS profile-tier-level pointer, and session creation now uses the
+device max coded extent like FFmpeg instead of the requested probe extent. With
+`rate_control_mode=cbr` and `control_mode=ffmpeg`, slice `constant_qp=0` and
+`slice_qp_delta=-26` now match FFmpeg's rate-control shape, but the 1920x1080
+sample live probe still reports session-parameter feedback
+`ERROR_OUT_OF_HOST_MEMORY` and fails at `vkEndCommandBuffer`. The aligned
+`1920x1088` `empty-template` probe also still fails, so coded-size granularity
+is not the remaining blocker. More complete HEVC session parameter generation
+and picture info wiring are still required before enabling `Codec::Hevc` in
+`VulkanEncoderAdapter`.
 
 ## Notes
 

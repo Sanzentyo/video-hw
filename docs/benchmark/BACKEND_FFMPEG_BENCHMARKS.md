@@ -92,8 +92,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   rate-control pNext when the FFmpeg control probe mode is selected. It also
   wires zeroed SPS/VPS HRD payload pointers while keeping HRD-present flags off,
   uses a VPS-owned profile-tier-level pointer, and maps CBR/VBR slice
-  `constant_qp` / `slice_qp_delta` to FFmpeg's shape. Those parity improvements
-  do not yet unblock NVIDIA HEVC encode submit on this driver.
+  `constant_qp` / `slice_qp_delta` to FFmpeg's shape. Session creation now also
+  uses the device max coded extent like FFmpeg. Those parity improvements do not
+  yet unblock NVIDIA HEVC encode submit on this driver.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.

@@ -1230,7 +1230,7 @@ fn probe_single_hevc_encode_session_format(
         .queue_family_index(candidate.queue_family_index.0)
         .video_profile(&profile)
         .picture_format(config.picture_format)
-        .max_coded_extent(config.coded_extent)
+        .max_coded_extent(candidate.capability_snapshot.max_coded_extent)
         .reference_picture_format(config.reference_picture_format)
         .max_dpb_slots(session_max_dpb_slots)
         .max_active_reference_pictures(session_max_active_reference_pictures)
