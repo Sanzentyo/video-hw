@@ -27,10 +27,11 @@ The integrated runner writes an aggregate report to:
 output/benchmark-backends-<codec>-<epoch>.md
 ```
 
-For NV, Intel, and VT, it also calls the existing backend-specific precise
-scripts and links their generated reports. Vulkan currently has a decode-only
-path in the integrated runner because there is no separate Vulkan encode
-benchmark script.
+For NV, Intel, and VT, it calls the backend-specific precise scripts and links
+their generated reports. Vulkan is measured directly by the integrated runner:
+it discovers Vulkan adapters with `vulkaninfo --summary` (or uses
+`--vulkan-adapter-indexes`) and records `video-hw` decode/encode plus FFmpeg
+Vulkan decode/encode for each adapter.
 
 ## Backend-Specific Scripts
 
@@ -59,7 +60,16 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   Cargo target directory races and feature-set collisions between backend builds.
 - FFmpeg comparison modes are backend-specific. NV uses CUDA/NVENC paths in the
   NV script; Intel uses QSV paths in the Intel script; VT uses VideoToolbox on
-  macOS. Vulkan is currently compared against FFmpeg decode into a null sink.
+  macOS. Vulkan uses FFmpeg `-hwaccel vulkan` for decode and
+  `h264_vulkan` / `hevc_vulkan` for encode when the selected adapter supports
+  the operation.
+- NV and Intel decode timing defaults to `--decode-output-mode metadata`, which
+  matches FFmpeg null-sink decode and avoids measuring pixel readback when the
+  comparison is backend throughput. NV and Intel encode timing defaults to equal
+  raw input where supported.
+- Intel oneVPL decode uses backend default async depth 16. The Intel precise
+  script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
+  regression checks.
 - Use `--allow-failures false` when CI should fail immediately on the first
   backend benchmark error.
 - Reports use wall-clock timings and should be run on an otherwise quiet system

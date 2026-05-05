@@ -22,6 +22,7 @@ use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
 use video_hw::{
     AnyDecodeSession, Backend, BackendDecoderOptions, BackendKind, BitstreamInput, Codec,
     DecodeOutputMode, DecodedFrame, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
+    VulkanDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -52,6 +53,8 @@ struct Args {
     intel_force_software: bool,
     #[arg(long)]
     nv_report_metrics: Option<bool>,
+    #[arg(long)]
+    vulkan_adapter_index: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -429,6 +432,11 @@ fn build_backend_options(resolved: BackendKind, args: &Args) -> BackendDecoderOp
         BackendDecoderOptions::Intel(IntelDecoderOptions {
             force_software: args.intel_force_software,
         })
+    } else if backend_is_vulkan(resolved) {
+        BackendDecoderOptions::Vulkan(VulkanDecoderOptions {
+            adapter_index: args.vulkan_adapter_index,
+            ..Default::default()
+        })
     } else {
         BackendDecoderOptions::Default
     }
@@ -463,5 +471,21 @@ fn backend_is_intel(backend: BackendKind) -> bool {
     any(target_os = "linux", target_os = "windows")
 )))]
 fn backend_is_intel(_backend: BackendKind) -> bool {
+    false
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn backend_is_vulkan(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Vulkan)
+}
+
+#[cfg(not(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn backend_is_vulkan(_backend: BackendKind) -> bool {
     false
 }

@@ -126,6 +126,9 @@ struct Args {
     #[arg(long, default_value_t = 65_536)]
     chunk_bytes: usize,
 
+    #[arg(long, default_value = "metadata")]
+    decode_output_mode: String,
+
     #[arg(long, default_value_t = 10)]
     decode_loops: usize,
 
@@ -454,6 +457,7 @@ fn main() -> Result<()> {
     writeln!(&mut report, "height: {}", args.height)?;
     writeln!(&mut report, "decode_frames: {decode_frames}")?;
     writeln!(&mut report, "decode_loops: {}", args.decode_loops)?;
+    writeln!(&mut report, "decode_output_mode: {}", args.decode_output_mode)?;
     writeln!(&mut report, "encode_frames: {}", args.frame_count)?;
     writeln!(&mut report, "require_hardware: {}", args.require_hardware)?;
     writeln!(
@@ -466,7 +470,7 @@ fn main() -> Result<()> {
         "intel_decode_async_depth: {}",
         args.intel_decode_async_depth
             .map(|depth| depth.to_string())
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or_else(|| "backend default (16)".to_string())
     )?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(
@@ -760,6 +764,8 @@ fn run_case(
                 &decode_input_arg,
                 "--chunk-bytes",
                 &args.chunk_bytes.to_string(),
+                "--output-mode",
+                &args.decode_output_mode,
             ]);
             if args.require_hardware {
                 cmd.arg("--require-hardware");

@@ -20,6 +20,8 @@ struct Args {
     fps: i32,
     #[arg(long, default_value_t = 65536)]
     chunk_bytes: usize,
+    #[arg(long, default_value = "metadata")]
+    output_mode: String,
     #[arg(long, default_value_t = false)]
     require_hardware: bool,
     #[arg(long)]
@@ -31,12 +33,13 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let codec = parse_codec(&args.codec)?;
+    let output_mode = parse_output_mode(&args.output_mode)?;
     let backend: Backend = args.backend.parse()?;
     let mut config = DecoderConfig {
         codec,
         fps: args.fps,
         require_hardware: args.require_hardware,
-        output_mode: DecodeOutputMode::Metadata,
+        output_mode,
         backend_options: BackendDecoderOptions::Default,
     };
     let resolved_backend = backend
@@ -111,6 +114,15 @@ fn parse_codec(raw: &str) -> Result<Codec> {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
         other => anyhow::bail!("unsupported codec: {other}"),
+    }
+}
+
+fn parse_output_mode(raw: &str) -> Result<DecodeOutputMode> {
+    match raw.to_ascii_lowercase().as_str() {
+        "metadata" => Ok(DecodeOutputMode::Metadata),
+        "nv12" => Ok(DecodeOutputMode::Nv12),
+        "rgb24" => Ok(DecodeOutputMode::Rgb24),
+        other => anyhow::bail!("unsupported output_mode: {other}"),
     }
 }
 

@@ -395,7 +395,7 @@ async fn decode_with_onevpl(
         .ok()
         .and_then(|raw| raw.parse::<u16>().ok())
         .filter(|depth| (1..=16).contains(depth))
-        .unwrap_or(10);
+        .unwrap_or(16);
     decode_params.set_async_depth(decode_async_depth);
     let decoder = session
         .decoder(decode_params)

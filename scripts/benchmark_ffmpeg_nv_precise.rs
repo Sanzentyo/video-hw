@@ -90,6 +90,9 @@ struct Args {
     #[arg(long, default_value_t = 65536)]
     chunk_bytes: usize,
 
+    #[arg(long, default_value = "metadata")]
+    decode_output_mode: String,
+
     #[arg(long, default_value_t = 300)]
     frame_count: usize,
 
@@ -112,7 +115,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     verify: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     equal_raw_input: bool,
 }
 
@@ -217,6 +220,46 @@ fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
     let n = sorted.len();
     let rank = ((percentile / 100.0) * n as f64).ceil().clamp(1.0, n as f64) as usize;
     sorted[rank - 1]
+}
+
+fn pass_fail(ok: bool) -> &'static str {
+    if ok { "PASS" } else { "FAIL" }
+}
+
+fn throughput_fps(frames: usize, seconds: f64) -> f64 {
+    frames as f64 / seconds.max(f64::EPSILON)
+}
+
+fn percent_delta(video_hw: f64, ffmpeg: f64) -> f64 {
+    if ffmpeg <= f64::EPSILON {
+        return 0.0;
+    }
+    ((video_hw / ffmpeg) - 1.0) * 100.0
+}
+
+fn input_frame_count(codec: Codec) -> Option<usize> {
+    let input = codec.sample_input();
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            input,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse::<usize>().ok())
 }
 
 fn main() -> Result<()> {
@@ -363,6 +406,30 @@ fn main() -> Result<()> {
         args.codec.as_cli(),
         now_secs
     ));
+    let decode_frames = input_frame_count(args.codec).unwrap_or(303);
+    let decode_video_hw = samples[0].summarize();
+    let encode_video_hw = samples[1].summarize();
+    let decode_ffmpeg = samples[2].summarize();
+    let encode_ffmpeg = samples[3].summarize();
+    let decode_parity = {
+        let video_hw_fps = throughput_fps(decode_frames, decode_video_hw.mean);
+        let ffmpeg_fps = throughput_fps(decode_frames, decode_ffmpeg.mean);
+        let delta_percent = percent_delta(video_hw_fps, ffmpeg_fps);
+        let pass = delta_percent.abs() <= 10.0 || video_hw_fps > ffmpeg_fps;
+        (video_hw_fps, ffmpeg_fps, delta_percent, pass)
+    };
+    let encode_parity = {
+        let video_hw_fps = throughput_fps(args.frame_count, encode_video_hw.mean);
+        let ffmpeg_fps = throughput_fps(args.frame_count, encode_ffmpeg.mean);
+        let delta_percent = percent_delta(video_hw_fps, ffmpeg_fps);
+        let pass = delta_percent.abs() <= 10.0 || video_hw_fps > ffmpeg_fps;
+        (video_hw_fps, ffmpeg_fps, delta_percent, pass)
+    };
+    let overall_status = if decode_parity.3 && encode_parity.3 {
+        "PASS (video-hw is within ±10% of ffmpeg or faster)"
+    } else {
+        "FAIL (at least one path is slower than ffmpeg by more than 10%)"
+    };
 
     let mut report = String::new();
     writeln!(&mut report, "# NV Precise Benchmark Report")?;
@@ -372,6 +439,7 @@ fn main() -> Result<()> {
     writeln!(&mut report, "repeat: {}", args.repeat)?;
     writeln!(&mut report, "width: {}", args.width)?;
     writeln!(&mut report, "height: {}", args.height)?;
+    writeln!(&mut report, "decode_output_mode: {}", args.decode_output_mode)?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(
         &mut report,
@@ -404,6 +472,29 @@ fn main() -> Result<()> {
             s.cv_percent
         )?;
     }
+    writeln!(&mut report)?;
+    writeln!(&mut report, "## Parity Check (mean throughput)")?;
+    writeln!(
+        &mut report,
+        "- Target: video-hw throughput should be within ±10% of ffmpeg, or faster"
+    )?;
+    writeln!(
+        &mut report,
+        "- Decode: video-hw={:.2} fps, ffmpeg={:.2} fps, delta={:+.2}% => {}",
+        decode_parity.0,
+        decode_parity.1,
+        decode_parity.2,
+        pass_fail(decode_parity.3)
+    )?;
+    writeln!(
+        &mut report,
+        "- Encode: video-hw={:.2} fps, ffmpeg={:.2} fps, delta={:+.2}% => {}",
+        encode_parity.0,
+        encode_parity.1,
+        encode_parity.2,
+        pass_fail(encode_parity.3)
+    )?;
+    writeln!(&mut report, "- Overall: {overall_status}")?;
     writeln!(&mut report)?;
     writeln!(&mut report, "## Raw Samples")?;
     for case_samples in &samples {
@@ -565,6 +656,7 @@ fn main() -> Result<()> {
     fs::write(&report_path, report)
         .with_context(|| format!("write report: {}", report_path.display()))?;
     println!("saved report: {}", report_path.display());
+    println!("parity overall: {overall_status}");
     Ok(())
 }
 
@@ -615,6 +707,8 @@ fn run_case(
                 args.codec.sample_input(),
                 "--chunk-bytes",
                 &args.chunk_bytes.to_string(),
+                "--output-mode",
+                &args.decode_output_mode,
                 "--require-hardware",
             ]);
             if args.include_internal_metrics {

@@ -284,6 +284,7 @@ pub struct IntelDecoderOptions {
 #[derive(Debug, Clone, Default)]
 pub struct VulkanDecoderOptions {
     pub allow_software_fallback: Option<bool>,
+    pub adapter_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +309,7 @@ pub struct IntelEncoderOptions {
 #[derive(Debug, Clone, Default)]
 pub struct VulkanEncoderOptions {
     pub allow_software_fallback: Option<bool>,
+    pub adapter_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

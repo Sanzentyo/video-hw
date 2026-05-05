@@ -45,6 +45,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 ```
 
 - 生成レポート: `output/benchmark-nv-precise-<codec>-<epoch>.md`
+- 既定で `--equal-raw-input=true`。encode 比較では `video-hw` / `ffmpeg` に同一 raw ARGB 入力を供給する。
+- decode 比較は既定で `--decode-output-mode metadata`。FFmpeg null-sink decode と条件を揃える。
+- レポートに encode/decode の平均スループット差分（ffmpeg 比、±10% 以内または video-hw が高速なら PASS）を出力する。
 - `--include-internal-metrics` を付けると `VIDEO_HW_NV_METRICS=1` を有効化し、
   `nv_backend` の decode/encode ステージ内訳も集計する。
 - NVIDIA backend 固有パラメータ（`max_in_flight_outputs`）を変える場合は
@@ -88,7 +91,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc -
 - 既定で `--grouped-cases=true`（caseごとに warmup/measure をまとめて実行）になっており、round-robin より計測ばらつきを抑えやすい
 - 既定値は `--warmup 2` / `--repeat 7` / `--decode-loops 10`（短窓ノイズを抑えて parity 判定を安定化）
 - `--settle-ms <N>` で各計測の間に待機を入れて、熱/スケジューリング揺れを緩和できる
-- decode 側チューニングは `--intel-decode-async-depth <N>`（1..=16）で `VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH` を video-hw decode ケースへ注入できる（backend 側 default は 10）
+- decode 側チューニングは `--intel-decode-async-depth <N>`（1..=16）で `VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH` を video-hw decode ケースへ注入できる（backend 側 default は 16）
 - encode 側チューニングは環境変数 `VIDEO_HW_INTEL_RATE_CONTROL` / `VIDEO_HW_INTEL_CQP` / `VIDEO_HW_INTEL_ASYNC_DEPTH` / `VIDEO_HW_INTEL_HEVC_USE_VPP` / `VIDEO_HW_INTEL_HEVC_LOW_POWER` で調整できる（未指定時は H.264=CBR、HEVC=CQP、CQP=24、async_depth=10、HEVCはCPU NV12投入を優先、low-power は有効）
 - runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録したままレポート生成を継続
 - `--allow-case-failures --verify` 併用時、失敗ケースで出力が欠けた検証対象は `skipped` としてレポートに記録する
@@ -148,7 +151,19 @@ cargo +nightly -Zscript scripts/check_nvidia_decode_psnr.rs --input sample-video
 - 既定入力は `sample-videos/foreman_cif.h265`、既定しきい値は frame 単位の `psnr_y` 最小値 40 dB。
 - `FFMPEG_PATH` または `--ffmpeg` で FFmpeg 実行ファイルを指定できる。
 
-### 11) fMP4 decode access pattern benchmark
+### 11) 統合 backend / FFmpeg ベンチ
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codec h264 --warmup 1 --repeat 5
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec h264 --vulkan-adapter-indexes 0,1 --allow-failures true
+```
+
+- 生成レポート: `output/benchmark-backends-<codec>-<epoch>.md`
+- Windows/Linux では `nv,intel,vulkan`、macOS では `vt` が既定。
+- Vulkan は `vulkaninfo --summary` の GPU index を使って adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
+- adapter ごとに失敗理由も report に残すため、複数 GPU 環境では `--allow-failures true` で全候補を走査する。
+
+### 12) fMP4 decode access pattern benchmark
 
 ```bash
 cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs -- --input sample-videos/foreman_cif.mp4 --backend auto --frame-count 90

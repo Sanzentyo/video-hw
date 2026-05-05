@@ -75,7 +75,7 @@ impl VulkanDecoderAdapter {
             return self.decode_pending_hevc_bitstream(bitstream);
         }
         ensure_vk_codec_supported(self.config.codec, "decode")?;
-        let mut decoder = create_vk_bytes_decoder().map_err(|err| {
+        let mut decoder = create_vk_bytes_decoder(self.options.adapter_index).map_err(|err| {
             if !self.config.require_hardware && self.options.allow_software_fallback.unwrap_or(true)
             {
                 BackendError::UnsupportedConfig(format!(
@@ -357,15 +357,20 @@ impl VulkanEncoderAdapter {
         }
         ensure_vk_codec_supported(self.codec, "encode")?;
 
-        let mut encoder = create_vk_bytes_encoder(width, height, self.fps).map_err(|err| {
-            if !self.require_hardware && self.options.allow_software_fallback.unwrap_or(true) {
-                BackendError::UnsupportedConfig(format!(
-                    "{err}; software fallback is not available in direct Vulkan backend"
-                ))
-            } else {
-                err
-            }
-        })?;
+        let mut encoder =
+            create_vk_bytes_encoder(width, height, self.fps, self.options.adapter_index).map_err(
+                |err| {
+                    if !self.require_hardware
+                        && self.options.allow_software_fallback.unwrap_or(true)
+                    {
+                        BackendError::UnsupportedConfig(format!(
+                            "{err}; software fallback is not available in direct Vulkan backend"
+                        ))
+                    } else {
+                        err
+                    }
+                },
+            )?;
 
         let mut packets = Vec::new();
         for frame in pending_frames {
@@ -902,8 +907,8 @@ fn probe_vulkan_support() -> (bool, bool) {
     (decode_supported, encode_supported)
 }
 
-fn create_vk_bytes_decoder() -> Result<BytesDecoder, BackendError> {
-    let device = create_vk_device(true, false)?;
+fn create_vk_bytes_decoder(adapter_index: Option<usize>) -> Result<BytesDecoder, BackendError> {
+    let device = create_vk_device(true, false, adapter_index)?;
     device
         .create_bytes_decoder(DecoderParameters::default())
         .map_err(|err| {
@@ -915,8 +920,9 @@ fn create_vk_bytes_encoder(
     width: usize,
     height: usize,
     fps: i32,
+    adapter_index: Option<usize>,
 ) -> Result<BytesEncoder, BackendError> {
-    let device = create_vk_device(false, true)?;
+    let device = create_vk_device(false, true, adapter_index)?;
     let width_u32 = u32::try_from(width)
         .map_err(|_| BackendError::InvalidInput("frame width does not fit in u32".to_string()))?;
     let height_u32 = u32::try_from(height)
@@ -953,30 +959,59 @@ fn create_vk_bytes_encoder(
 fn create_vk_device(
     require_decode: bool,
     require_encode: bool,
+    adapter_index: Option<usize>,
 ) -> Result<Arc<VulkanDevice>, BackendError> {
     let instance = VulkanInstance::new().map_err(|err| {
         BackendError::UnsupportedConfig(format!("failed to initialize Vulkan: {err}"))
     })?;
-    let adapter = instance
-        .iter_adapters(None)
-        .map_err(|err| {
-            BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
-        })?
-        .find(|adapter| {
-            (!require_decode || adapter.supports_decoding())
-                && (!require_encode || adapter.supports_encoding())
-        })
-        .ok_or_else(|| {
-            let message = match (require_decode, require_encode) {
-                (true, true) => {
-                    "no Vulkan adapter supports both decode and encode for direct backend"
+    let adapters = instance.iter_adapters(None).map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
+    })?;
+    let adapter = if let Some(adapter_index) = adapter_index {
+        adapters
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, adapter)| (index == adapter_index).then_some(adapter))
+            .ok_or_else(|| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan adapter index {adapter_index} is not available"
+                ))
+            })
+            .and_then(|adapter| {
+                let info = adapter.info();
+                if require_decode && !adapter.supports_decoding() {
+                    return Err(BackendError::UnsupportedConfig(format!(
+                        "Vulkan adapter index {adapter_index} ({}) does not support decode",
+                        info.name
+                    )));
                 }
-                (true, false) => "no Vulkan adapter supports decode for direct backend",
-                (false, true) => "no Vulkan adapter supports encode for direct backend",
-                (false, false) => "no Vulkan adapter is available for direct backend",
-            };
-            BackendError::UnsupportedConfig(message.to_string())
-        })?;
+                if require_encode && !adapter.supports_encoding() {
+                    return Err(BackendError::UnsupportedConfig(format!(
+                        "Vulkan adapter index {adapter_index} ({}) does not support encode",
+                        info.name
+                    )));
+                }
+                Ok(adapter)
+            })?
+    } else {
+        adapters
+            .into_iter()
+            .find(|adapter| {
+                (!require_decode || adapter.supports_decoding())
+                    && (!require_encode || adapter.supports_encoding())
+            })
+            .ok_or_else(|| {
+                let message = match (require_decode, require_encode) {
+                    (true, true) => {
+                        "no Vulkan adapter supports both decode and encode for direct backend"
+                    }
+                    (true, false) => "no Vulkan adapter supports decode for direct backend",
+                    (false, true) => "no Vulkan adapter supports encode for direct backend",
+                    (false, false) => "no Vulkan adapter is available for direct backend",
+                };
+                BackendError::UnsupportedConfig(message.to_string())
+            })?
+    };
     adapter
         .create_device(Default::default(), Default::default(), Default::default())
         .map_err(|err| {

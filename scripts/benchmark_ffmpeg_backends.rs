@@ -116,6 +116,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     include_internal_metrics: bool,
 
+    /// Vulkan adapter indexes to test. Defaults to all adapters reported by vulkaninfo.
+    #[arg(long, value_delimiter = ',')]
+    vulkan_adapter_indexes: Vec<usize>,
+
     #[arg(long, default_value = "output")]
     output_dir: PathBuf,
 }
@@ -152,6 +156,7 @@ impl BackendStatus {
 #[derive(Debug, Clone)]
 struct CaseSummary {
     case: String,
+    status: String,
     mean_seconds: Option<f64>,
     p50_seconds: Option<f64>,
     throughput_fps: Option<f64>,
@@ -169,6 +174,7 @@ impl CaseSamples {
         let stats = Stats::from_samples(&self.seconds);
         CaseSummary {
             case: self.case.to_string(),
+            status: "passed".to_string(),
             mean_seconds: Some(stats.mean),
             p50_seconds: Some(stats.p50),
             throughput_fps: Some(self.frame_count as f64 / stats.mean.max(f64::EPSILON)),
@@ -277,6 +283,34 @@ fn default_backends_for_host() -> Vec<Backend> {
     Vec::new()
 }
 
+fn discover_vulkan_adapter_indexes() -> Result<Vec<usize>> {
+    let output = Command::new("vulkaninfo")
+        .arg("--summary")
+        .output()
+        .context("run vulkaninfo --summary")?;
+    if !output.status.success() {
+        bail!(
+            "vulkaninfo --summary failed: status={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let indexes = stdout
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("GPU")?;
+            let (index, suffix) = rest.split_once(':')?;
+            suffix.is_empty().then(|| index.parse::<usize>().ok()).flatten()
+        })
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        bail!("vulkaninfo reported no GPU entries");
+    }
+    Ok(indexes)
+}
+
 fn run_backend(backend: Backend, args: &Args) -> Result<BackendReport> {
     match backend {
         Backend::Nv => run_child_precise_script(backend, "scripts/benchmark_ffmpeg_nv_precise.rs", args),
@@ -340,67 +374,155 @@ fn run_child_precise_script(
 }
 
 fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
-    build_vulkan_decode_example(args.release)?;
+    build_vulkan_examples(args.release)?;
     let profile = if args.release { "release" } else { "debug" };
     let decode_bin = example_bin_path(profile, "decode_to_yuv");
+    let encode_bin = example_bin_path(profile, "encode_synthetic");
     let null_sink = null_sink();
     let total_rounds = args.warmup + args.repeat;
-    let mut video_hw = CaseSamples {
-        case: "video-hw decode",
-        frame_count: 303,
-        seconds: Vec::new(),
-    };
-    let mut ffmpeg = CaseSamples {
-        case: "ffmpeg decode",
-        frame_count: 303,
-        seconds: Vec::new(),
+    let adapter_indexes = if args.vulkan_adapter_indexes.is_empty() {
+        discover_vulkan_adapter_indexes().unwrap_or_else(|err| {
+            eprintln!("failed to discover Vulkan adapters via vulkaninfo: {err:#}; falling back to adapter 0");
+            vec![0]
+        })
+    } else {
+        args.vulkan_adapter_indexes.clone()
     };
 
-    for round in 0..total_rounds {
-        let is_warmup = round < args.warmup;
-        let phase = if is_warmup { "warmup" } else { "measure" };
-        println!(
-            "vulkan round {}/{total_rounds}, phase={phase}",
-            round + 1
-        );
-
-        let video_hw_seconds = run_timed(vulkan_decode_command(&decode_bin, args, &null_sink)?)?;
-        println!("  video-hw decode {:.3}s", video_hw_seconds);
-        let ffmpeg_seconds = run_timed(ffmpeg_decode_command(args, &null_sink))?;
-        println!("  ffmpeg decode    {:.3}s", ffmpeg_seconds);
-
-        if !is_warmup {
-            video_hw.seconds.push(video_hw_seconds);
-            ffmpeg.seconds.push(ffmpeg_seconds);
-        }
+    let mut cases = Vec::new();
+    for adapter_index in adapter_indexes {
+        println!("vulkan adapter {adapter_index}");
+        cases.push(run_vulkan_case(
+            adapter_index,
+            "video-hw decode",
+            303,
+            total_rounds,
+            args.warmup,
+            || vulkan_decode_command(&decode_bin, args, adapter_index),
+        ));
+        cases.push(run_vulkan_case(
+            adapter_index,
+            "ffmpeg vulkan decode",
+            303,
+            total_rounds,
+            args.warmup,
+            || Ok(ffmpeg_vulkan_decode_command(args, adapter_index, &null_sink)),
+        ));
+        cases.push(run_vulkan_case(
+            adapter_index,
+            "video-hw encode",
+            args.frame_count,
+            total_rounds,
+            args.warmup,
+            || vulkan_encode_command(&encode_bin, args, adapter_index, &null_sink),
+        ));
+        cases.push(run_vulkan_case(
+            adapter_index,
+            "ffmpeg vulkan encode",
+            args.frame_count,
+            total_rounds,
+            args.warmup,
+            || Ok(ffmpeg_vulkan_encode_command(args, adapter_index, &null_sink)),
+        ));
     }
 
     let now_secs = epoch_seconds()?;
     let report_path = args.output_dir.join(format!(
-        "benchmark-vulkan-decode-{}-{now_secs}.md",
+        "benchmark-vulkan-{}-{now_secs}.md",
         args.codec.as_cli()
     ));
-    let cases = vec![video_hw.summarize(), ffmpeg.summarize()];
     write_vulkan_report(&report_path, args, &cases)?;
+    let status = if cases
+        .iter()
+        .any(|case| case.status.starts_with("failed:"))
+    {
+        BackendStatus::Failed("one or more Vulkan adapter cases failed".to_string())
+    } else {
+        BackendStatus::Passed
+    };
 
     Ok(BackendReport {
         backend: Backend::Vulkan,
-        status: BackendStatus::Passed,
+        status,
         report_path: Some(report_path),
         cases,
     })
 }
 
-fn build_vulkan_decode_example(release: bool) -> Result<()> {
+fn build_vulkan_examples(release: bool) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["build", "-p", "video-hw", "--features", "backend-vulkan", "--example", "decode_to_yuv"]);
+    command.args([
+        "build",
+        "-p",
+        "video-hw",
+        "--features",
+        "backend-vulkan",
+        "--example",
+        "decode_to_yuv",
+        "--example",
+        "encode_synthetic",
+    ]);
     if release {
         command.arg("--release");
     }
-    run_inherited(&mut command).context("build Vulkan decode_to_yuv example")
+    run_inherited(&mut command).context("build Vulkan examples")
 }
 
-fn vulkan_decode_command(decode_bin: &Path, args: &Args, null_sink: &Path) -> Result<Command> {
+fn run_vulkan_case<F>(
+    adapter_index: usize,
+    label: &'static str,
+    frame_count: usize,
+    total_rounds: usize,
+    warmup: usize,
+    mut command_factory: F,
+) -> CaseSummary
+where
+    F: FnMut() -> Result<Command>,
+{
+    let mut samples = CaseSamples {
+        case: label,
+        frame_count,
+        seconds: Vec::new(),
+    };
+    for round in 0..total_rounds {
+        let is_warmup = round < warmup;
+        let phase = if is_warmup { "warmup" } else { "measure" };
+        println!(
+            "  {label} round {}/{total_rounds}, phase={phase}",
+            round + 1
+        );
+        let command = match command_factory() {
+            Ok(command) => command,
+            Err(err) => return failed_case(adapter_index, label, err),
+        };
+        match run_timed(command) {
+            Ok(seconds) => {
+                println!("    {seconds:.3}s");
+                if !is_warmup {
+                    samples.seconds.push(seconds);
+                }
+            }
+            Err(err) => return failed_case(adapter_index, label, err),
+        }
+    }
+    let mut summary = samples.summarize();
+    summary.case = format!("{label} [vk{adapter_index}]");
+    summary
+}
+
+fn failed_case(adapter_index: usize, label: &str, err: anyhow::Error) -> CaseSummary {
+    let status = format!("failed: {err:#}").replace('|', "\\|");
+    eprintln!("  {label} [vk{adapter_index}] {status}");
+    CaseSummary {
+        case: format!("{label} [vk{adapter_index}]"),
+        status,
+        mean_seconds: None,
+        p50_seconds: None,
+        throughput_fps: None,
+    }
+}
+
+fn vulkan_decode_command(decode_bin: &Path, args: &Args, adapter_index: usize) -> Result<Command> {
     let mut command = Command::new(decode_bin);
     command.args([
         "--backend",
@@ -416,19 +538,50 @@ fn vulkan_decode_command(decode_bin: &Path, args: &Args, null_sink: &Path) -> Re
         "--chunk-bytes",
         &args.chunk_bytes.to_string(),
         "--require-hardware",
+        "--vulkan-adapter-index",
+        &adapter_index.to_string(),
     ]);
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    if cfg!(windows) {
-        let _ = null_sink;
+    Ok(command)
+}
+
+fn vulkan_encode_command(
+    encode_bin: &Path,
+    args: &Args,
+    adapter_index: usize,
+    null_sink: &Path,
+) -> Result<Command> {
+    let mut command = Command::new(encode_bin);
+    command.args([
+        "--backend",
+        "vulkan",
+        "--codec",
+        args.codec.as_cli(),
+        "--frame-count",
+        &args.frame_count.to_string(),
+        "--discard-output",
+        "--require-hardware",
+        "--vulkan-adapter-index",
+        &adapter_index.to_string(),
+    ]);
+    if !cfg!(windows) {
+        command.args(["--output", &null_sink.to_string_lossy()]);
     }
     Ok(command)
 }
 
-fn ffmpeg_decode_command(args: &Args, null_sink: &Path) -> Command {
+fn ffmpeg_vulkan_decode_command(args: &Args, adapter_index: usize, null_sink: &Path) -> Command {
     let mut command = Command::new("ffmpeg");
     command.args([
         "-v",
         "error",
+        "-init_hw_device",
+        &format!("vulkan=vk:{adapter_index}"),
+        "-hwaccel",
+        "vulkan",
+        "-hwaccel_device",
+        "vk",
+        "-hwaccel_output_format",
+        "vulkan",
         "-f",
         args.codec.ffmpeg_demuxer(),
         "-i",
@@ -440,13 +593,70 @@ fn ffmpeg_decode_command(args: &Args, null_sink: &Path) -> Command {
     command
 }
 
+fn ffmpeg_vulkan_encode_command(args: &Args, adapter_index: usize, null_sink: &Path) -> Command {
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-init_hw_device",
+        &format!("vulkan=vk:{adapter_index}"),
+        "-filter_hw_device",
+        "vk",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "testsrc2=size={}x{}:rate=30:duration={}",
+            args.width,
+            args.height,
+            (args.frame_count as f64 / 30.0).max(0.001)
+        ),
+        "-frames:v",
+        &args.frame_count.to_string(),
+        "-vf",
+        "format=nv12,hwupload",
+        "-c:v",
+        match args.codec {
+            Codec::H264 => "h264_vulkan",
+            Codec::Hevc => "hevc_vulkan",
+        },
+        "-f",
+        args.codec.ffmpeg_demuxer(),
+        &null_sink.to_string_lossy(),
+    ]);
+    command
+}
+
 fn run_timed(mut command: Command) -> Result<f64> {
     let start = Instant::now();
-    let status = command.status().context("spawn benchmark command")?;
-    if !status.success() {
-        bail!("benchmark command failed: status={status}");
+    let output = command.output().context("spawn benchmark command")?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "benchmark command failed: status={}; stdout_tail={}; stderr_tail={}",
+            output.status,
+            tail_for_report(&stdout),
+            tail_for_report(&stderr)
+        );
     }
     Ok(start.elapsed().as_secs_f64())
+}
+
+fn tail_for_report(text: &str) -> String {
+    let lines = text
+        .lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return "-".to_string();
+    }
+    lines.join(" / ").replace('|', "\\|")
 }
 
 fn run_inherited(command: &mut Command) -> Result<()> {
@@ -499,16 +709,17 @@ fn write_integrated_report(args: &Args, reports: &[BackendReport]) -> Result<Pat
     writeln!(&mut report, "## Summary")?;
     writeln!(
         &mut report,
-        "| Backend | Case | mean(s) | p50(s) | throughput(fps) |"
+        "| Backend | Case | Status | mean(s) | p50(s) | throughput(fps) |"
     )?;
-    writeln!(&mut report, "|---|---|---:|---:|---:|")?;
+    writeln!(&mut report, "|---|---|---|---:|---:|---:|")?;
     for backend_report in reports {
         for case in &backend_report.cases {
             writeln!(
                 &mut report,
-                "| {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} |",
                 backend_report.backend.display(),
                 case.case,
+                case.status.replace('|', "\\|"),
                 fmt_optional(case.mean_seconds),
                 fmt_optional(case.p50_seconds),
                 fmt_optional(case.throughput_fps)
@@ -521,21 +732,25 @@ fn write_integrated_report(args: &Args, reports: &[BackendReport]) -> Result<Pat
 
 fn write_vulkan_report(path: &Path, args: &Args, cases: &[CaseSummary]) -> Result<()> {
     let mut report = String::new();
-    writeln!(&mut report, "# Vulkan Decode Benchmark Report")?;
+    writeln!(&mut report, "# Vulkan Backend Benchmark Report")?;
     writeln!(&mut report, "codec: {}", args.codec.as_cli())?;
     writeln!(&mut report, "warmup: {}", args.warmup)?;
     writeln!(&mut report, "repeat: {}", args.repeat)?;
     writeln!(&mut report)?;
     writeln!(
         &mut report,
-        "| Case | min(s) | mean(s) | p50(s) | p95(s) | p99(s) | max(s) | stddev(s) | CV(%) |"
+        "| Case | Status | min(s) | mean(s) | p50(s) | p95(s) | p99(s) | max(s) | stddev(s) | CV(%) |"
     )?;
-    writeln!(&mut report, "|---|---:|---:|---:|---:|---:|---:|---:|---:|")?;
+    writeln!(
+        &mut report,
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+    )?;
     for case in cases {
         writeln!(
             &mut report,
-            "| {} | n/a | {} | {} | n/a | n/a | n/a | n/a | n/a |",
+            "| {} | {} | n/a | {} | {} | n/a | n/a | n/a | n/a | n/a |",
             case.case,
+            case.status.replace('|', "\\|"),
             fmt_optional(case.mean_seconds),
             fmt_optional(case.p50_seconds)
         )?;
@@ -569,6 +784,7 @@ fn parse_case_summary_line(line: &str) -> Option<CaseSummary> {
     let p50 = parse_optional_f64(cells[3]);
     Some(CaseSummary {
         case: cells[0].to_string(),
+        status: "passed".to_string(),
         mean_seconds: mean,
         p50_seconds: p50,
         throughput_fps: None,
