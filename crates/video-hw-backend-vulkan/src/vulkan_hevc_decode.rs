@@ -372,10 +372,27 @@ impl HevcStdParameterSetStorage {
         self.pps[0].init_qp_minus26
     }
 
+    #[cfg(test)]
+    pub(crate) fn encode_sps_picture_size(&self) -> (u32, u32) {
+        (
+            self.sps[0].pic_width_in_luma_samples,
+            self.sps[0].pic_height_in_luma_samples,
+        )
+    }
+
     pub(crate) fn override_encode_sps_vui_parameters_present_flag(&mut self, present: bool) {
         self.sps[0]
             .flags
             .set_vui_parameters_present_flag(bool_to_u32(present));
+    }
+
+    pub(crate) fn override_encode_sps_picture_size(&mut self, coded_width: u32, coded_height: u32) {
+        self.sps[0].pic_width_in_luma_samples = coded_width;
+        self.sps[0].pic_height_in_luma_samples = coded_height;
+        self.sps[0].conf_win_left_offset = 0;
+        self.sps[0].conf_win_right_offset = 0;
+        self.sps[0].conf_win_top_offset = 0;
+        self.sps[0].conf_win_bottom_offset = 0;
     }
 }
 

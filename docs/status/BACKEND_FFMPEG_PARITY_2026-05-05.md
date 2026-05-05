@@ -141,14 +141,22 @@ matching FFmpeg's session-create shape more closely; this still fails at
 `VIDEO_HW_VULKAN_HEVC_ENCODE_BEGIN_PNEXT_MODE=rate-control` can attach the
 rate-control pNext chain to `cmd_begin_video_coding_khr`, matching FFmpeg's
 conditional begin-coding shape; this also still fails at `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_DST_RANGE_MODE=ffmpeg-reserve-align` can reserve
+the final bitstream size alignment from `VkVideoEncodeInfoKHR.dstBufferRange`
+like FFmpeg; this changes the 320x180 probe range from `1048576` to `1048320`
+but still fails at `vkEndCommandBuffer`.
+`VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SIZE_MODE=coded` can override the
+sample-derived StdVideo SPS picture size to the probe coded size; the 320x180
+sample-parameter probe now reaches `parameter_set_coded_match=true`, but still
+fails at `vkEndCommandBuffer`.
 The default, FFmpeg begin-slot, `dst_prefix=256`, DPB-barrier-none, FFmpeg
 reference-slot pointer, and combined FFmpeg-style probes all still fail at
 `vkEndCommandBuffer`, so the remaining blocker is after those picture resource
 / image view / allocation / syntax-flag / output offset / zero-reference pointer
 / fixed-QP / quality-level / source-upload / source-resource-extent /
-session-H265-create-info / begin-rate-control-pNext parity points. More complete
-HEVC command/resource wiring is still required before enabling `Codec::Hevc` in
-`VulkanEncoderAdapter`.
+session-H265-create-info / begin-rate-control-pNext / dst-range-reserve /
+parameter-size parity points. More complete HEVC command/resource wiring is
+still required before enabling `Codec::Hevc` in `VulkanEncoderAdapter`.
 
 ## Notes
 
