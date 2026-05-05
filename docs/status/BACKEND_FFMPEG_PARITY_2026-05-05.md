@@ -94,6 +94,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   - NVIDIA Vulkan remains PASS: decode 680.183 fps vs FFmpeg Vulkan 531.841 fps; encode 135.721 fps vs FFmpeg Vulkan 88.375 fps
   - Intel direct ash HEVC decode was attempted with physical device index 0 and failed at `vkGetVideoSessionMemoryRequirementsKHR returned no memory requirements`
   - FFmpeg Vulkan HEVC decode on Intel still works, but FFmpeg Vulkan HEVC encode still fails with `Function not implemented`
+- Follow-up probe: `output/benchmark-backends-hevc-1777964358.md`
+  - A zero-count `vkBindVideoSessionMemoryKHR` experiment was run for the Intel direct ash HEVC decode path after the driver reported zero session memory requirements.
+  - The Intel decode child process aborted with `0xc0000409` (`thread caused non-unwinding panic. aborting.`), matching the earlier unbound-session experiment's failure class.
+  - Because both "skip session bind" and "bind zero entries" abort on this driver, the implementation keeps the safe diagnostic failure at `vkGetVideoSessionMemoryRequirementsKHR returned no memory requirements` instead of enabling either path.
 - Interpretation: Intel Vulkan is now actively probed instead of only being marked unavailable. The driver advertises HEVC decode capability, but the direct ash session bootstrap does not produce usable session memory requirements on this environment. This remains the Vulkan/Intel-specific blocker.
 
 ### H.264
