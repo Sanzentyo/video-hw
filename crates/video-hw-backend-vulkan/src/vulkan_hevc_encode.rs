@@ -2617,14 +2617,31 @@ fn hevc_encode_probe_pic_order_cnt_val(mode: HevcEncodeProbePictureInfoMode) -> 
 
 fn hevc_encode_probe_constant_qp(
     selected_rate_control_mode: Option<vk::VideoEncodeRateControlModeFlagsKHR>,
+    override_value: Option<&str>,
 ) -> i32 {
     if selected_rate_control_mode
         .is_some_and(|mode| mode != vk::VideoEncodeRateControlModeFlagsKHR::DISABLED)
     {
         0
     } else {
-        26
+        parse_hevc_encode_probe_constant_qp(override_value).unwrap_or(18)
     }
+}
+
+fn resolve_hevc_encode_probe_constant_qp(
+    selected_rate_control_mode: Option<vk::VideoEncodeRateControlModeFlagsKHR>,
+) -> i32 {
+    const ENV_VAR: &str = "VIDEO_HW_VULKAN_HEVC_ENCODE_CONSTANT_QP";
+    let override_value = std::env::var(ENV_VAR).ok();
+    hevc_encode_probe_constant_qp(selected_rate_control_mode, override_value.as_deref())
+}
+
+fn parse_hevc_encode_probe_constant_qp(value: Option<&str>) -> Option<i32> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| (0..=51).contains(value))
 }
 
 fn hevc_encode_probe_slice_qp_delta(
@@ -2876,6 +2893,8 @@ fn probe_hevc_encode_submit_execution(
     let mut source_image_memory = vk::DeviceMemory::null();
     let mut source_image_view = vk::ImageView::null();
     let mut source_image_dedicated_allocation = false;
+    let mut source_upload_buffer = vk::Buffer::null();
+    let mut source_upload_buffer_memory = vk::DeviceMemory::null();
     let mut dpb_image = vk::Image::null();
     let mut dpb_image_memory = vk::DeviceMemory::null();
     let mut dpb_image_view = vk::ImageView::null();
@@ -2972,6 +2991,27 @@ fn probe_hevc_encode_submit_execution(
         source_image_memory = created_source_image_memory;
         source_image_view = created_source_image_view;
         source_image_dedicated_allocation = created_source_image_dedicated_allocation;
+        let (source_upload_buffer_size, source_upload_regions) =
+            build_hevc_encode_source_upload_regions(
+                config.picture_format,
+                image_width,
+                image_height,
+            )?;
+        let (created_source_upload_buffer, created_source_upload_buffer_memory) =
+            create_hevc_encode_probe_transfer_buffer(
+                device,
+                instance,
+                config.physical_device,
+                source_upload_buffer_size,
+            )?;
+        source_upload_buffer = created_source_upload_buffer;
+        source_upload_buffer_memory = created_source_upload_buffer_memory;
+        write_hevc_encode_source_upload_pattern(
+            device,
+            source_upload_buffer_memory,
+            source_upload_buffer_size,
+            &source_upload_regions,
+        )?;
         let (
             created_dpb_image,
             created_dpb_image_memory,
@@ -3066,7 +3106,7 @@ fn probe_hevc_encode_submit_execution(
         let requested_rate_control_mode_label =
             hevc_encode_probe_rate_control_mode_label(requested_rate_control_mode);
         let parameter_mode_label = hevc_encode_parameter_mode_label(config.parameter_mode);
-        let constant_qp = hevc_encode_probe_constant_qp(selected_rate_control_mode);
+        let constant_qp = resolve_hevc_encode_probe_constant_qp(selected_rate_control_mode);
         let slice_qp_delta =
             hevc_encode_probe_slice_qp_delta(constant_qp, config.parameter_set_pps_init_qp_minus26)
                 .map_err(|err| format!("{err} for submit probe"))?;
@@ -3115,7 +3155,7 @@ fn probe_hevc_encode_submit_execution(
         let picture_resource_extent_mode_label =
             hevc_encode_probe_picture_resource_extent_mode_label(picture_resource_extent_mode);
         let encode_probe_context = format!(
-            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
+            "encode_probe_inputs(coded={}x{}, image={}x{}, src_picture_resource={}x{}, picture_resource_coded={}x{}, picture_resource_extent_mode={}, picture_format={:?}, reference_picture_format={:?}, source_init=nv12-upload, image_view_ycbcr=rgb-identity, image_memory_dedicated=src:{}|dpb:{}, dst_offset={}, dst_range={}, dst_prefix={}, dst_offset_align={}, dst_size_align={}, parameter_mode={}, parameter_set_ids=vps:{}|sps:{}|pps:{}, parameter_set_coded={}x{}, parameter_set_coded_match={}, parameter_set_pps_init_qp_minus26={}, parameter_set_sao={}, parameter_set_temporal_mvp={}, h265_std_syntax_flags={:?}, parameter_feedback_probe={}, reference_list_mode={}, reference_idx_mode={}, reference_idx_minus1={}, rps_mode={}, begin_reference_slot_mode={}, setup_reference_slot_mode={}, encode_reference_slot_pointer_mode={}, dpb_barrier_mode={}, begin_session_parameters_mode={}, control_mode={}, nalu_mode={}, codec_info_mode={}, primary_mode={}, picture_flags_mode={}, picture_info_mode={}, pic_order_cnt_val={}, temporal_id={}, constant_qp={}, slice_qp_delta={}, requested_rate_control_mode={}, rate_control_mode={}, max_rate_control_layers={}, quality_level={}, quality_level_control={}, maintenance1_mode={}, maintenance1_feature_enabled={}, session_dpb_mode={}, session_max_dpb_slots={}, session_max_active_refs={})",
             config.coded_width,
             config.coded_height,
             image_width,
@@ -3201,9 +3241,17 @@ fn probe_hevc_encode_submit_execution(
                 base_array_layer: 0,
                 layer_count: 1,
             });
+        let source_upload_buffer_barrier = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::HOST)
+            .src_access_mask(vk::AccessFlags2::HOST_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .buffer(source_upload_buffer)
+            .offset(0)
+            .size(source_upload_buffer_size);
         let source_prepare_dependency = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&source_image_prepare_barrier));
-        let clear_color = vk::ClearColorValue { uint32: [0; 4] };
+            .image_memory_barriers(std::slice::from_ref(&source_image_prepare_barrier))
+            .buffer_memory_barriers(std::slice::from_ref(&source_upload_buffer_barrier));
         let clear_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
@@ -3257,12 +3305,12 @@ fn probe_hevc_encode_submit_execution(
         unsafe {
             device.cmd_reset_query_pool(command_buffer, query_pool, 0, 1);
             device.cmd_pipeline_barrier2(command_buffer, &source_prepare_dependency);
-            device.cmd_clear_color_image(
+            device.cmd_copy_buffer_to_image(
                 command_buffer,
+                source_upload_buffer,
                 source_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &clear_color,
-                std::slice::from_ref(&clear_range),
+                &source_upload_regions,
             );
             device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
         }
@@ -3862,6 +3910,12 @@ fn probe_hevc_encode_submit_execution(
         }
         if source_image_memory != vk::DeviceMemory::null() {
             device.free_memory(source_image_memory, None);
+        }
+        if source_upload_buffer != vk::Buffer::null() {
+            device.destroy_buffer(source_upload_buffer, None);
+        }
+        if source_upload_buffer_memory != vk::DeviceMemory::null() {
+            device.free_memory(source_upload_buffer_memory, None);
         }
         if dpb_image_view != vk::ImageView::null() {
             device.destroy_image_view(dpb_image_view, None);
@@ -4593,7 +4647,8 @@ fn run_hevc_encode_pre_encode_probe(
         };
         let std_slice_flags =
             hevc_encode_std_slice_segment_header_flags(config.sample_adaptive_offset_enabled);
-        let constant_qp = hevc_encode_probe_constant_qp(control_config.selected_rate_control_mode);
+        let constant_qp =
+            resolve_hevc_encode_probe_constant_qp(control_config.selected_rate_control_mode);
         let slice_qp_delta = hevc_encode_probe_slice_qp_delta(constant_qp, 0)
             .map_err(|err| format!("{err} for pre-encode probe"))?;
         let std_slice_header = StdVideoEncodeH265SliceSegmentHeader {
@@ -4702,6 +4757,163 @@ fn run_hevc_encode_pre_encode_probe(
         )
     })?;
     Ok(())
+}
+
+fn build_hevc_encode_source_upload_regions(
+    input_format: vk::Format,
+    image_width: u32,
+    image_height: u32,
+) -> Result<(u64, Vec<vk::BufferImageCopy>), String> {
+    if image_width == 0 || image_height == 0 {
+        return Err(format!(
+            "invalid encode source upload extent: {image_width}x{image_height}"
+        ));
+    }
+
+    let mut regions = Vec::new();
+    let mut next_offset = 0_u64;
+    let mut push_region = |aspect_mask: vk::ImageAspectFlags,
+                           plane_width: u32,
+                           plane_height: u32,
+                           bytes_per_texel: u64|
+     -> Result<(), String> {
+        let row_bytes = u64::from(plane_width)
+            .checked_mul(bytes_per_texel)
+            .ok_or_else(|| "encode source upload row size overflowed u64".to_string())?;
+        let plane_bytes = row_bytes
+            .checked_mul(u64::from(plane_height))
+            .ok_or_else(|| "encode source upload plane size overflowed u64".to_string())?;
+        let offset = align_up(next_offset, 4);
+        regions.push(
+            vk::BufferImageCopy::default()
+                .buffer_offset(offset)
+                .buffer_row_length(plane_width)
+                .buffer_image_height(plane_height)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D::default())
+                .image_extent(vk::Extent3D {
+                    width: plane_width,
+                    height: plane_height,
+                    depth: 1,
+                }),
+        );
+        next_offset = offset
+            .checked_add(plane_bytes)
+            .ok_or_else(|| "encode source upload buffer size overflowed u64".to_string())?;
+        Ok(())
+    };
+
+    match input_format {
+        vk::Format::G8_B8R8_2PLANE_420_UNORM => {
+            push_region(vk::ImageAspectFlags::PLANE_0, image_width, image_height, 1)?;
+            push_region(
+                vk::ImageAspectFlags::PLANE_1,
+                image_width.div_ceil(2),
+                image_height.div_ceil(2),
+                2,
+            )?;
+        }
+        other => {
+            return Err(format!(
+                "unsupported encode source upload format for HEVC probe: {other:?}"
+            ));
+        }
+    }
+
+    Ok((next_offset, regions))
+}
+
+fn write_hevc_encode_source_upload_pattern(
+    device: &ash::Device,
+    memory: vk::DeviceMemory,
+    buffer_size: u64,
+    regions: &[vk::BufferImageCopy],
+) -> Result<(), String> {
+    let buffer_size_usize = usize::try_from(buffer_size)
+        .map_err(|_| "encode source upload buffer exceeds usize range".to_string())?;
+    // SAFETY: memory belongs to `device`; mapped range is within the allocation.
+    let mapped = unsafe { device.map_memory(memory, 0, buffer_size, vk::MemoryMapFlags::empty()) }
+        .map_err(|err| format!("vkMapMemory for encode source upload buffer failed: {err}"))?;
+    let result = (|| -> Result<(), String> {
+        // SAFETY: mapped pointer is valid for `buffer_size_usize` bytes until unmap.
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(mapped.cast::<u8>(), buffer_size_usize) };
+        bytes.fill(0);
+        for region in regions {
+            let offset = usize::try_from(region.buffer_offset)
+                .map_err(|_| "encode source upload region offset exceeds usize".to_string())?;
+            let row_length = usize::try_from(region.buffer_row_length)
+                .map_err(|_| "encode source upload region row length exceeds usize".to_string())?;
+            let image_height = usize::try_from(region.buffer_image_height).map_err(|_| {
+                "encode source upload region image height exceeds usize".to_string()
+            })?;
+            let (bytes_per_texel, fill_value) = if region
+                .image_subresource
+                .aspect_mask
+                .contains(vk::ImageAspectFlags::PLANE_1)
+            {
+                (2_usize, 128_u8)
+            } else {
+                (1_usize, 16_u8)
+            };
+            let len = row_length
+                .checked_mul(image_height)
+                .and_then(|value| value.checked_mul(bytes_per_texel))
+                .ok_or_else(|| "encode source upload region size overflowed usize".to_string())?;
+            let end = offset
+                .checked_add(len)
+                .ok_or_else(|| "encode source upload region end overflowed usize".to_string())?;
+            let span = bytes.get_mut(offset..end).ok_or_else(|| {
+                "encode source upload region falls outside mapped buffer".to_string()
+            })?;
+            span.fill(fill_value);
+        }
+        Ok(())
+    })();
+    // SAFETY: pointer was returned by map_memory for this allocation.
+    unsafe {
+        device.unmap_memory(memory);
+    }
+    result
+}
+
+fn create_hevc_encode_probe_transfer_buffer(
+    device: &ash::Device,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    buffer_size: u64,
+) -> Result<(vk::Buffer, vk::DeviceMemory), String> {
+    let create_info = vk::BufferCreateInfo::default()
+        .size(buffer_size)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: buffer create info references local stack data.
+    let buffer = unsafe { device.create_buffer(&create_info, None) }
+        .map_err(|err| format!("vkCreateBuffer for encode source upload failed: {err}"))?;
+    // SAFETY: buffer handle is valid and owned by this device.
+    let memory_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    let memory_type_index = find_memory_type_index(
+        physical_device,
+        instance,
+        memory_requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )
+    .ok_or_else(|| "no host-coherent memory type for encode source upload buffer".to_string())?;
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(memory_requirements.size)
+        .memory_type_index(memory_type_index);
+    // SAFETY: allocation info is valid for this device.
+    let buffer_memory = unsafe { device.allocate_memory(&allocate_info, None) }
+        .map_err(|err| format!("vkAllocateMemory for encode source upload failed: {err}"))?;
+    // SAFETY: buffer and memory were created from this device.
+    unsafe { device.bind_buffer_memory(buffer, buffer_memory, 0) }
+        .map_err(|err| format!("vkBindBufferMemory for encode source upload failed: {err}"))?;
+    Ok((buffer, buffer_memory))
 }
 
 fn create_hevc_encode_probe_dst_buffer(
@@ -5198,26 +5410,56 @@ mod tests {
 
     #[test]
     fn hevc_encode_constant_qp_matches_ffmpeg_rate_control_shape() {
-        assert_eq!(hevc_encode_probe_constant_qp(None), 26);
+        assert_eq!(hevc_encode_probe_constant_qp(None, None), 18);
+        assert_eq!(hevc_encode_probe_constant_qp(None, Some("22")), 22);
+        assert_eq!(hevc_encode_probe_constant_qp(None, Some("52")), 18);
+        assert_eq!(hevc_encode_probe_constant_qp(None, Some("bad")), 18);
         assert_eq!(
-            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED)),
-            26
+            hevc_encode_probe_constant_qp(
+                Some(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED),
+                None,
+            ),
+            18
         );
         assert_eq!(
-            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::CBR)),
+            hevc_encode_probe_constant_qp(
+                Some(vk::VideoEncodeRateControlModeFlagsKHR::CBR),
+                Some("22"),
+            ),
             0
         );
         assert_eq!(
-            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::VBR)),
+            hevc_encode_probe_constant_qp(Some(vk::VideoEncodeRateControlModeFlagsKHR::VBR), None,),
             0
         );
     }
 
     #[test]
     fn hevc_encode_slice_qp_delta_matches_ffmpeg_formula() {
-        assert_eq!(hevc_encode_probe_slice_qp_delta(26, 0).unwrap(), 0);
+        assert_eq!(hevc_encode_probe_slice_qp_delta(18, 0).unwrap(), -8);
         assert_eq!(hevc_encode_probe_slice_qp_delta(0, 0).unwrap(), -26);
         assert_eq!(hevc_encode_probe_slice_qp_delta(26, -2).unwrap(), 2);
+    }
+
+    #[test]
+    fn build_hevc_encode_source_upload_regions_maps_nv12_planes() {
+        let (buffer_size, regions) =
+            build_hevc_encode_source_upload_regions(vk::Format::G8_B8R8_2PLANE_420_UNORM, 321, 181)
+                .expect("NV12 upload regions should be supported");
+        assert_eq!(regions.len(), 2);
+        assert_eq!(
+            regions[0].image_subresource.aspect_mask,
+            vk::ImageAspectFlags::PLANE_0
+        );
+        assert_eq!(regions[0].image_extent.width, 321);
+        assert_eq!(regions[0].image_extent.height, 181);
+        assert_eq!(
+            regions[1].image_subresource.aspect_mask,
+            vk::ImageAspectFlags::PLANE_1
+        );
+        assert_eq!(regions[1].image_extent.width, 161);
+        assert_eq!(regions[1].image_extent.height, 91);
+        assert!(buffer_size >= regions[1].buffer_offset + 161_u64 * 91 * 2);
     }
 
     #[test]
