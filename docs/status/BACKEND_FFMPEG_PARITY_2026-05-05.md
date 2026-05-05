@@ -122,7 +122,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 | Intel oneVPL | HEVC decode | PASS: video-hw 1358.28 fps vs FFmpeg QSV 1403.59 fps (-3.23%) |
 | Intel oneVPL | HEVC encode | PASS: video-hw 71.27 fps vs FFmpeg QSV 71.77 fps (-0.71%) |
 | Vulkan NVIDIA | HEVC decode | PASS: video-hw 690.15 fps vs FFmpeg Vulkan 511.34 fps |
-| Vulkan NVIDIA | HEVC encode | Partial: experimental IDR-only production path now emits decodable 30-frame Annex-B HEVC at 18.519 fps in the latest 640x360 batched run; FFmpeg Vulkan HEVC encode on the same NVIDIA adapter measures 84.270 fps in that run, so performance parity remains incomplete |
+| Vulkan NVIDIA | HEVC encode | PASS for measured warm steady-state throughput: experimental IDR-only production path emits decodable Annex-B HEVC, and the latest warm integrated run reports 135.789 fps vs FFmpeg Vulkan 88.439 fps. The older 640x360 cold run was slower because first process/driver initialization dominated. Reference-frame GOP encode remains engineering debt. |
 | Vulkan Intel | HEVC decode/encode | Decode works in FFmpeg Vulkan at 196.72 fps but is not exposed by `vk-video` / `video-hw`; FFmpeg Vulkan encode fails with unsupported encode queue |
 
 ### Intel oneVPL verification follow-up
@@ -141,10 +141,11 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   synchronous encode call for correctness; the 30-frame 320x180 verify run
   reports 30 decodable frames.
 
-### Vulkan HEVC encode live probe
+### Vulkan HEVC encode live probe history
 
-The direct ash-level Vulkan HEVC encode path remains blocked after the latest
-probe work. The live ignored test can be run explicitly:
+This section is historical diagnostic detail from before the production
+`VulkanEncoderAdapter` HEVC IDR path was enabled. The live ignored test can
+still be run explicitly:
 
 ```sh
 cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture
@@ -268,8 +269,11 @@ parameter probe above.
 parameter sample bytes into the externally encoded prefix area before
 `dstBufferOffset`; writing the first 256 bytes of the FFmpeg-generated 320x180
 stream is also part of the successful submit diagnostic above. This does not
-yet prove production HEVC encode support by itself: the driver output is the
-slice only, so it is not independently decodable without parameter/header NALs.
+did not by itself prove production HEVC encode support: the driver output is
+the slice only, so it is not independently decodable without parameter/header
+NALs. The production `VulkanEncoderAdapter` path now prepends the
+FFmpeg-generated leading non-VCL NALs and emits decodable IDR-only Annex-B
+packets.
 `scripts/check_vulkan_hevc_encode_probe.rs` reproduces the diagnostic by
 generating an FFmpeg `hevc_vulkan` 320x180 parameter sample, dumping the live
 probe output slice, prepending the leading non-VCL NALs (VPS/SPS/PPS/prefix

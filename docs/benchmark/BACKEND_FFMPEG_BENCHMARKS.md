@@ -130,8 +130,10 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   and the flat NV12 probe input compares at MSE=0 / PSNR=inf. This is still a
   one-frame diagnostic path. `VulkanEncoderAdapter` now uses the same slice
   extraction and header-prefix packetization for an experimental batched
-  IDR-only path, but a long-lived encoder with reusable per-frame resources and
-  reference-frame GOP encode is still required for performance parity.
+  IDR-only path. A long-lived encoder with reusable per-frame resources and
+  reference-frame GOP encode is still required for production completeness and
+  normal compression behavior, even though the warm steady-state throughput is
+  already at parity or faster on the tested NVIDIA adapter.
 - Intel oneVPL decode uses backend default async depth 16. The Intel precise
   script still accepts `--intel-decode-async-depth <1..=16>` for tuning or
   regression checks.
