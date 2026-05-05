@@ -63,7 +63,26 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
   `cargo run -p video-hw --features backend-vulkan --example encode_synthetic --release -- --backend vulkan --codec hevc --fps 30 --frame-count 30 --width 640 --height 360 --output output\vulkan-hevc-batch-smoke-1777960076.h265 --require-hardware --vulkan-adapter-index 0`
   followed by `ffprobe -f hevc -count_frames` and `ffmpeg -v error -f hevc -i ... -f null NUL`.
   Result: `codec_name=hevc`, `width=640`, `height=360`, `nb_read_frames=30`.
-- Interpretation: session/parameter reuse is now covered for a single `flush`, but performance parity remains incomplete. The remaining Vulkan HEVC encode gap is per-submit resource churn, all-IDR packetization, and lack of a long-lived production encoder / reference-frame GOP.
+- Interpretation: session/parameter reuse is now covered for a single `flush`. Without warmup the first process/driver initialization still dominates, but the subsequent full integrated run below shows steady-state Vulkan NVIDIA HEVC encode at FFmpeg parity or faster. Remaining engineering debt is per-submit resource churn, all-IDR packetization, and lack of a long-lived production encoder / reference-frame GOP.
+
+### Latest full integrated parity run
+
+- Command:
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codecs h264,hevc --warmup 1 --repeat 3 --frame-count 30 --width 320 --height 180 --vulkan-adapter-indexes 0,1 --allow-failures true --verify`
+- H.264 integrated: `output/benchmark-backends-h264-1777960325.md`
+  - NVIDIA: PASS (`output/benchmark-nv-precise-h264-1777960272.md`)
+  - Intel oneVPL: PASS (`output/benchmark-intel-precise-h264-1777960313.md`)
+  - Vulkan NVIDIA: decode 602.917 fps vs FFmpeg Vulkan 511.830 fps; encode 132.253 fps vs FFmpeg Vulkan 91.132 fps
+  - Vulkan Intel: `vulkaninfo` exposes Intel(R) Graphics as GPU0, but `video-hw` / `vk-video` does not expose it; FFmpeg Vulkan H.264 decode exits `0xc0000005` and encode fails with `Function not implemented`
+- HEVC integrated: `output/benchmark-backends-hevc-1777960393.md`
+  - NVIDIA: PASS (`output/benchmark-nv-precise-hevc-1777960334.md`)
+  - Intel oneVPL: PASS (`output/benchmark-intel-precise-hevc-1777960372.md`)
+  - Vulkan NVIDIA: decode 690.355 fps vs FFmpeg Vulkan 495.414 fps; encode 135.137 fps vs FFmpeg Vulkan 87.344 fps
+  - Vulkan Intel: `vulkaninfo` exposes Intel(R) Graphics as GPU0, but `video-hw` / `vk-video` does not expose it; FFmpeg Vulkan HEVC decode works at 183.091 fps, while FFmpeg Vulkan HEVC encode fails with `Function not implemented`
+- Adapter discovery:
+  - `vulkaninfo --summary`: GPU0 Intel(R) Graphics (`vendorID=0x8086`, `deviceID=0x7d67`, driver 101.6629), GPU1 NVIDIA GeForce RTX 5070 Ti Laptop GPU (`vendorID=0x10de`, `deviceID=0x2f18`, driver 591.44)
+  - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters --release`: only `0 NVIDIA GeForce RTX 5070 Ti Laptop GPU 4318 12056 true true`
+- Interpretation: NV, Intel oneVPL, and the available `video-hw` Vulkan NVIDIA adapter are at FFmpeg parity or faster for the measured H.264/HEVC decode+encode cases. The remaining uncovered hardware is Intel Vulkan: it exists as a Vulkan physical device, but is not exposed by `vk-video` / `video-hw` on this driver, and FFmpeg's own Vulkan encode path fails on it. This is recorded as an environment/driver/backend availability gap, not a passing Vulkan parity case.
 
 ### H.264
 

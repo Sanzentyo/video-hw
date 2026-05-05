@@ -97,9 +97,12 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --wa
   the current implementation reuses the Vulkan video session and session
   parameters within one `flush`, but still emits IDR-only packets and rebuilds
   per-submit resources instead of using a long-lived production encoder. The
-  2026-05-05 640x360 / 30-frame batch run measured video-hw Vulkan HEVC encode
-  at 18.519 fps versus FFmpeg Vulkan HEVC encode at 84.270 fps on the NVIDIA
-  adapter.
+  2026-05-05 640x360 / 30-frame cold batch run measured video-hw Vulkan HEVC
+  encode at 18.519 fps versus FFmpeg Vulkan HEVC encode at 84.270 fps on the
+  NVIDIA adapter, showing that first process/driver initialization dominates
+  short cold runs. With `--warmup 1 --repeat 3` at 320x180 / 30 frames, the
+  same NVIDIA adapter measured video-hw Vulkan HEVC encode at 135.137 fps
+  versus FFmpeg Vulkan HEVC encode at 87.344 fps.
   The current probe also maps
   VPS sub-layer ordering and timing fields into StdVideo session parameters;
   it also uses an FFmpeg-like H.265 slice-header flag baseline and H.265
