@@ -7,6 +7,7 @@ backends against FFmpeg from one command:
 
 ```sh
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --codec h264 --warmup 1 --repeat 5 --frame-count 300 --verify
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --codecs h264,hevc --warmup 1 --repeat 5 --frame-count 300 --verify
 ```
 
 By default, the runner selects host-appropriate backends:
@@ -18,6 +19,7 @@ You can select backends explicitly:
 
 ```sh
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codec h264 --warmup 1 --repeat 5 --verify
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codecs h264,hevc --warmup 1 --repeat 5 --verify
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vt --codec h264 --warmup 1 --repeat 5 --verify
 ```
 
@@ -26,6 +28,9 @@ The integrated runner writes an aggregate report to:
 ```text
 output/benchmark-backends-<codec>-<epoch>.md
 ```
+
+When `--codecs` is used, the runner executes the selected backend set once per
+codec and writes one aggregate report per codec.
 
 For NV, Intel, and VT, it calls the backend-specific precise scripts and links
 their generated reports. Vulkan is measured directly by the integrated runner:

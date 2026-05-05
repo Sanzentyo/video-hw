@@ -155,10 +155,12 @@ cargo +nightly -Zscript scripts/check_nvidia_decode_psnr.rs --input sample-video
 
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codec h264 --warmup 1 --repeat 5
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel,vulkan --codecs h264,hevc --warmup 1 --repeat 5
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec h264 --vulkan-adapter-indexes 0,1 --allow-failures true
 ```
 
 - 生成レポート: `output/benchmark-backends-<codec>-<epoch>.md`
+- `--codecs h264,hevc` を指定すると、codecごとに同じbackend集合を測り、codec別の統合レポートを生成する。
 - Windows/Linux では `nv,intel,vulkan`、macOS では `vt` が既定。
 - NV/Intel/VT は子レポートの parity / verification 結果も統合statusへ反映する。
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。

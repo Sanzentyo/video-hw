@@ -74,7 +74,7 @@ impl Codec {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(about = "Run integrated video-hw backend benchmarks against ffmpeg")]
 struct Args {
     /// Comma-separated backend list. Defaults to all backends available on the host target.
@@ -83,6 +83,10 @@ struct Args {
 
     #[arg(long, value_enum, default_value_t = Codec::H264)]
     codec: Codec,
+
+    /// Comma-separated codec list. When set, runs one integrated report per codec.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    codecs: Vec<Codec>,
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     release: bool,
@@ -223,61 +227,71 @@ fn main() -> Result<()> {
     } else {
         args.backends.clone()
     };
+    let selected_codecs = if args.codecs.is_empty() {
+        vec![args.codec]
+    } else {
+        args.codecs.clone()
+    };
 
-    let mut reports = Vec::new();
-    for backend in selected_backends {
-        let report = if backend.is_supported_on_host() {
-            run_backend(backend, &args)
-        } else {
-            Ok(BackendReport {
-                backend,
-                status: BackendStatus::Skipped(format!(
-                    "{} is not available on this target OS",
-                    backend.display()
-                )),
-                report_path: None,
-                cases: Vec::new(),
-            })
-        };
-
-        match report {
-            Ok(report) => {
-                println!(
-                    "{}: {}",
-                    report.backend.display(),
-                    report.status.as_report_text()
-                );
-                reports.push(report);
-            }
-            Err(err) => {
-                let report = BackendReport {
+    let mut any_failure = false;
+    for codec in selected_codecs {
+        let mut codec_args = args.clone();
+        codec_args.codec = codec;
+        let mut reports = Vec::new();
+        println!("codec: {}", codec.as_cli());
+        for backend in &selected_backends {
+            let backend = *backend;
+            let report = if backend.is_supported_on_host() {
+                run_backend(backend, &codec_args)
+            } else {
+                Ok(BackendReport {
                     backend,
-                    status: BackendStatus::Failed(format!("{err:#}")),
+                    status: BackendStatus::Skipped(format!(
+                        "{} is not available on this target OS",
+                        backend.display()
+                    )),
                     report_path: None,
                     cases: Vec::new(),
-                };
-                println!(
-                    "{}: {}",
-                    report.backend.display(),
-                    report.status.as_report_text()
-                );
-                if !args.allow_failures {
-                    write_integrated_report(&args, &[report])?;
-                    return Err(err);
+                })
+            };
+
+            match report {
+                Ok(report) => {
+                    println!(
+                        "{}: {}",
+                        report.backend.display(),
+                        report.status.as_report_text()
+                    );
+                    any_failure |= report.status.is_failure();
+                    reports.push(report);
                 }
-                reports.push(report);
+                Err(err) => {
+                    let report = BackendReport {
+                        backend,
+                        status: BackendStatus::Failed(format!("{err:#}")),
+                        report_path: None,
+                        cases: Vec::new(),
+                    };
+                    println!(
+                        "{}: {}",
+                        report.backend.display(),
+                        report.status.as_report_text()
+                    );
+                    any_failure = true;
+                    if !codec_args.allow_failures {
+                        write_integrated_report(&codec_args, &[report])?;
+                        return Err(err);
+                    }
+                    reports.push(report);
+                }
             }
         }
+
+        let report_path = write_integrated_report(&codec_args, &reports)?;
+        println!("saved integrated report: {}", report_path.display());
     }
 
-    let report_path = write_integrated_report(&args, &reports)?;
-    println!("saved integrated report: {}", report_path.display());
-
-    if !args.allow_failures
-        && reports
-            .iter()
-            .any(|report| report.status.is_failure())
-    {
+    if !args.allow_failures && any_failure {
         bail!("one or more backend benchmarks failed");
     }
     Ok(())
