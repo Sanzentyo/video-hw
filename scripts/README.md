@@ -218,11 +218,13 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --ge
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --gop-size 30 --min-psnr-y 60
 ```
 
 - 生成レポート: `output/vulkan-av1-psnr/vulkan-av1-psnr-<epoch>.md`
 - 既定では FFmpeg `libaom-av1` で AV1 low-overhead OBU を生成し、`decode_to_yuv --backend vulkan --codec av1 --output-mode nv12` の出力を FFmpeg software decode の NV12 と raw-vs-raw で比較する。
 - `--input-format fmp4` は FFmpeg fragmented MP4 (`av01`) を生成し、`decode_to_yuv --input-format mp4` 経由で同じ PSNR 比較を行う。FFmpeg 生成時は `delay_moov` を使い、`av1C` に sequence header OBU が入った fMP4 を作る。
+- `--gop-size <N>` は生成入力の `libaom-av1 -g` を切り替える。既定は現在のサポート範囲に合わせて `1`。`N>1` は inter-frame/GOP replay の未対応範囲を検出するための負荷として使う。
 - 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも 8-frame keyframe-only 入力で `--min-psnr-y 60` に PASS し、`psnr_y_min=inf`。
 
 ### 12) fMP4 decode access pattern benchmark

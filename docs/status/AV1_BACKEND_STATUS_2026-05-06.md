@@ -300,6 +300,13 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 0 --repeat 1 --frame-count 8 --width 320 --height 180 --release false --allow-failures true`
   (`output/benchmark-backends-av1-1778067552.md`,
   `output/benchmark-vulkan-av1-1778067552.md`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067819687.md`,
+  `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 30`
+  intentionally fails on the current keyframe-only implementation
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067825157.md`,
+  `psnr_y_min=12.8900`). This is the active inter-frame/GOP replay gap.
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -324,7 +331,7 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 1. Add inter-frame/GOP replay support and targeted decode-order tests/benches;
    the current Vulkan AV1 path is validated only for generated keyframe-only
-   streams.
+   streams. The `--gop-size 30` PSNR gate records the current failure.
 2. Keep OBU and fMP4 8-frame PSNR gates passing while expanding parser coverage
    beyond the generated `libaom-av1 -g 1` fixture.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for

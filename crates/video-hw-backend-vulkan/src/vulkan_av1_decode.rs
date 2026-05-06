@@ -1476,6 +1476,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                         consumed_tile_groups[*tile_index] = true;
                     }
                     submits.push(build_av1_tile_group_submit_skeleton(
+                        bitstream,
                         record,
                         &tile_groups,
                         sequence_header.as_ref(),
@@ -1889,7 +1890,16 @@ fn build_av1_frame_obu_submit_skeleton(
             .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?,
         sequence_header,
     )
-    .ok();
+    .map(Some)
+    .or_else(|err| {
+        if err.contains("got frame_type=")
+            && sequence_header.is_some_and(|header| !header.reduced_still_picture_header)
+        {
+            Err(format!("AV1 inter-frame decode is not implemented: {err}"))
+        } else {
+            Ok(None)
+        }
+    })?;
     let tile_payload_offset = key_frame_header
         .map(|header| header.tile_payload_offset)
         .unwrap_or(0);
@@ -1921,12 +1931,29 @@ fn build_av1_frame_obu_submit_skeleton(
 }
 
 fn build_av1_tile_group_submit_skeleton(
+    bitstream: &[u8],
     frame_header_record: &Av1ObuRecord,
     tile_group_records: &[(usize, &Av1ObuRecord)],
     sequence_header: Option<&ParsedAv1SequenceHeader>,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_header_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
+    let key_frame_header = parse_av1_key_frame_obu_header(
+        bitstream
+            .get(frame_header_record.payload_range.clone())
+            .ok_or_else(|| "AV1 frame-header OBU payload range exceeds bitstream".to_string())?,
+        sequence_header,
+    )
+    .map(Some)
+    .or_else(|err| {
+        if err.contains("got frame_type=")
+            && sequence_header.is_some_and(|header| !header.reduced_still_picture_header)
+        {
+            Err(format!("AV1 inter-frame decode is not implemented: {err}"))
+        } else {
+            Ok(None)
+        }
+    })?;
 
     let mut tile_offsets = Vec::with_capacity(tile_group_records.len());
     let mut tile_sizes = Vec::with_capacity(tile_group_records.len());
@@ -1948,7 +1975,7 @@ fn build_av1_tile_group_submit_skeleton(
         tile_offsets,
         tile_sizes,
         use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
-        key_frame_header: None,
+        key_frame_header,
     })
 }
 
@@ -5026,6 +5053,43 @@ mod tests {
             vec![(tile_group_obu_start + 2) as u32]
         );
         assert_eq!(skeleton.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_submit_skeleton_rejects_inter_frame_obu() {
+        let mut bitstream = make_obu(
+            1,
+            &[
+                0x00, 0x00, 0x00, 0x04, 0x3c, 0xfe, 0xcc, 0xda, 0xf9, 0x00, 0x40,
+            ],
+        );
+        // show_existing_frame=0, frame_type=1 (inter frame), followed by padding.
+        bitstream.extend_from_slice(&make_obu(6, &[0x20, 0x00]));
+
+        let err = build_av1_decode_submit_skeleton(&bitstream)
+            .expect_err("inter-frame AV1 decode must not be treated as key-frame decode");
+
+        assert!(err.contains("AV1 inter-frame decode is not implemented"));
+        assert!(err.contains("frame_type=1"));
+    }
+
+    #[test]
+    fn decode_submit_skeleton_rejects_inter_frame_header_obu() {
+        let mut bitstream = make_obu(
+            1,
+            &[
+                0x00, 0x00, 0x00, 0x04, 0x3c, 0xfe, 0xcc, 0xda, 0xf9, 0x00, 0x40,
+            ],
+        );
+        // show_existing_frame=0, frame_type=1 (inter frame), followed by padding.
+        bitstream.extend_from_slice(&make_obu(3, &[0x20, 0x00]));
+        bitstream.extend_from_slice(&make_obu(4, &[0x20, 0x21, 0x22]));
+
+        let err = build_av1_decode_submit_skeleton(&bitstream)
+            .expect_err("inter-frame AV1 frame-header OBU must be rejected");
+
+        assert!(err.contains("AV1 inter-frame decode is not implemented"));
+        assert!(err.contains("frame_type=1"));
     }
 
     #[test]

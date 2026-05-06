@@ -241,6 +241,11 @@ Acceptance:
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md` and
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`, both with
   `psnr_y_min=inf` over 8 generated keyframe-only frames.
+- `scripts/check_vulkan_av1_psnr.rs --gop-size <N>` now allows the same PSNR
+  gate to generate non-keyframe-only GOP input. On the current implementation
+  `--gop-size 30` fails at `psnr_y_min=12.8900`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067825157.md`), which is the
+  expected failure until AV1 reference-frame replay is implemented.
 
 ### Phase 5: Integrated Benchmark
 
@@ -310,6 +315,7 @@ cargo test -p video-hw-backend-vulkan --features backend-vulkan av1
 cargo check -p video-hw --features backend-vulkan --examples
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --gop-size 30 --min-psnr-y 60
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --verify --allow-failures true
 ```
 

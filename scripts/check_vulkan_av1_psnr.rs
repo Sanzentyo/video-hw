@@ -26,6 +26,7 @@ struct Args {
     height: u32,
     frames: u32,
     fps: u32,
+    gop_size: u32,
     min_psnr_y: f64,
     skip_build: bool,
 }
@@ -119,6 +120,7 @@ fn parse_args() -> Result<Args> {
     let mut height = 180;
     let mut frames = 1;
     let mut fps = 30;
+    let mut gop_size = 1;
     let mut min_psnr_y = 40.0;
     let mut skip_build = false;
     let mut iter = env::args().skip(1);
@@ -134,19 +136,20 @@ fn parse_args() -> Result<Args> {
             "--height" => height = next_value(&mut iter, "--height")?.parse()?,
             "--frames" => frames = next_value(&mut iter, "--frames")?.parse()?,
             "--fps" => fps = next_value(&mut iter, "--fps")?.parse()?,
+            "--gop-size" | "--gop" => gop_size = next_value(&mut iter, "--gop-size")?.parse()?,
             "--min-psnr-y" => min_psnr_y = next_value(&mut iter, "--min-psnr-y")?.parse()?,
             "--skip-build" => skip_build = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--min-psnr-y DB] [--skip-build]"
+                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--min-psnr-y DB] [--skip-build]"
                 );
                 std::process::exit(0);
             }
             other => return Err(anyhow!("unknown option {other}")),
         }
     }
-    if width == 0 || height == 0 || frames == 0 || fps == 0 {
-        bail!("--width/--height/--frames/--fps must be non-zero");
+    if width == 0 || height == 0 || frames == 0 || fps == 0 || gop_size == 0 {
+        bail!("--width/--height/--frames/--fps/--gop-size must be non-zero");
     }
     Ok(Args {
         input,
@@ -157,6 +160,7 @@ fn parse_args() -> Result<Args> {
         height,
         frames,
         fps,
+        gop_size,
         min_psnr_y,
         skip_build,
     })
@@ -194,7 +198,7 @@ fn generate_ffmpeg_av1_input(args: &Args, output: &Path) -> Result<()> {
             "-cpu-used",
             "8",
             "-g",
-            "1",
+            &args.gop_size.to_string(),
             "-lag-in-frames",
             "0",
     ]);
@@ -334,9 +338,10 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
         "FAIL"
     };
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n",
         input.display(),
         args.input_format,
+        args.gop_size,
         summary.frames,
         args.width,
         args.height,
