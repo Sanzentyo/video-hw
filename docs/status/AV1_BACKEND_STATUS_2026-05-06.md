@@ -458,9 +458,10 @@ Latest Vulkan AV1 scaffold verification:
   `scripts/benchmark_ffmpeg_backends.rs --vulkan-av1-lag-in-frames <N>`,
   `scripts/check_vulkan_av1_psnr.rs --lag-in-frames <N>`, and
   `scripts/inspect_av1_frame_types.rs --lag-in-frames <N>`. The default stays
-  `0`, preserving the passing generated-GOP30 scope. A new bounded-DPB unit test
-  (`reference_name_slot_replay_keeps_slots_within_dpb_capacity`) verifies that
-  reference-name replay no longer records unbounded frame indexes as DPB slots.
+  `0`, preserving the passing generated-GOP30 scope. The
+  `reference_name_slot_replay_rejects_conflicting_slot_aliases` unit test
+  verifies that reference-name replay rejects cases that would alias one Vulkan
+  DPB slot to multiple reference image layers in a single decode.
   Stress report `output/benchmark-backends-av1-1778078784.md` /
   `output/benchmark-vulkan-av1-1778078784.md` uses
   `--frames 16 --gop-size 30 --vulkan-av1-lag-in-frames 25 --verify`. NVIDIA
@@ -484,6 +485,18 @@ Latest Vulkan AV1 scaffold verification:
   `output/benchmark-vulkan-av1-1778078783.md`. Direct fMP4 PSNR passes with
   `psnr_y_min=inf`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078756691.md`).
+- A broader 32-frame `--gop-size 30 --lag-in-frames 25` stress uncovered a
+  reference-slot aliasing case after the first alt-ref group. Before the guard,
+  OBU/fMP4 decode returned frames with `psnr_y_min=20.0100`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078962164.md`,
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778078962159.md`). The backend now
+  rejects this unsupported shape before returning pixels when one decode needs
+  multiple AV1 reference frames that alias the same Vulkan DPB slot but different
+  image layers. The guard is recorded by
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079216172.md` (OBU) and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079216167.md` (fMP4). The frame
+  inspection helper now reports `show_frame` and `frame_to_show_map_idx` to make
+  these display/reference cases diagnosable.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
@@ -522,8 +535,8 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 1. Expand Vulkan AV1 parser/reference-state coverage beyond generated libaom
    fixtures; keyframe-only, short GOP, long GOP OBU, and long GOP fMP4 gates now
    pass, but arbitrary AV1 streams are not yet a support claim.
-2. Keep OBU and fMP4 8-frame PSNR gates passing while adding broader
-   inter-frame fixtures, larger dimensions, and access-order benches.
+2. Keep OBU and fMP4 PSNR gates passing while adding broader inter-frame
+   fixtures, larger dimensions, and access-order benches.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also

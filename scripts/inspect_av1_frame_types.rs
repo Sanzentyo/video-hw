@@ -91,6 +91,8 @@ struct FrameHeaderSummary {
     temporal_unit_index: usize,
     obu_type: ObuType,
     show_existing_frame: bool,
+    frame_to_show_map_idx: Option<u8>,
+    show_frame: Option<bool>,
     frame_type: Option<u8>,
     order_hint: Option<u32>,
     primary_ref_frame: Option<u32>,
@@ -299,56 +301,58 @@ fn inspect_frame_headers(
         .iter()
         .filter(|record| matches!(record.obu_type, ObuType::Frame | ObuType::FrameHeader))
     {
-            let payload = bitstream
-                .get(record.payload_start..record.payload_end)
-                .ok_or_else(|| "AV1 OBU payload range exceeds bitstream".to_string())?;
-            let mut bits = BitReader::new(payload);
-            let show_existing_frame = bits.read_bool("show_existing_frame")?;
-            let frame_type = if show_existing_frame {
-                None
-            } else {
-                Some(bits.read_bits_u8(2, "frame_type")?)
-            };
-            let parsed = sequence_header.as_ref().and_then(|sequence_header| {
-                match record.obu_type {
-                    ObuType::Frame => {
-                        parse_frame_obu_with_dpb(sequence_header, payload, &dpb)
-                            .ok()
-                            .map(|(frame_header, _)| frame_header)
-                    }
-                    ObuType::FrameHeader => {
-                        parse_frame_header_with_dpb(sequence_header, payload, &dpb).ok()
-                    }
-                    _ => None,
+        let payload = bitstream
+            .get(record.payload_start..record.payload_end)
+            .ok_or_else(|| "AV1 OBU payload range exceeds bitstream".to_string())?;
+        let mut bits = BitReader::new(payload);
+        let show_existing_frame = bits.read_bool("show_existing_frame")?;
+        let frame_type = if show_existing_frame {
+            None
+        } else {
+            Some(bits.read_bits_u8(2, "frame_type")?)
+        };
+        let parsed = sequence_header
+            .as_ref()
+            .and_then(|sequence_header| match record.obu_type {
+                ObuType::Frame => parse_frame_obu_with_dpb(sequence_header, payload, &dpb)
+                    .ok()
+                    .map(|(frame_header, _)| frame_header),
+                ObuType::FrameHeader => {
+                    parse_frame_header_with_dpb(sequence_header, payload, &dpb).ok()
                 }
+                _ => None,
             });
-            if let Some(frame_header) = &parsed {
-                if frame_header.frame_type == OxideAv1FrameType::Key {
-                    dpb.reset();
-                }
-                if frame_header.refresh_frame_flags != 0 {
-                    dpb.refresh_with_gm(
-                        frame_header.refresh_frame_flags,
-                        frame_header.order_hint,
-                        None,
-                        &frame_header.gm_params,
-                    );
-                }
+        if let Some(frame_header) = &parsed {
+            if frame_header.frame_type == OxideAv1FrameType::Key {
+                dpb.reset();
             }
-            summaries.push(FrameHeaderSummary {
-                temporal_unit_index: record.temporal_unit_index,
-                obu_type: record.obu_type,
-                show_existing_frame,
-                frame_type,
-                order_hint: parsed.as_ref().map(|frame_header| frame_header.order_hint),
-                primary_ref_frame: parsed
-                    .as_ref()
-                    .map(|frame_header| frame_header.primary_ref_frame),
-                refresh_frame_flags: parsed
-                    .as_ref()
-                    .map(|frame_header| frame_header.refresh_frame_flags),
-                ref_frame_idx: parsed.as_ref().map(|frame_header| frame_header.ref_frame_idx),
-            });
+            if frame_header.refresh_frame_flags != 0 {
+                dpb.refresh_with_gm(
+                    frame_header.refresh_frame_flags,
+                    frame_header.order_hint,
+                    None,
+                    &frame_header.gm_params,
+                );
+            }
+        }
+        summaries.push(FrameHeaderSummary {
+            temporal_unit_index: record.temporal_unit_index,
+            obu_type: record.obu_type,
+            show_existing_frame,
+            frame_to_show_map_idx: parsed
+                .as_ref()
+                .map(|frame_header| frame_header.frame_to_show_map_idx),
+            show_frame: parsed.as_ref().map(|frame_header| frame_header.show_frame),
+            frame_type,
+            order_hint: parsed.as_ref().map(|frame_header| frame_header.order_hint),
+            primary_ref_frame: parsed
+                .as_ref()
+                .map(|frame_header| frame_header.primary_ref_frame),
+            refresh_frame_flags: parsed
+                .as_ref()
+                .map(|frame_header| frame_header.refresh_frame_flags),
+            ref_frame_idx: parsed.as_ref().map(|frame_header| frame_header.ref_frame_idx),
+        });
     }
     Ok(summaries)
 }
@@ -390,16 +394,27 @@ fn write_report(
     writeln!(&mut text)?;
     writeln!(
         &mut text,
-        "| Temporal Unit | OBU Type | show_existing_frame | frame_type | order_hint | primary_ref_frame | refresh_frame_flags | ref_frame_idx |"
+        "| Temporal Unit | OBU Type | show_existing_frame | frame_to_show_map_idx | show_frame | frame_type | order_hint | primary_ref_frame | refresh_frame_flags | ref_frame_idx |"
     )?;
-    writeln!(&mut text, "|---:|---|---:|---:|---:|---:|---:|---|")?;
+    writeln!(
+        &mut text,
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|"
+    )?;
     for header in frame_headers {
         writeln!(
             &mut text,
-            "| {} | {:?} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {:?} | {} | {} | {} | {} | {} | {} | {} | {} |",
             header.temporal_unit_index,
             header.obu_type,
             header.show_existing_frame,
+            header
+                .frame_to_show_map_idx
+                .map(|frame_to_show_map_idx| frame_to_show_map_idx.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            header
+                .show_frame
+                .map(|show_frame| show_frame.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             header
                 .frame_type
                 .map(|frame_type| frame_type.to_string())

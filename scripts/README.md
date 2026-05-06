@@ -199,6 +199,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B / OBU 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`, AV1=`libaom-av1`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
 - Vulkan AV1 decode は既定で generated long-GOP OBU 入力（生成時 `-g 30 -lag-in-frames 0`）を測定対象にする。`--vulkan-av1-gop-size <N>` で GOP サイズ、`--vulkan-av1-lag-in-frames <N>` で libaom lookahead を変更できる。keyframe-only 比較が必要な場合は `--vulkan-av1-gop-size 1` を指定する。NVIDIA では `video-hw decode` と FFmpeg Vulkan decode を同じ入力で比較し、unsupported adapter の失敗理由も同じ report に残す。Vulkan AV1 encode は現行 `ash` binding が `VK_KHR_video_encode_av1` を公開していないため `unavailable` として記録する。
 - `--vulkan-av1-lag-in-frames 25` のような alt-ref/show-existing を含む入力は、Vulkan AV1 の DPB replay と表示フレーム選択を測る負荷として使う。2026-05-06 の NVIDIA 実測では DPB slot replay は bounded slot に収まり、metadata decode は readback なし command submit として PASS し、表示フレーム数を報告する。PSNR/NV12 readback は論理DPB slotと出力image layerを分離し、show-existingを含む表示フレームを正しいreadback layerへmapする。OBU/fMP4とも `psnr_y_min=inf` でPASS済み。
+- より長い alt-ref/show-existing 入力では、1つの decode が同じ Vulkan DPB slot に畳まれた複数の異なる参照image layerを同時に必要とする場合がある。この場合は誤った画素を返さず、`aliases Vulkan DPB slot ... with multiple image layers` として明示的に unsupported にする。
 - Vulkan AV1 decode で `--verify` を付けると、各 `video-hw` Vulkan adapter に対して同じ生成入力と測定に使った `decode_to_yuv` binary を `scripts/check_vulkan_av1_psnr.rs` に渡し、FFmpeg software decode reference との `psnr_y_min >= 60 dB` を統合レポートの `video-hw PSNR verify` 行として記録する。
 - `--vulkan-decode-input-format fmp4` を指定すると、Vulkan AV1 decode比較用入力を fragmented MP4 (`av01`) として生成し、`decode_to_yuv --input-format mp4` と FFmpeg MP4 demuxerで測定する。現状この指定は AV1 専用。
 - VideoToolbox AV1 は video-hw では未実装。macOS で `--backends vt --codec av1` を指定した場合、VT precise script は AV1 未実装を明示した FAIL report を生成し、統合 runner は parity 対象として成功扱いにしない。
@@ -253,6 +254,7 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 16 --gop-size 
 - PASS/FAIL どちらの report にも、同じ入力を
   `scripts/inspect_av1_frame_types.rs --expect-inter-frame ...` で検査する
   `frame_type_gate` コマンドを記録する。
+- `scripts/inspect_av1_frame_types.rs` は `show_existing_frame` に加えて `show_frame` と `frame_to_show_map_idx` も出力するため、alt-ref/show-existing の表示順とDPB参照を追跡できる。
 - 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも 8-frame keyframe-only 入力で `--min-psnr-y 60` に PASS し、`psnr_y_min=inf`。
 
 ### 11.3) Vulkan AV1 encode binding check

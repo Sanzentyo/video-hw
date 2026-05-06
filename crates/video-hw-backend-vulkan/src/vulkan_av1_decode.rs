@@ -2037,6 +2037,7 @@ fn apply_av1_reference_name_slot_replay(
                 decode.reference_base_array_layers.clear();
             } else {
                 let mut order_hints = [0_u8; 8];
+                let mut reference_slots = Vec::new();
                 for (name_index, ref_frame_idx) in summary.ref_frame_idx.iter().enumerate() {
                     let ref_frame_idx = usize::try_from(*ref_frame_idx).map_err(|_| {
                         format!("AV1 ref_frame_idx[{name_index}] is negative: {ref_frame_idx}")
@@ -2051,6 +2052,23 @@ fn apply_av1_reference_name_slot_replay(
                             )
                         })?;
                     decode.picture_info.reference_name_slot_indices[name_index] = state.slot_index;
+                    if let Some((_, existing_layer, _)) = reference_slots
+                        .iter()
+                        .find(|(slot_index, _, _)| *slot_index == state.slot_index)
+                    {
+                        if *existing_layer != state.base_array_layer {
+                            return Err(format!(
+                                "AV1 reference frame state aliases Vulkan DPB slot {} with multiple image layers ({} and {}) in one decode; stream requires more distinct active references than the reported max_dpb_slots={max_dpb_slots}",
+                                state.slot_index, existing_layer, state.base_array_layer
+                            ));
+                        }
+                    } else {
+                        reference_slots.push((
+                            state.slot_index,
+                            state.base_array_layer,
+                            state.reference_info,
+                        ));
+                    }
                     let reference_name = name_index + 1;
                     order_hints[reference_name] = state.order_hint;
                     if summary.enable_order_hint
@@ -2067,40 +2085,14 @@ fn apply_av1_reference_name_slot_replay(
                 if let Some(overrides) = decode.picture_info.std_overrides.as_mut() {
                     overrides.order_hints = order_hints;
                 }
-                decode.reference_slot_infos = decode
-                    .reference_slot_indices()
-                    .into_iter()
-                    .map(|slot_index| {
-                        reference_frame_slots
-                            .iter()
-                            .flatten()
-                            .find_map(|state| {
-                                (state.slot_index == slot_index).then_some(state.reference_info)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "AV1 reference slot {slot_index} is missing std reference info"
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                decode.reference_base_array_layers = decode
-                    .reference_slot_indices()
-                    .into_iter()
-                    .map(|slot_index| {
-                        reference_frame_slots
-                            .iter()
-                            .flatten()
-                            .find_map(|state| {
-                                (state.slot_index == slot_index).then_some(state.base_array_layer)
-                            })
-                            .ok_or_else(|| {
-                                format!(
-                                    "AV1 reference slot {slot_index} is missing base array layer"
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
+                decode.reference_slot_infos = reference_slots
+                    .iter()
+                    .map(|(_, _, reference_info)| *reference_info)
+                    .collect();
+                decode.reference_base_array_layers = reference_slots
+                    .iter()
+                    .map(|(_, base_array_layer, _)| *base_array_layer)
+                    .collect();
             }
 
             let mut setup_reference_info = av1_std_reference_info(&decode.picture_info);
@@ -6468,7 +6460,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_name_slot_replay_keeps_slots_within_dpb_capacity() {
+    fn reference_name_slot_replay_rejects_conflicting_slot_aliases() {
         let mut decodes = (0..18)
             .map(|frame_index| {
                 let is_key = frame_index == 0;
@@ -6517,20 +6509,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        apply_av1_reference_name_slot_replay(&mut decodes, 4)
-            .expect("bounded DPB replay should succeed");
+        let err = apply_av1_reference_name_slot_replay(&mut decodes, 4)
+            .expect_err("conflicting aliases must be rejected before returning wrong pixels");
 
-        assert!(decodes.iter().skip(1).all(|decode| {
-            decode
-                .picture_info
-                .reference_name_slot_indices
-                .iter()
-                .filter(|slot| **slot >= 0)
-                .all(|slot| *slot < 4)
-        }));
-        let command = build_av1_key_frame_decode_command_skeleton_from_decodes(&decodes, 4)
-            .expect("bounded reference slots should fit command DPB capacity");
-        assert_eq!(command.begin_slots.len(), 4);
+        assert!(err.contains("aliases Vulkan DPB slot"));
+        assert!(err.contains("max_dpb_slots=4"));
     }
 
     #[test]
