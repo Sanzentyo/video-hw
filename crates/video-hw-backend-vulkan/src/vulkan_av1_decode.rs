@@ -47,6 +47,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub session_memory_requirement_count: usize,
     pub session_memory_total_size: u64,
     pub session_memory_max_alignment: u64,
+    pub session_memory_bound_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -734,6 +735,7 @@ struct Av1DecodeCapabilitySnapshot {
 
 #[derive(Debug, Clone, Copy)]
 struct Av1DecodeSessionParameterProbeConfig<'a> {
+    physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     capability_snapshot: &'a Av1DecodeCapabilitySnapshot,
     picture_format: vk::Format,
@@ -747,6 +749,13 @@ struct Av1DecodeSessionBootstrapSummary {
     memory_requirement_count: usize,
     memory_total_size: u64,
     memory_max_alignment: u64,
+    memory_bound_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct Av1DecodeSessionMemoryPlan {
+    requirements: Vec<vk::VideoSessionMemoryRequirementsKHR<'static>>,
+    summary: Av1DecodeSessionBootstrapSummary,
 }
 
 impl Av1DecodeExtensionFlags {
@@ -1773,6 +1782,7 @@ fn probe_av1_decode_session_parameters(
     let result = create_and_destroy_av1_decode_session_parameters(
         instance,
         &device,
+        physical_device,
         queue_family_index,
         capability_snapshot,
     );
@@ -1850,6 +1860,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             instance,
             &device,
             Av1DecodeSessionParameterProbeConfig {
+                physical_device,
                 queue_family_index,
                 capability_snapshot: &snapshot,
                 picture_format,
@@ -1875,6 +1886,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session_memory_requirement_count: summary.memory_requirement_count,
                     session_memory_total_size: summary.memory_total_size,
                     session_memory_max_alignment: summary.memory_max_alignment,
+                    session_memory_bound_count: summary.memory_bound_count,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -1894,6 +1906,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
 fn create_and_destroy_av1_decode_session_parameters(
     instance: &ash::Instance,
     device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     capability_snapshot: &Av1DecodeCapabilitySnapshot,
 ) -> Result<Av1DecodeSessionBootstrapSummary, String> {
@@ -1914,6 +1927,7 @@ fn create_and_destroy_av1_decode_session_parameters(
         instance,
         device,
         Av1DecodeSessionParameterProbeConfig {
+            physical_device,
             queue_family_index,
             capability_snapshot,
             picture_format,
@@ -1974,14 +1988,29 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
 
     let parameters_result =
         query_av1_decode_session_memory_requirements(device, &video_queue_device, video_session)
-            .and_then(|summary| {
-                create_av1_decode_session_parameters(
+            .and_then(|memory_plan| {
+                let mut session_memories = bind_av1_decode_session_memory(
+                    instance,
+                    device,
+                    &video_queue_device,
+                    config.physical_device,
+                    video_session,
+                    &memory_plan.requirements,
+                )?;
+                let create_result = create_av1_decode_session_parameters(
                     device,
                     &video_queue_device,
                     video_session,
                     config.std_sequence_header,
-                )
-                .map(|()| summary)
+                );
+                let mut summary = memory_plan.summary;
+                summary.memory_bound_count = session_memories.len();
+                for memory in session_memories.drain(..) {
+                    // SAFETY: These allocations were created by this device in this scope and
+                    // are no longer used after the bootstrap probe.
+                    unsafe { device.free_memory(memory, None) };
+                }
+                create_result.map(|()| summary)
             });
 
     // SAFETY: `video_session` was created by this device and is no longer used.
@@ -1999,7 +2028,7 @@ fn query_av1_decode_session_memory_requirements(
     device: &ash::Device,
     video_queue_device: &ash::khr::video_queue::Device,
     video_session: vk::VideoSessionKHR,
-) -> Result<Av1DecodeSessionBootstrapSummary, String> {
+) -> Result<Av1DecodeSessionMemoryPlan, String> {
     let mut requirement_count = 0_u32;
     // SAFETY: Count query writes only `requirement_count` for a valid video session.
     let count_result = unsafe {
@@ -2054,11 +2083,112 @@ fn query_av1_decode_session_memory_requirements(
         .max()
         .unwrap_or(0);
 
-    Ok(Av1DecodeSessionBootstrapSummary {
-        memory_requirement_count: requirements.len(),
-        memory_total_size,
-        memory_max_alignment,
+    Ok(Av1DecodeSessionMemoryPlan {
+        summary: Av1DecodeSessionBootstrapSummary {
+            memory_requirement_count: requirements.len(),
+            memory_total_size,
+            memory_max_alignment,
+            memory_bound_count: 0,
+        },
+        requirements,
     })
+}
+
+fn bind_av1_decode_session_memory(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    video_queue_device: &ash::khr::video_queue::Device,
+    physical_device: vk::PhysicalDevice,
+    video_session: vk::VideoSessionKHR,
+    requirements: &[vk::VideoSessionMemoryRequirementsKHR<'_>],
+) -> Result<Vec<vk::DeviceMemory>, String> {
+    if requirements.is_empty() {
+        return Err("AV1 decode session memory bind requires at least one requirement".to_string());
+    }
+
+    // SAFETY: `physical_device` belongs to `instance`; this only reads memory metadata.
+    let memory_properties =
+        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let mut memories = Vec::with_capacity(requirements.len());
+    let mut bindings = Vec::with_capacity(requirements.len());
+
+    for requirement in requirements {
+        let requirement_info = requirement.memory_requirements;
+        let memory_type_index = select_av1_decode_memory_type_index(
+            &memory_properties,
+            requirement_info.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .or_else(|| {
+            select_av1_decode_memory_type_index(
+                &memory_properties,
+                requirement_info.memory_type_bits,
+                vk::MemoryPropertyFlags::empty(),
+            )
+        })
+        .ok_or_else(|| {
+            format!(
+                "no compatible memory type for AV1 video session bind index {} (bits=0x{:X})",
+                requirement.memory_bind_index, requirement_info.memory_type_bits
+            )
+        })?;
+        let allocation_size = requirement_info.size.max(1);
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(allocation_size)
+            .memory_type_index(memory_type_index);
+        // SAFETY: Allocation info is derived from Vulkan memory requirements.
+        let memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|err| format!("vkAllocateMemory for AV1 video session bind failed: {err}"))?;
+        memories.push(memory);
+        bindings.push(
+            vk::BindVideoSessionMemoryInfoKHR::default()
+                .memory_bind_index(requirement.memory_bind_index)
+                .memory(memory)
+                .memory_offset(0)
+                .memory_size(allocation_size),
+        );
+    }
+
+    // SAFETY: Bind infos reference memory allocations above and live through the call.
+    let bind_result = unsafe {
+        (video_queue_device.fp().bind_video_session_memory_khr)(
+            device.handle(),
+            video_session,
+            u32::try_from(bindings.len())
+                .map_err(|_| "AV1 session binding count exceeds u32 range".to_string())?,
+            bindings.as_ptr(),
+        )
+    };
+    if bind_result != vk::Result::SUCCESS {
+        for memory in memories.drain(..) {
+            // SAFETY: These allocations were created by this device in this scope.
+            unsafe { device.free_memory(memory, None) };
+        }
+        return Err(format!(
+            "vkBindVideoSessionMemoryKHR for AV1 decode failed: {bind_result:?}"
+        ));
+    }
+
+    Ok(memories)
+}
+
+fn select_av1_decode_memory_type_index(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    memory_type_bits: u32,
+    required: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    let memory_type_count = usize::try_from(memory_properties.memory_type_count).ok()?;
+    memory_properties
+        .memory_types
+        .iter()
+        .take(memory_type_count)
+        .enumerate()
+        .find_map(|(index, memory_type)| {
+            let index_u32 = u32::try_from(index).ok()?;
+            let mask = 1_u32.checked_shl(index_u32)?;
+            ((memory_type_bits & mask) != 0 && memory_type.property_flags.contains(required))
+                .then_some(index_u32)
+        })
 }
 
 fn create_av1_decode_session_parameters(

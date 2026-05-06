@@ -91,7 +91,8 @@ Current implementation progress:
   sequence header within the advertised coded-extent range;
 - AV1 session bootstrap probing now also queries
   `vkGetVideoSessionMemoryRequirementsKHR` and reports requirement count, total
-  size, and maximum alignment before the later bind-memory implementation;
+  size, and maximum alignment, then allocates, binds, and frees the required
+  session memory before creating session parameters;
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;

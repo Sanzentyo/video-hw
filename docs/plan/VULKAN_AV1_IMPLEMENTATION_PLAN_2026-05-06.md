@@ -91,8 +91,8 @@ Tasks:
    covers synthetic reduced-still session/session-parameters creation; decode
    blocker messages now also probe real-bitstream session-parameters creation.
    The probe now also queries video-session memory requirements and reports the
-   count, total size, and maximum alignment; actual memory allocation/binding
-   remains.
+   count, total size, and maximum alignment; it also allocates, binds, and frees
+   the required session memory before session-parameter creation.
 2. Bind video session memory using the same non-zero memory-requirement contract
    used by HEVC. Do not enable the Intel zero-memory workaround experiments for
    AV1 without a valid Vulkan contract.
