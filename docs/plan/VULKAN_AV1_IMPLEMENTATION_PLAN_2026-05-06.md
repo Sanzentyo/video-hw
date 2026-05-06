@@ -196,6 +196,10 @@ Tasks:
    flags into the std structs. Session parameters now include an 8-bit 4:2:0
    `StdVideoAV1ColorConfig`, and begin-coding reference slots now bind the
    current reconstruction resource as inactive (`slotIndex = -1`) like FFmpeg.
+   The submit path now also passes a zeroed `StdVideoAV1TimingInfo`, uses
+   FFmpeg's `[1, 1, 1]` loop-restoration size defaults when restoration is
+   disabled, and runs the initial decoder RESET in a separate command-buffer
+   submit before the frame decode command buffer.
    The generated-OBU PSNR gate remains at `psnr_y_min=12.9600`, so more
    FFmpeg/std-struct parity work is required.
 5. Convert NV12 to RGB24 through the existing facade conversion path. Done for

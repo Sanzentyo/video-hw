@@ -231,9 +231,14 @@ Current implementation progress:
   the explicit submit path and proving the readback copy overwrites a sentinel
   buffer. Follow-up parity work now also gives AV1 session parameters an 8-bit
   4:2:0 color config and matches FFmpeg's inactive begin-coding reference-slot
-  shape for the current reconstruction, but the PSNR value is unchanged. The
-  output is still neutral NV12-like rather than the FFmpeg reference, so the AV1
-  picture/session modeling is not yet bit-exact enough to claim decode support;
+  shape for the current reconstruction. Follow-up FFmpeg parity work now also
+  passes a zeroed `StdVideoAV1TimingInfo`, uses FFmpeg's `[1, 1, 1]`
+  `LoopRestorationSize` default when restoration is disabled, and submits the
+  initial decoder RESET in a separate command buffer before the frame decode
+  submit path. These changes keep the Vulkan command path closer to FFmpeg but
+  leave the PSNR value unchanged. The output is still neutral NV12-like rather
+  than the FFmpeg reference, so the AV1 picture/session modeling is not yet
+  bit-exact enough to claim decode support;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -249,6 +254,7 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode nv12 --output output/vulkan-av1-record-probe/av1-vulkan-decode.nv12`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode rgb24 --output output/vulkan-av1-record-probe/av1-vulkan-decode.rgb`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0`
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.

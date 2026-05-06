@@ -16,6 +16,7 @@ use ash::vk::native::{
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1Quantization,
     StdVideoAV1QuantizationFlags, StdVideoAV1Segmentation, StdVideoAV1SequenceHeader,
     StdVideoAV1SequenceHeaderFlags, StdVideoAV1TileInfo, StdVideoAV1TileInfoFlags,
+    StdVideoAV1TimingInfo, StdVideoAV1TimingInfoFlags,
     StdVideoAV1TransferCharacteristics_STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_UNSPECIFIED,
     StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST,
     StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT, StdVideoDecodeAV1PictureInfo,
@@ -230,7 +231,7 @@ impl Av1DecodeStdPictureInfoScope {
             loop_restoration: StdVideoAV1LoopRestoration {
                 FrameRestorationType:
                     [StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE; 3],
-                LoopRestorationSize: [0; 3],
+                LoopRestorationSize: [1; 3],
             },
             global_motion: StdVideoAV1GlobalMotion {
                 GmType: [0; 8],
@@ -3502,6 +3503,17 @@ fn record_and_destroy_av1_decode_command_buffer(
         let command_buffer = command_buffers.first().copied().ok_or_else(|| {
             "vkAllocateCommandBuffers returned no command buffer for AV1 decode".to_string()
         })?;
+        let record_mode = av1_decode_command_buffer_record_mode_from_env();
+        if config.submit_command_buffer && record_mode == Av1DecodeCommandBufferRecordMode::Full {
+            record_submit_av1_decode_reset_command_buffer(
+                device,
+                config.instance,
+                command_pool,
+                config.queue_family_index,
+                config.video_session,
+                config.video_session_parameters,
+            )?;
+        }
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -3520,7 +3532,6 @@ fn record_and_destroy_av1_decode_command_buffer(
         unsafe {
             device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
         }
-        let record_mode = av1_decode_command_buffer_record_mode_from_env();
         if record_mode == Av1DecodeCommandBufferRecordMode::BarrierOnly {
             // SAFETY: Command buffer is recording and only contains pipeline barriers.
             unsafe { device.end_command_buffer(command_buffer) }
@@ -3552,6 +3563,12 @@ fn record_and_destroy_av1_decode_command_buffer(
                         record_summary.begin_count += 1;
                     }
                     Av1DecodeCommandVisit::ResetCoding(info) => {
+                        if config.submit_command_buffer
+                            && record_mode == Av1DecodeCommandBufferRecordMode::Full
+                        {
+                            record_summary.reset_count += 1;
+                            return;
+                        }
                         if record_mode == Av1DecodeCommandBufferRecordMode::BeginEnd {
                             return;
                         }
@@ -3660,6 +3677,57 @@ fn record_and_destroy_av1_decode_command_buffer(
         device.destroy_command_pool(command_pool, None);
     }
     result
+}
+
+fn record_submit_av1_decode_reset_command_buffer(
+    device: &ash::Device,
+    instance: &ash::Instance,
+    command_pool: vk::CommandPool,
+    queue_family_index: u32,
+    video_session: vk::VideoSessionKHR,
+    video_session_parameters: vk::VideoSessionParametersKHR,
+) -> Result<(), String> {
+    let allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    // SAFETY: Allocate info references a live command pool.
+    let reset_command_buffer = unsafe { device.allocate_command_buffers(&allocate_info) }
+        .map_err(|err| format!("vkAllocateCommandBuffers for AV1 decode reset failed: {err}"))?
+        .first()
+        .copied()
+        .ok_or_else(|| {
+            "vkAllocateCommandBuffers returned no command buffer for AV1 decode reset".to_string()
+        })?;
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: Command buffer is valid and not already recording.
+    unsafe { device.begin_command_buffer(reset_command_buffer, &begin_info) }
+        .map_err(|err| format!("vkBeginCommandBuffer for AV1 decode reset failed: {err}"))?;
+
+    let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
+    let begin_coding_info = vk::VideoBeginCodingInfoKHR::default()
+        .video_session(video_session)
+        .video_session_parameters(video_session_parameters);
+    let reset_control =
+        vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
+    let end_coding_info = vk::VideoEndCodingInfoKHR::default();
+    // SAFETY: Command buffer is recording; the reset scope references a live video session.
+    unsafe {
+        (video_queue_device.fp().cmd_begin_video_coding_khr)(
+            reset_command_buffer,
+            &begin_coding_info,
+        );
+        (video_queue_device.fp().cmd_control_video_coding_khr)(
+            reset_command_buffer,
+            &reset_control,
+        );
+        (video_queue_device.fp().cmd_end_video_coding_khr)(reset_command_buffer, &end_coding_info);
+    }
+    // SAFETY: Command buffer is recording and all reset command data has been emitted.
+    unsafe { device.end_command_buffer(reset_command_buffer) }
+        .map_err(|err| format!("vkEndCommandBuffer for AV1 decode reset failed: {err}"))?;
+    submit_av1_decode_command_buffer(device, queue_family_index, reset_command_buffer)
 }
 
 fn submit_av1_decode_command_buffer(
@@ -3790,8 +3858,10 @@ fn create_av1_decode_session_parameters(
     std_sequence_header: &StdVideoAV1SequenceHeader,
 ) -> Result<vk::VideoSessionParametersKHR, String> {
     let color_config = default_av1_main_420_8bit_color_config();
+    let timing_info = default_av1_timing_info();
     let mut std_sequence_header = *std_sequence_header;
     std_sequence_header.pColorConfig = &color_config;
+    std_sequence_header.pTimingInfo = &timing_info;
     let mut decode_av1_session_parameters =
         vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
             .std_sequence_header(&std_sequence_header);
@@ -3817,6 +3887,18 @@ fn create_av1_decode_session_parameters(
     }
 
     Ok(video_session_parameters)
+}
+
+fn default_av1_timing_info() -> StdVideoAV1TimingInfo {
+    StdVideoAV1TimingInfo {
+        flags: StdVideoAV1TimingInfoFlags {
+            _bitfield_align_1: [],
+            _bitfield_1: StdVideoAV1TimingInfoFlags::new_bitfield_1(0, 0),
+        },
+        num_units_in_display_tick: 0,
+        time_scale: 0,
+        num_ticks_per_picture_minus_1: 0,
+    }
 }
 
 fn default_av1_main_420_8bit_color_config() -> StdVideoAV1ColorConfig {
