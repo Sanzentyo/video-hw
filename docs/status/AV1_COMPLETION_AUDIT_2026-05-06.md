@@ -24,7 +24,7 @@ better.
 | Vulkan AV1 inter-frame/GOP replay | `scripts/check_vulkan_av1_psnr.rs --gop-size 2`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30 --lag-in-frames 25`; `scripts/check_vulkan_av1_corpus_matrix.rs`; reports `output/vulkan-av1-corpus-matrix/vulkan-av1-corpus-matrix-1778079826467.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079834167.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079835765.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079840868.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079842827.md`; `output/benchmark-vulkan-av1-1778078784.md`; `output/benchmark-vulkan-av1-1778078783.md` | The matrix covers OBU/fMP4 keyframe-only, generated GOP30, 16-frame alt-ref/show-existing, 32-frame GOP16/lag8, and expected unsupported 32-frame GOP30/lag25 alias cases. Passing cases report `psnr_y_min=inf`; alias cases are accepted only when they fail with `aliases Vulkan DPB slot`, preventing silent low-PSNR output. | Partial |
 | Vulkan AV1 encode | `scripts/check_vulkan_av1_encode_bindings.rs`; `cargo info ash`; `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778079390.md` | crates.io still reports `ash 0.38.0+1.3.281`; the local source exposes AV1 decode bindings but no `VK_KHR_video_encode_av1` / `VideoEncodeAV1` bindings | Blocked |
 | Intel Vulkan AV1 | `output/benchmark-vulkan-av1-1778068460.md`; `docs/status/AV1_BACKEND_STATUS_2026-05-06.md` | FFmpeg Vulkan AV1 decode exits with Windows access violation on this host; FFmpeg `av1_vulkan` encode reports unsupported implementation | Not a passing target on this host |
-| VideoToolbox AV1 | `crates/video-hw-backend-vt/src/vt_backend.rs`; `scripts/benchmark_ffmpeg_vt_precise.rs`; `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests` | Current contract explicitly reports unsupported AV1; latest cross-target check still passes, including capability/runtime tests that reject AV1 with actionable errors | Not implemented |
+| VideoToolbox AV1 | `crates/video-hw-backend-vt/src/vt_backend.rs`; `crates/video-hw-core/src/lib.rs`; `crates/video-hw-fmp4/src/fmp4_reader/decode.rs`; `crates/video-hw/examples/decode_to_yuv.rs`; `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`; `cargo test -p video-hw-fmp4 --features "backend-nvidia backend-intel backend-vulkan" av1_track_options_preserve_fmp4_av1c_record` | fMP4 AV1 decode bootstrap is scaffolded for VT by passing `av1C` record/config OBUs and track dimensions into `VtDecoderOptions`, creating a `CMVideoFormatDescription` with `SampleDescriptionExtensionAtoms.av1C`, and passing AV1 sample OBUs without AVCC/HVCC packing. Actual macOS hardware decode, FFmpeg parity, and PSNR are not verified on this Windows host; AV1 encode is still explicitly unsupported. | Decode scaffolded; encode not implemented |
 
 ## Current Blockers
 
@@ -37,14 +37,16 @@ better.
 2. Vulkan AV1 encode cannot be implemented safely with the current `ash`
    binding set because the required `VK_KHR_video_encode_av1` symbols are not
    exposed.
-3. VideoToolbox AV1 requires a macOS host with AV1 VideoToolbox support for
-   format-description, packet layout, fMP4, FFmpeg parity, and PSNR validation.
+3. VideoToolbox AV1 decode now has an fMP4 bootstrap path, but requires a macOS
+   host with AV1 VideoToolbox support for real decode, FFmpeg parity, and PSNR
+   validation. VideoToolbox AV1 encode remains unimplemented.
 
 ## Conclusion
 
 The objective is not complete. NVIDIA and Intel oneVPL AV1 encode/decode plus
 AV1 fMP4 read/write are implemented and verified against FFmpeg. Vulkan AV1 is
 verified for generated keyframe-only, short-GOP, long-GOP OBU/fMP4, and
-16-frame alt-ref/show-existing OBU/fMP4 decode on NVIDIA; broader
-arbitrary-stream Vulkan decode hardening, Vulkan AV1 encode, and VideoToolbox
-AV1 remain open.
+16-frame alt-ref/show-existing OBU/fMP4 decode on NVIDIA. VideoToolbox AV1 fMP4
+decode is scaffolded but not hardware-verified. Broader arbitrary-stream Vulkan
+decode hardening, Vulkan AV1 encode, VideoToolbox AV1 decode validation, and
+VideoToolbox AV1 encode remain open.

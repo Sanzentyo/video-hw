@@ -49,6 +49,17 @@ impl StatefulBitstreamAssembler {
         pts_90k: Option<i64>,
     ) -> Result<(Vec<AccessUnit>, ParameterSetCache), BackendError> {
         self.codec = Some(codec);
+        if codec == Codec::Av1 {
+            if !chunk.is_empty() {
+                self.pending.extend_from_slice(chunk);
+            }
+            let access_units = if pts_90k.is_some() && !self.pending.is_empty() {
+                vec![self.finish_av1_access_unit(pts_90k)]
+            } else {
+                Vec::new()
+            };
+            return Ok((access_units, self.parameter_sets.clone()));
+        }
         if !chunk.is_empty() {
             self.pending.extend_from_slice(chunk);
         }
@@ -67,6 +78,14 @@ impl StatefulBitstreamAssembler {
         let codec = self
             .codec
             .ok_or_else(|| BackendError::InvalidInput("codec is not set".to_string()))?;
+        if codec == Codec::Av1 {
+            let access_units = if self.pending.is_empty() {
+                Vec::new()
+            } else {
+                vec![self.finish_av1_access_unit(None)]
+            };
+            return Ok((access_units, self.parameter_sets.clone()));
+        }
         let nalus = self.take_complete_nals(true);
         let mut access_units = self.process_nals(codec, nalus, None);
         if self.current_has_vcl && !self.current_nalus.is_empty() {
@@ -74,6 +93,21 @@ impl StatefulBitstreamAssembler {
         }
 
         Ok((access_units, self.parameter_sets.clone()))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    fn finish_av1_access_unit(&mut self, pts_90k: Option<i64>) -> AccessUnit {
+        AccessUnit {
+            nalus: vec![mem::take(&mut self.pending)],
+            pts_90k,
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
+    fn finish_av1_access_unit(&mut self, _pts_90k: Option<i64>) -> AccessUnit {
+        AccessUnit {
+            nalus: vec![mem::take(&mut self.pending)],
+        }
     }
 
     fn process_nals(

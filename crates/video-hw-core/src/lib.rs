@@ -266,6 +266,10 @@ pub struct VtDecoderOptions {
     pub report_metrics: Option<bool>,
     pub enable_pipeline_scheduler: Option<bool>,
     pub pipeline_queue_capacity: Option<usize>,
+    pub video_width: Option<u16>,
+    pub video_height: Option<u16>,
+    pub av1c_record: Option<Vec<u8>>,
+    pub av1_config_obus: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default)]

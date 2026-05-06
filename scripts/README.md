@@ -202,7 +202,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - より長い alt-ref/show-existing 入力では、1つの decode が同じ Vulkan DPB slot に畳まれた複数の異なる参照image layerを同時に必要とする場合がある。この場合は誤った画素を返さず、`aliases Vulkan DPB slot ... with multiple image layers` として明示的に unsupported にする。
 - Vulkan AV1 decode で `--verify` を付けると、各 `video-hw` Vulkan adapter に対して同じ生成入力と測定に使った `decode_to_yuv` binary を `scripts/check_vulkan_av1_psnr.rs` に渡し、FFmpeg software decode reference との `psnr_y_min >= 60 dB` を統合レポートの `video-hw PSNR verify` 行として記録する。
 - `--vulkan-decode-input-format fmp4` を指定すると、Vulkan AV1 decode比較用入力を fragmented MP4 (`av01`) として生成し、`decode_to_yuv --input-format mp4` と FFmpeg MP4 demuxerで測定する。現状この指定は AV1 専用。
-- VideoToolbox AV1 は video-hw では未実装。macOS で `--backends vt --codec av1` を指定した場合、VT precise script は AV1 未実装を明示した FAIL report を生成し、統合 runner は parity 対象として成功扱いにしない。
+- VideoToolbox AV1 decode は fMP4 `av01` sample entry 由来の `av1C` と track dimensions を `VtDecoderOptions` に渡す bootstrap まで実装済み。実decode/FFmpeg parity/PSNR は macOS AV1 hardware での検証待ち。AV1 encode は未実装のまま。
 - FFmpeg Vulkan の adapter 指定は `-init_hw_device vulkan:<index>` を使う。Windows hybrid GPU 環境では `vulkan=vk:<index>` が指定した物理デバイスを選ばず、NVIDIA encode ケースが Intel 側へ流れることがあった。
 - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters` で `video-hw` / `vk-video` 側に見えている Vulkan adapter を確認できる。
 - `ffmpeg-only` Vulkan adapter のHEVC decodeでは、runnerが `VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX=<index>` を設定して direct ash HEVC decode bootstrap も試す。これは `--vulkan-adapter-index` の既存意味を変えず、Intel decode-only capability の切り分けに使う。

@@ -22,7 +22,7 @@ use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
 use video_hw::{
     AnyDecodeSession, Backend, BackendDecoderOptions, BackendKind, BitstreamInput, Codec,
     DecodeOutputMode, DecodedFrame, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
-    VulkanDecoderOptions,
+    VtDecoderOptions, VulkanDecoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -161,7 +161,7 @@ fn decode_mp4(
     input: &PathBuf,
     codec: Codec,
     resolved: BackendKind,
-    config: DecoderConfig,
+    mut config: DecoderConfig,
     output: &mut Option<BufWriter<File>>,
 ) -> Result<DecodeStats> {
     use shiguredo_mp4::demux::{DemuxError, Fmp4FileDemuxer};
@@ -172,7 +172,14 @@ fn decode_mp4(
     // Feed the entire file to the demuxer up front.
     feed_demuxer(&mut demuxer, &bytes)?;
 
-    let mut decoder = AnyDecodeSession::with_backend_kind(resolved, config)?;
+    let mut decoder = if backend_is_vt(resolved) && codec == Codec::Av1 {
+        None
+    } else {
+        Some(AnyDecodeSession::with_backend_kind(
+            resolved,
+            config.clone(),
+        )?)
+    };
     let mut stats = DecodeStats::default();
     let mut pts_counter = 0i64;
     let mut current_sample_entry: Option<SampleEntry> = None;
@@ -222,6 +229,20 @@ fn decode_mp4(
 
         let pts_90k = Some(video_hw::Timestamp90k(pts_counter * 3000));
         pts_counter += 1;
+        if decoder.is_none() {
+            if let Some(entry) = current_sample_entry.as_ref()
+                && let Some(options) = vt_options_from_sample_entry(entry)
+            {
+                config.backend_options = BackendDecoderOptions::VideoToolbox(options);
+            }
+            decoder = Some(AnyDecodeSession::with_backend_kind(
+                resolved,
+                config.clone(),
+            )?);
+        }
+        let decoder = decoder
+            .as_mut()
+            .context("decoder should be initialized before sample submit")?;
 
         loop {
             match decoder.submit(BitstreamInput::LengthPrefixedSample {
@@ -231,16 +252,18 @@ fn decode_mp4(
             }) {
                 Ok(()) => break,
                 Err(video_hw::BackendError::TemporaryBackpressure(_)) => {
-                    drain_frames(&mut decoder, &mut stats, output)?;
+                    drain_frames(decoder, &mut stats, output)?;
                 }
                 Err(err) => {
                     return Err(err).context("submit LengthPrefixedSample failed");
                 }
             }
         }
-        drain_frames(&mut decoder, &mut stats, output)?;
+        drain_frames(decoder, &mut stats, output)?;
     }
-    flush_frames(&mut decoder, &mut stats, output)?;
+    if let Some(decoder) = decoder.as_mut() {
+        flush_frames(decoder, &mut stats, output)?;
+    }
     Ok(stats)
 }
 
@@ -306,6 +329,43 @@ fn codec_config_for_sample(entry: &SampleEntry) -> Vec<u8> {
         }
         _ => {}
     }
+    out
+}
+
+fn vt_options_from_sample_entry(entry: &SampleEntry) -> Option<VtDecoderOptions> {
+    let SampleEntry::Av01(av01) = entry else {
+        return None;
+    };
+    Some(VtDecoderOptions {
+        video_width: Some(av01.visual.width),
+        video_height: Some(av01.visual.height),
+        av1c_record: Some(av1c_record_from_sample_entry(av01)),
+        av1_config_obus: Some(av01.av1c_box.config_obus.clone()),
+        ..Default::default()
+    })
+}
+
+fn av1c_record_from_sample_entry(av01: &shiguredo_mp4::boxes::Av01Box) -> Vec<u8> {
+    let av1c = &av01.av1c_box;
+    let mut out = Vec::with_capacity(4 + av1c.config_obus.len());
+    out.push(0x80 | 1);
+    out.push((av1c.seq_profile.get() << 5) | av1c.seq_level_idx_0.get());
+    out.push(
+        (av1c.seq_tier_0.get() << 7)
+            | (av1c.high_bitdepth.get() << 6)
+            | (av1c.twelve_bit.get() << 5)
+            | (av1c.monochrome.get() << 4)
+            | (av1c.chroma_subsampling_x.get() << 3)
+            | (av1c.chroma_subsampling_y.get() << 2)
+            | av1c.chroma_sample_position.get(),
+    );
+    out.push(
+        av1c.initial_presentation_delay_minus_one
+            .as_ref()
+            .map(|value| 0x10 | value.get())
+            .unwrap_or(0),
+    );
+    out.extend_from_slice(&av1c.config_obus);
     out
 }
 
@@ -492,5 +552,15 @@ fn backend_is_vulkan(backend: BackendKind) -> bool {
     any(target_os = "linux", target_os = "windows")
 )))]
 fn backend_is_vulkan(_backend: BackendKind) -> bool {
+    false
+}
+
+#[cfg(all(feature = "backend-vt", target_os = "macos"))]
+fn backend_is_vt(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::VideoToolbox)
+}
+
+#[cfg(not(all(feature = "backend-vt", target_os = "macos")))]
+fn backend_is_vt(_backend: BackendKind) -> bool {
     false
 }

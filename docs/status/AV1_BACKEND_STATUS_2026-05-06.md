@@ -20,7 +20,7 @@ or better.
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
 | Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated AV1 OBU/fMP4 decode through submit/readback on NVIDIA for keyframe-only, short GOP, and generated long-GOP replay cases; PSNR gates pass against FFmpeg software reference for those scopes. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode generated-GOP partial, encode blocked |
-| VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
+| VideoToolbox AV1 decode/encode | `vt_backend.rs` now has an AV1 fMP4 decode bootstrap path using `av1C`/track dimensions in `VtDecoderOptions`; encode still returns explicit `UnsupportedConfig`; macOS target check covers the backend crate | Decode scaffolded, encode not implemented |
 
 ## Latest Verified Results
 
@@ -523,20 +523,29 @@ The detailed implementation plan is
 
 ## VideoToolbox AV1 Status
 
-VideoToolbox AV1 is intentionally not reported as supported by video-hw yet.
-Current safeguards:
+VideoToolbox AV1 decode is now scaffolded for fMP4 inputs that provide `av1C`
+and track dimensions. `VtDecoderOptions` carries the `av1C` record, config OBUs,
+and coded width/height; the VT backend creates a `CMVideoFormatDescription`
+with `SampleDescriptionExtensionAtoms.av1C`, passes AV1 sample OBUs through
+without AVCC/HVCC length-prefix conversion, and strips prepended config OBUs
+from fMP4 keyframe payloads before submit.
 
-- capability reports return unsupported for AV1;
-- decode/encode runtime paths return `VideoToolbox AV1 ... is not implemented in video-hw yet`;
-- `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1` produces a FAIL report
-  on macOS instead of treating AV1 as a passing parity case;
+Current safeguards and evidence:
+
+- AV1 encode still returns `VideoToolbox AV1 encode is not implemented in video-hw yet`;
+- AV1 decode without fMP4 `av1C`/track dimensions returns actionable
+  `UnsupportedConfig` instead of claiming arbitrary OBU support;
+- `video-hw-fmp4` attaches VT AV1 decode options from `av01` sample entries;
+- `decode_to_yuv --input-format mp4` lazily creates VT AV1 sessions after the
+  first `av01` sample entry is available;
 - `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`
-  passes on the cross target. Latest local verification on 2026-05-06 also
-  passed this command.
+  passes on the cross target;
+- macOS-target full example/fMP4 checks from this Windows host are blocked by a
+  missing cross `cc` tool before reaching project code.
 
-Remaining work requires a macOS host with AV1 VideoToolbox support to verify
-format description creation, encoded packet layout, fMP4 integration, FFmpeg
-`av1_videotoolbox` comparison, and PSNR.
+Remaining work requires a macOS host with AV1 VideoToolbox hardware support to
+run the actual fMP4 decode path, compare with FFmpeg `av1_videotoolbox`, and
+record PSNR/performance. AV1 encode remains unimplemented.
 
 ## Next Concrete Work
 
@@ -549,5 +558,6 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also
    cannot encode.
-4. On macOS AV1 hardware, prototype VideoToolbox AV1 encode/decode and update
-   the VT unsupported contract only after fMP4, FFmpeg benchmark, and PSNR pass.
+4. On macOS AV1 hardware, run the new VideoToolbox AV1 fMP4 decode path and
+   update the VT status only after FFmpeg benchmark and PSNR pass; AV1 encode
+   still needs a separate implementation.
