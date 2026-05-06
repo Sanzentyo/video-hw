@@ -83,9 +83,11 @@ Current implementation progress:
 - the same probe now creates and destroys an AV1 `VideoSessionKHR` plus
   `VideoDecodeAV1SessionParametersCreateInfoKHR` using a reduced-still synthetic
   sequence header within the advertised coded-extent range;
+- Vulkan AV1 decode blocker messages now also attempt session-parameter creation
+  with the real bitstream sequence header and report the coded extent and selected
+  picture format when that probe reaches `ready`;
 - Vulkan AV1 capability is still false because real-bitstream session
-  parameters, decode submit, readback, PSNR, and benchmark gates are not
-  implemented;
+  decode submit, readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 

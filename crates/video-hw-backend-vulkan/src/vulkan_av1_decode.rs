@@ -34,6 +34,13 @@ pub(crate) struct Av1BitstreamInspection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeBitstreamSessionProbe {
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub picture_format: vk::Format,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedAv1SequenceHeader {
     pub seq_profile: u8,
     pub still_picture: bool,
@@ -93,6 +100,16 @@ struct Av1DecodeCapabilitySnapshot {
     max_level: ash::vk::native::StdVideoAV1Level,
     std_header_version: vk::ExtensionProperties,
     decode_output_formats: Vec<vk::Format>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Av1DecodeSessionParameterProbeConfig<'a> {
+    queue_family_index: u32,
+    capability_snapshot: &'a Av1DecodeCapabilitySnapshot,
+    picture_format: vk::Format,
+    coded_width: u32,
+    coded_height: u32,
+    std_sequence_header: &'a StdVideoAV1SequenceHeader,
 }
 
 impl Av1DecodeExtensionFlags {
@@ -170,6 +187,37 @@ pub(crate) fn extract_av1_std_sequence_header(
     let parsed =
         parse_av1_sequence_header_payload(&bitstream[sequence_header.payload_range.clone()])?;
     build_av1_std_sequence_header(&parsed)
+}
+
+pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
+    bitstream: &[u8],
+) -> Result<Av1DecodeBitstreamSessionProbe, String> {
+    let std_sequence_header = extract_av1_std_sequence_header(bitstream)?;
+    let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
+    let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
+
+    // SAFETY: Loading the Vulkan loader only initializes function pointers. No raw
+    // handles escape this function.
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|err| format!("failed to load Vulkan entry: {err}"))?;
+    // SAFETY: Ash's default instance create info is valid for probing. The instance
+    // is destroyed before returning.
+    let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default(), None) }
+        .map_err(|err| format!("failed to create Vulkan instance: {err}"))?;
+
+    let result = probe_av1_decode_session_parameters_for_bitstream_with_instance(
+        &entry,
+        &instance,
+        &std_sequence_header,
+        coded_width,
+        coded_height,
+    );
+
+    // SAFETY: The instance was created in this function and is not used afterwards.
+    unsafe {
+        instance.destroy_instance(None);
+    }
+    result
 }
 
 impl ParsedAv1SequenceHeader {
@@ -639,6 +687,107 @@ fn probe_av1_decode_session_parameters(
     result
 }
 
+fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    std_sequence_header: &StdVideoAV1SequenceHeader,
+    coded_width: u32,
+    coded_height: u32,
+) -> Result<Av1DecodeBitstreamSessionProbe, String> {
+    // SAFETY: `instance` is valid here; we only enumerate physical device handles.
+    let physical_devices = unsafe { instance.enumerate_physical_devices() }
+        .map_err(|err| format!("failed to enumerate physical devices: {err}"))?;
+    if physical_devices.is_empty() {
+        return Err(
+            "no Vulkan physical devices available for AV1 bitstream session probe".to_string(),
+        );
+    }
+
+    let mut probe_errors = Vec::new();
+    for physical_device in physical_devices {
+        let support = query_av1_adapter_decode_support(instance, physical_device)
+            .map_err(|err| format!("failed to enumerate device extensions: {err}"))?;
+        if !support.extensions.supports_av1_decode() {
+            continue;
+        }
+        let Some(queue_family_index) = support.decode_queue_family_index else {
+            continue;
+        };
+        let snapshot = match query_av1_decode_capability_snapshot(entry, instance, physical_device)
+        {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                probe_errors.push(err);
+                continue;
+            }
+        };
+        if let Err(err) = validate_av1_decode_capability_snapshot(&snapshot) {
+            probe_errors.push(err);
+            continue;
+        }
+        if coded_width < snapshot.min_coded_width
+            || coded_width > snapshot.max_coded_width
+            || coded_height < snapshot.min_coded_height
+            || coded_height > snapshot.max_coded_height
+        {
+            probe_errors.push(format!(
+                "AV1 bitstream coded extent {coded_width}x{coded_height} is outside adapter range {}x{}..{}x{}",
+                snapshot.min_coded_width,
+                snapshot.min_coded_height,
+                snapshot.max_coded_width,
+                snapshot.max_coded_height
+            ));
+            continue;
+        }
+        let picture_format = *snapshot
+            .decode_output_formats
+            .first()
+            .ok_or_else(|| "AV1 bitstream session probe has no output format".to_string())?;
+        let device = match create_av1_decode_device(instance, physical_device, queue_family_index) {
+            Ok(device) => device,
+            Err(err) => {
+                probe_errors.push(err);
+                continue;
+            }
+        };
+        let result = create_and_destroy_av1_decode_session_parameters_with_header(
+            instance,
+            &device,
+            Av1DecodeSessionParameterProbeConfig {
+                queue_family_index,
+                capability_snapshot: &snapshot,
+                picture_format,
+                coded_width,
+                coded_height,
+                std_sequence_header,
+            },
+        );
+        // SAFETY: The device is no longer used after this point.
+        unsafe {
+            device.destroy_device(None);
+        }
+        match result {
+            Ok(()) => {
+                return Ok(Av1DecodeBitstreamSessionProbe {
+                    coded_width,
+                    coded_height,
+                    picture_format,
+                });
+            }
+            Err(err) => probe_errors.push(err),
+        }
+    }
+
+    if probe_errors.is_empty() {
+        Err("no compatible Vulkan AV1 decode adapter found for bitstream session probe".to_string())
+    } else {
+        Err(format!(
+            "AV1 bitstream session probe failed on all candidate adapters: {}",
+            probe_errors.join("; ")
+        ))
+    }
+}
+
 fn create_and_destroy_av1_decode_session_parameters(
     instance: &ash::Instance,
     device: &ash::Device,
@@ -658,7 +807,25 @@ fn create_and_destroy_av1_decode_session_parameters(
         capability_snapshot.max_coded_height,
     );
     let std_sequence_header = build_probe_av1_std_sequence_header(coded_width, coded_height)?;
+    create_and_destroy_av1_decode_session_parameters_with_header(
+        instance,
+        device,
+        Av1DecodeSessionParameterProbeConfig {
+            queue_family_index,
+            capability_snapshot,
+            picture_format,
+            coded_width,
+            coded_height,
+            std_sequence_header: &std_sequence_header,
+        },
+    )
+}
 
+fn create_and_destroy_av1_decode_session_parameters_with_header(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    config: Av1DecodeSessionParameterProbeConfig<'_>,
+) -> Result<(), String> {
     let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
         .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
         .film_grain_support(false);
@@ -673,17 +840,17 @@ fn create_and_destroy_av1_decode_session_parameters(
         .push_next(&mut decode_usage);
 
     let create_info = vk::VideoSessionCreateInfoKHR::default()
-        .queue_family_index(queue_family_index)
+        .queue_family_index(config.queue_family_index)
         .video_profile(&profile)
-        .picture_format(picture_format)
+        .picture_format(config.picture_format)
         .max_coded_extent(vk::Extent2D {
-            width: coded_width,
-            height: coded_height,
+            width: config.coded_width,
+            height: config.coded_height,
         })
-        .reference_picture_format(picture_format)
-        .max_dpb_slots(capability_snapshot.max_dpb_slots)
-        .max_active_reference_pictures(capability_snapshot.max_active_reference_pictures)
-        .std_header_version(&capability_snapshot.std_header_version);
+        .reference_picture_format(config.picture_format)
+        .max_dpb_slots(config.capability_snapshot.max_dpb_slots)
+        .max_active_reference_pictures(config.capability_snapshot.max_active_reference_pictures)
+        .std_header_version(&config.capability_snapshot.std_header_version);
     let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
     let mut video_session = vk::VideoSessionKHR::null();
 
@@ -706,7 +873,7 @@ fn create_and_destroy_av1_decode_session_parameters(
         device,
         &video_queue_device,
         video_session,
-        &std_sequence_header,
+        config.std_sequence_header,
     );
 
     // SAFETY: `video_session` was created by this device and is no longer used.
@@ -1286,6 +1453,14 @@ mod tests {
         let bitstream = make_obu(6, &[0x80]);
         let err = extract_av1_std_sequence_header(&bitstream)
             .expect_err("missing AV1 sequence header should be rejected");
+        assert!(err.contains("missing AV1 sequence header"));
+    }
+
+    #[test]
+    fn bitstream_session_probe_rejects_missing_sequence_header_before_vulkan() {
+        let bitstream = make_obu(6, &[0x80]);
+        let err = probe_av1_decode_session_parameters_for_bitstream(&bitstream)
+            .expect_err("missing AV1 sequence header should be rejected before Vulkan probing");
         assert!(err.contains("missing AV1 sequence header"));
     }
 

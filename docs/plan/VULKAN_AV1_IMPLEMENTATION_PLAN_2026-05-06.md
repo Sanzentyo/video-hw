@@ -85,8 +85,8 @@ Tasks:
 
 1. Create video session using `VideoDecodeAV1SessionParametersCreateInfoKHR`
    chained to `VideoSessionParametersCreateInfoKHR`. Prerequisite probe now
-   covers synthetic reduced-still session/session-parameters creation; real
-   bitstream bootstrap remains.
+   covers synthetic reduced-still session/session-parameters creation; decode
+   blocker messages now also probe real-bitstream session-parameters creation.
 2. Bind video session memory using the same non-zero memory-requirement contract
    used by HEVC. Do not enable the Intel zero-memory workaround experiments for
    AV1 without a valid Vulkan contract.

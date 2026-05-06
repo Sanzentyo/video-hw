@@ -15,7 +15,7 @@ use crate::{
     VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
         Av1DecodePrerequisiteProbe, extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
-        probe_av1_decode_prerequisites,
+        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -642,7 +642,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
     match inspect_av1_low_overhead_obus(bitstream) {
         Ok(inspection) => {
             message.push_str(&format!(
-                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}",
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}",
                 inspection.obu_count,
                 inspection.temporal_unit_count,
                 inspection.has_sequence_header,
@@ -658,6 +658,14 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .map_or_else(|| "unknown".to_string(), |height| height.to_string()),
                 extract_av1_std_sequence_header(bitstream)
                     .map(|_| "ready".to_string())
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                probe_av1_decode_session_parameters_for_bitstream(bitstream)
+                    .map(|probe| {
+                        format!(
+                            "ready(coded={}x{}, picture_format={:?})",
+                            probe.coded_width, probe.coded_height, probe.picture_format
+                        )
+                    })
                     .unwrap_or_else(|err| format!("unavailable({err})"))
             ));
         }
