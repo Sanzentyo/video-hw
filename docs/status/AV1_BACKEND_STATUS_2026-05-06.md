@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_backend.rs` returns explicit `UnsupportedConfig`; regression tests prevent false capability claims | Not implemented |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites and parses low-overhead OBUs; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -62,6 +62,27 @@ encode, `VK_KHR_video_encode_av1` where the driver exposes it. The current HEVC
 Vulkan implementation is not a drop-in AV1 implementation because AV1 requires
 different codec profile/session parameters, picture info, reference handling,
 OBU packetization, and validation/PSNR gates.
+
+Current implementation progress:
+
+- `vulkan_av1_decode.rs` contains an AV1 decode prerequisite probe for
+  `VK_KHR_video_queue`, `VK_KHR_video_decode_queue`, `VK_KHR_video_decode_av1`,
+  and `VIDEO_DECODE_KHR` queues advertising `DECODE_AV1`;
+- low-overhead AV1 OBU inspection now reports OBU count, temporal-unit count,
+  sequence-header presence, and frame-payload presence in Vulkan AV1 decode
+  blocker messages;
+- Vulkan AV1 capability is still false because session parameter creation,
+  decode submit, readback, PSNR, and benchmark gates are not implemented;
+- Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
+  which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
+
+Latest Vulkan AV1 scaffold verification:
+
+- `cargo fmt --all --check`
+- `cargo test -p video-hw-backend-vulkan --features backend-vulkan av1`
+- `cargo check -p video-hw-backend-vulkan --features backend-vulkan`
+- `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
+
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
 
@@ -83,10 +104,12 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Implement Vulkan AV1 decode first, gated behind adapter capability detection.
-2. Add Vulkan AV1 OBU parser/session parameter extraction and PSNR check against
-   FFmpeg software decode.
-3. Add Vulkan AV1 encode only for adapters exposing encode queue and
+1. Implement Vulkan AV1 sequence-header parsing into `StdVideoAV1SequenceHeader`
+   and session parameter creation.
+2. Add Vulkan AV1 decode submit/readback and PSNR check against FFmpeg software
+   decode.
+3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
+   adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also
    cannot encode.
 4. On macOS AV1 hardware, prototype VideoToolbox AV1 encode/decode and update

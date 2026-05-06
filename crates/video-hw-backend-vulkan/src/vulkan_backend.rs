@@ -13,6 +13,9 @@ use crate::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
     DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
     VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
+    vulkan_av1_decode::{
+        Av1DecodePrerequisiteProbe, inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
+    },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
         HevcVideoSessionCreateProbe, HevcVideoSessionParametersCreateProbe,
@@ -108,6 +111,11 @@ impl VulkanDecoderAdapter {
     fn decode_pending_bitstream(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
         if matches!(self.config.codec, Codec::Hevc) {
             return self.decode_pending_hevc_bitstream(bitstream);
+        }
+        if matches!(self.config.codec, Codec::Av1) {
+            return Err(BackendError::UnsupportedConfig(
+                av1_decode_blocker_message_with_bitstream(bitstream),
+            ));
         }
         if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
             return self.decode_pending_h264_metadata(bitstream);
@@ -593,10 +601,66 @@ fn ensure_vk_codec_supported(codec: Codec, operation: &str) -> Result<(), Backen
             };
             Err(BackendError::UnsupportedConfig(message))
         }
-        Codec::Av1 => Err(BackendError::UnsupportedConfig(format!(
-            "Vulkan AV1 {operation} is not implemented in video-hw yet"
-        ))),
+        Codec::Av1 => {
+            let message = if operation == "decode" {
+                av1_decode_blocker_message()
+            } else {
+                av1_encode_blocker_message()
+            };
+            Err(BackendError::UnsupportedConfig(message))
+        }
     }
+}
+
+fn av1_decode_blocker_message() -> String {
+    let base = "Vulkan AV1 decode initialization failed";
+    match probe_av1_decode_prerequisites() {
+        Av1DecodePrerequisiteProbe::Ready => format!(
+            "{base}; runtime prerequisites are present, but AV1 session bootstrap/decode submit is not implemented in video-hw yet"
+        ),
+        Av1DecodePrerequisiteProbe::MissingExtensions { missing } => {
+            format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
+        }
+        Av1DecodePrerequisiteProbe::MissingDecodeQueueFamily => {
+            format!("{base}; no queue family advertises VIDEO_DECODE_KHR with AV1 decode operation")
+        }
+        Av1DecodePrerequisiteProbe::DeviceInitializationFailed(details) => {
+            format!("{base}; device bootstrap for AV1 decode failed: {details}")
+        }
+        Av1DecodePrerequisiteProbe::NoCompatibleAdapter => format!(
+            "{base}; required extensions were observed but not on a single adapter that can run AV1 decode prerequisites"
+        ),
+        Av1DecodePrerequisiteProbe::ProbeUnavailable(details) => {
+            format!("{base}; extension probe failed: {details}")
+        }
+    }
+}
+
+fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
+    let mut message = av1_decode_blocker_message();
+    match inspect_av1_low_overhead_obus(bitstream) {
+        Ok(inspection) => {
+            message.push_str(&format!(
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}",
+                inspection.obu_count,
+                inspection.temporal_unit_count,
+                inspection.has_sequence_header,
+                inspection.has_frame_payload,
+                inspection
+                    .sequence_header_obu_len
+                    .map_or_else(|| "none".to_string(), |len| len.to_string())
+            ));
+        }
+        Err(err) => {
+            message.push_str(&format!("; OBU inspection failed: {err}"));
+        }
+    }
+    message
+}
+
+fn av1_encode_blocker_message() -> String {
+    "Vulkan AV1 encode initialization failed; ash 0.38.0 exposes VK_KHR_video_decode_av1 bindings but not VK_KHR_video_encode_av1, so video-hw cannot implement Vulkan AV1 encode without updating Vulkan bindings"
+        .to_string()
 }
 
 fn hevc_decode_blocker_message() -> String {
@@ -1279,13 +1343,22 @@ mod tests {
             match err {
                 BackendError::UnsupportedConfig(message) => {
                     assert!(
-                        message.contains(&format!("Vulkan AV1 {operation} is not implemented")),
+                        message.contains(&format!("Vulkan AV1 {operation} initialization failed")),
                         "expected Vulkan AV1 implementation message: {message}"
                     );
                 }
                 other => panic!("unexpected AV1 check error: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn av1_decode_blocker_message_with_bitstream_appends_obu_status() {
+        let bitstream = [(2 << 3) | 0x02, 0, (1 << 3) | 0x02, 1, 0xab];
+        let message = av1_decode_blocker_message_with_bitstream(&bitstream);
+        assert!(message.contains("Vulkan AV1 decode initialization failed"));
+        assert!(message.contains("parsed AV1 OBUs"));
+        assert!(message.contains("sequence_header=true"));
     }
 
     #[test]

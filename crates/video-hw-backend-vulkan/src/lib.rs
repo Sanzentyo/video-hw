@@ -162,6 +162,8 @@ pub fn argb_to_nv12(
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+mod vulkan_av1_decode;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_decode;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_encode;

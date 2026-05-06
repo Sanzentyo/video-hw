@@ -11,6 +11,8 @@ plan covers the missing work tracked in
 
 - NVIDIA and Intel oneVPL AV1 are implemented and verified.
 - Vulkan AV1 currently returns explicit `UnsupportedConfig`.
+- Vulkan AV1 decode prerequisite probing and low-overhead OBU inspection are now
+  implemented in `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`.
 - FFmpeg `av1_vulkan` works on the NVIDIA adapter in this Windows environment.
 - Intel Vulkan AV1 encode is not available here because FFmpeg also fails on the
   Intel adapter without the required encode queue/path.
@@ -31,9 +33,9 @@ Files:
 
 Tasks:
 
-1. Add a Vulkan AV1 decode prerequisite probe beside the HEVC probe.
+1. Add a Vulkan AV1 decode prerequisite probe beside the HEVC probe. Done.
 2. Query `VK_KHR_video_queue`, `VK_KHR_video_decode_queue`, and
-   `VK_KHR_video_decode_av1`.
+   `VK_KHR_video_decode_av1`. Done.
 3. Build `vk::VideoProfileInfoKHR` with
    `vk::VideoCodecOperationFlagsKHR::DECODE_AV1` and
    `vk::VideoDecodeAV1ProfileInfoKHR`.
@@ -151,6 +153,10 @@ Acceptance:
 - `write_synthetic_fmp4 --backend vulkan --codec av1` writes an `av01` MP4 that
   `ffprobe` and FFmpeg decode accept.
 - integrated benchmark records video-hw vs FFmpeg `av1_vulkan` encode parity.
+
+Current binding blocker: `ash 0.38.0+1.3.281` exposes
+`VK_KHR_video_decode_av1` bindings but not `VK_KHR_video_encode_av1`. Update the
+Vulkan binding stack before starting this section.
 
 ## Non-Goals For First Merge
 
