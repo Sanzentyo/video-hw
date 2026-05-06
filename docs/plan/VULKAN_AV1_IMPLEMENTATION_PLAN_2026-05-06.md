@@ -119,7 +119,9 @@ Tasks:
    caller-provided alignment boundaries while copying only the minimal decode
    payload bytes into a compact submit buffer; bitstream session diagnostics now
    surface the adapter's Vulkan Video bitstream offset/range alignments so the
-   plan can use capability-derived values instead of a fixed constant.
+   plan can use capability-derived values instead of a fixed constant. The
+   aligned upload plan can now validate each command frame's source range
+   against the compact buffer before real command recording consumes it.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

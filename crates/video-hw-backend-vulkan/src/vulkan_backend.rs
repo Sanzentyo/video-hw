@@ -801,10 +801,14 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             size_alignment,
                         )
                             .map(|(upload_plan, aligned_command)| {
+                                let upload_ranges = upload_plan
+                                    .frame_upload_ranges(&aligned_command)
+                                    .unwrap_or_default();
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, ranges={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
+                                    upload_ranges.len(),
                                     offset_alignment,
                                     size_alignment,
                                     alignment_source,

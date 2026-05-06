@@ -115,6 +115,62 @@ pub(crate) struct Av1DecodeBitstreamUploadPlan {
     pub decodes: Vec<Av1DecodeInfoSkeleton>,
 }
 
+impl Av1DecodeBitstreamUploadPlan {
+    pub(crate) fn frame_upload_ranges(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+    ) -> Result<Vec<Range<usize>>, String> {
+        if command.frames.len() != self.decodes.len() {
+            return Err(format!(
+                "AV1 aligned upload frame count mismatch: command_frames={}, decodes={}",
+                command.frames.len(),
+                self.decodes.len()
+            ));
+        }
+
+        command
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(decode_index, frame)| {
+                let decode = &self.decodes[decode_index];
+                if frame.frame_index != decode_index {
+                    return Err(format!(
+                        "AV1 aligned upload frame index mismatch: frame_index={}, decode_index={decode_index}",
+                        frame.frame_index
+                    ));
+                }
+                if frame.src_buffer_offset != decode.src_buffer_offset
+                    || frame.src_buffer_range != decode.src_buffer_range
+                {
+                    return Err(format!(
+                        "AV1 aligned upload source range mismatch for frame {}: command={}+{}, decode={}+{}",
+                        frame.frame_index,
+                        frame.src_buffer_offset,
+                        frame.src_buffer_range,
+                        decode.src_buffer_offset,
+                        decode.src_buffer_range
+                    ));
+                }
+                let start = usize::try_from(frame.src_buffer_offset)
+                    .map_err(|_| "AV1 aligned upload offset exceeds usize".to_string())?;
+                let range_len = usize::try_from(frame.src_buffer_range)
+                    .map_err(|_| "AV1 aligned upload range exceeds usize".to_string())?;
+                let end = start
+                    .checked_add(range_len)
+                    .ok_or_else(|| "AV1 aligned upload range overflows usize".to_string())?;
+                if end > self.bytes.len() {
+                    return Err(format!(
+                        "AV1 aligned upload range exceeds upload bytes: end={end}, len={}",
+                        self.bytes.len()
+                    ));
+                }
+                Ok(start..end)
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av1DecodeFrameRecordBundle {
     pub frame_index: usize,
@@ -2803,6 +2859,27 @@ mod tests {
         assert_eq!(command.frames[1].src_buffer_offset, 16);
         assert_eq!(command.frames[1].src_buffer_range, 8);
         assert_eq!(command.frames[1].setup_slot_index, 1);
+        assert_eq!(
+            plan.frame_upload_ranges(&command)
+                .expect("command frames should map into upload byte ranges"),
+            vec![0..8, 16..24]
+        );
+    }
+
+    #[test]
+    fn aligned_upload_ranges_reject_command_decode_mismatch() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12]));
+        let (plan, mut command) =
+            build_av1_aligned_key_frame_decode_command_skeleton(&bitstream, 1, 16, 8)
+                .expect("single frame should produce an aligned command skeleton");
+        command.frames[0].src_buffer_range = 4;
+
+        let err = plan
+            .frame_upload_ranges(&command)
+            .expect_err("command/decode source range mismatch should be rejected");
+
+        assert!(err.contains("source range mismatch"));
     }
 
     #[test]
