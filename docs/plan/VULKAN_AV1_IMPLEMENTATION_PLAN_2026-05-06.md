@@ -65,7 +65,8 @@ Tasks:
 1. Parse low-overhead AV1 OBUs with LEB128 size fields.
 2. Extract sequence header OBU and populate `StdVideoAV1SequenceHeader`.
    Low-overhead OBU extraction and reduced-still coded extent parsing are done;
-   full `StdVideoAV1SequenceHeader` population remains.
+   reduced-still `StdVideoAV1SequenceHeader` skeleton population is done; full
+   color/timing and non-reduced header coverage remains.
 3. Split temporal units / frame OBUs into access units suitable for Vulkan
    submit.
 4. Reject unsupported input forms explicitly:

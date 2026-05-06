@@ -3,6 +3,14 @@ use std::ops::Range;
 use std::sync::OnceLock;
 
 use ash::vk;
+use ash::vk::native::{
+    StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH, StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN,
+    StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1SequenceHeader,
+    StdVideoAV1SequenceHeaderFlags,
+};
+
+const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+const AV1_SELECT_INTEGER_MV: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Av1DecodePrerequisiteProbe {
@@ -113,6 +121,10 @@ pub(crate) fn inspect_av1_low_overhead_obus(
         .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
         .map(|record| parse_av1_sequence_header_payload(&bitstream[record.payload_range.clone()]))
         .transpose()?;
+    let _std_sequence_header = parsed_sequence_header
+        .as_ref()
+        .map(build_av1_std_sequence_header)
+        .transpose()?;
     let temporal_unit_count = records
         .iter()
         .map(|record| record.temporal_unit_index)
@@ -142,6 +154,62 @@ impl ParsedAv1SequenceHeader {
     fn coded_height(&self) -> u32 {
         self.max_frame_height_minus_1 + 1
     }
+}
+
+fn build_av1_std_sequence_header(
+    parsed: &ParsedAv1SequenceHeader,
+) -> Result<StdVideoAV1SequenceHeader, String> {
+    let seq_profile = match parsed.seq_profile {
+        0 => StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN,
+        1 => StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH,
+        2 => StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL,
+        other => return Err(format!("unsupported AV1 seq_profile {other}")),
+    };
+    let max_frame_width_minus_1 = u16::try_from(parsed.max_frame_width_minus_1)
+        .map_err(|_| "max_frame_width_minus_1 exceeds Vulkan std u16 range".to_string())?;
+    let max_frame_height_minus_1 = u16::try_from(parsed.max_frame_height_minus_1)
+        .map_err(|_| "max_frame_height_minus_1 exceeds Vulkan std u16 range".to_string())?;
+
+    Ok(StdVideoAV1SequenceHeader {
+        flags: StdVideoAV1SequenceHeaderFlags {
+            _bitfield_align_1: [],
+            _bitfield_1: StdVideoAV1SequenceHeaderFlags::new_bitfield_1(
+                parsed.still_picture as u32,
+                parsed.reduced_still_picture_header as u32,
+                parsed.use_128x128_superblock as u32,
+                parsed.enable_filter_intra as u32,
+                parsed.enable_intra_edge_filter as u32,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        },
+        seq_profile,
+        frame_width_bits_minus_1: parsed.frame_width_bits_minus_1,
+        frame_height_bits_minus_1: parsed.frame_height_bits_minus_1,
+        max_frame_width_minus_1,
+        max_frame_height_minus_1,
+        delta_frame_id_length_minus_2: 0,
+        additional_frame_id_length_minus_1: 0,
+        order_hint_bits_minus_1: 0,
+        seq_force_integer_mv: AV1_SELECT_INTEGER_MV,
+        seq_force_screen_content_tools: AV1_SELECT_SCREEN_CONTENT_TOOLS,
+        reserved1: [0; 5],
+        pColorConfig: std::ptr::null(),
+        pTimingInfo: std::ptr::null(),
+    })
 }
 
 fn run_av1_decode_probe() -> Av1DecodePrerequisiteProbe {
@@ -764,6 +832,26 @@ mod tests {
         assert_eq!(parsed.coded_height(), 360);
         assert_eq!(parsed.frame_width_bits_minus_1, 9);
         assert_eq!(parsed.frame_height_bits_minus_1, 8);
+    }
+
+    #[test]
+    fn sequence_header_builder_populates_vulkan_std_header() {
+        let payload = av1_reduced_still_sequence_header_payload(640, 360);
+        let parsed = parse_av1_sequence_header_payload(&payload)
+            .expect("synthetic reduced-still sequence header should parse");
+        let std_header = build_av1_std_sequence_header(&parsed)
+            .expect("synthetic reduced-still sequence header should map to Vulkan std header");
+
+        assert_eq!(
+            std_header.seq_profile,
+            StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN
+        );
+        assert_eq!(std_header.flags.still_picture(), 1);
+        assert_eq!(std_header.flags.reduced_still_picture_header(), 1);
+        assert_eq!(std_header.max_frame_width_minus_1, 639);
+        assert_eq!(std_header.max_frame_height_minus_1, 359);
+        assert!(std_header.pColorConfig.is_null());
+        assert!(std_header.pTimingInfo.is_null());
     }
 
     #[test]
