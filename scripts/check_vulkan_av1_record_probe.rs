@@ -44,6 +44,9 @@ fn main() -> Result<(), String> {
         if args.submit_command_buffer {
             command.env("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER", "1");
         }
+        if args.readback {
+            command.env("VIDEO_HW_VULKAN_AV1_READBACK", "1");
+        }
     }
     let output = command
         .output()
@@ -72,11 +75,13 @@ fn main() -> Result<(), String> {
          record_command_buffer: `{}`\n\n\
          record_mode: `{}`\n\n\
          submit_command_buffer: `{}`\n\n\
+         readback: `{}`\n\n\
          ## stdout\n\n```text\n{}\n```\n\n\
          ## stderr\n\n```text\n{}\n```\n",
         args.record_command_buffer,
         args.record_mode,
         args.submit_command_buffer,
+        args.readback,
         stdout.trim(),
         stderr.trim()
     );
@@ -100,6 +105,7 @@ struct Args {
     record_command_buffer: bool,
     record_mode: String,
     submit_command_buffer: bool,
+    readback: bool,
 }
 
 impl Args {
@@ -109,6 +115,7 @@ impl Args {
         let mut record_command_buffer = true;
         let mut record_mode = "full".to_string();
         let mut submit_command_buffer = false;
+        let mut readback = false;
         let mut iter = raw.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
@@ -120,17 +127,30 @@ impl Args {
                 "--record-command-buffer" => record_command_buffer = true,
                 "--submit-command-buffer" => submit_command_buffer = true,
                 "--no-submit-command-buffer" => submit_command_buffer = false,
+                "--readback" => {
+                    readback = true;
+                    record_command_buffer = true;
+                    submit_command_buffer = true;
+                }
+                "--no-readback" => readback = false,
                 "--record-mode" => {
                     record_mode = next_value(&mut iter, "--record-mode")?;
                     validate_record_mode(&record_mode)?;
                 }
                 "--help" | "-h" => {
                     return Err(
-                        "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs [--output-dir DIR] [--skip-build] [--record-command-buffer|--no-record-command-buffer] [--record-mode barrier_only|begin_end|reset_end|first_decode|full] [--submit-command-buffer|--no-submit-command-buffer]"
+                        "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs [--output-dir DIR] [--skip-build] [--record-command-buffer|--no-record-command-buffer] [--record-mode barrier_only|begin_end|reset_end|first_decode|full] [--submit-command-buffer|--no-submit-command-buffer] [--readback|--no-readback]"
                             .to_string(),
                     );
                 }
                 other => return Err(format!("unknown argument: {other}")),
+            }
+        }
+        if readback {
+            record_command_buffer = true;
+            submit_command_buffer = true;
+            if record_mode != "full" {
+                return Err("--readback requires --record-mode full".to_string());
             }
         }
         Ok(Self {
@@ -139,6 +159,7 @@ impl Args {
             record_command_buffer,
             record_mode,
             submit_command_buffer,
+            readback,
         })
     }
 }

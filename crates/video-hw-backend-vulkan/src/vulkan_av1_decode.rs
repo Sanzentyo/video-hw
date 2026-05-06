@@ -57,6 +57,9 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub decode_image_barrier_layers: u32,
     pub readback_bytes: u64,
     pub readback_region_count: usize,
+    pub readback_mapped_bytes: usize,
+    pub readback_non_zero: bool,
+    pub readback_sample: Vec<u8>,
     pub command_record_decode_count: usize,
     pub command_buffer_recorded: bool,
     pub command_buffer_submitted: bool,
@@ -1038,6 +1041,19 @@ struct Av1DecodeImageResource {
     view: vk::ImageView,
 }
 
+struct Av1DecodeReadbackBufferResource {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Av1DecodeReadbackSample {
+    mapped_bytes: usize,
+    non_zero: bool,
+    sample: Vec<u8>,
+}
+
 struct Av1DecodeSessionResource {
     session: vk::VideoSessionKHR,
     parameters: vk::VideoSessionParametersKHR,
@@ -1056,6 +1072,12 @@ struct Av1DecodeCommandRecordConfig<'a> {
     source_buffer: vk::Buffer,
     decode_image: vk::Image,
     image_view: vk::ImageView,
+    readback: Option<Av1DecodeCommandReadbackConfig<'a>>,
+}
+
+struct Av1DecodeCommandReadbackConfig<'a> {
+    buffer: vk::Buffer,
+    plan: &'a Av1DecodeReadbackPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2267,6 +2289,39 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             };
             let command_buffer_record_requested =
                 std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1");
+            let command_buffer_submit_requested = command_buffer_record_requested
+                && std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1");
+            let readback_requested =
+                std::env::var("VIDEO_HW_VULKAN_AV1_READBACK").as_deref() == Ok("1");
+            if readback_requested
+                && (!command_buffer_record_requested || !command_buffer_submit_requested)
+            {
+                destroy_av1_decode_session_resource(instance, &device, session);
+                destroy_av1_decode_image(&device, image);
+                destroy_av1_decode_source_buffer(&device, source_buffer);
+                return Err(
+                    "AV1 decode readback probe requires command-buffer record and submit"
+                        .to_string(),
+                );
+            }
+            let readback_buffer = if readback_requested {
+                match create_av1_decode_readback_buffer(
+                    instance,
+                    &device,
+                    physical_device,
+                    readback_plan.buffer_size,
+                ) {
+                    Ok(buffer) => Some(buffer),
+                    Err(err) => {
+                        destroy_av1_decode_session_resource(instance, &device, session);
+                        destroy_av1_decode_image(&device, image);
+                        destroy_av1_decode_source_buffer(&device, source_buffer);
+                        return Err(err);
+                    }
+                }
+            } else {
+                None
+            };
             let record_result = if command_buffer_record_requested {
                 record_and_destroy_av1_decode_command_buffer(Av1DecodeCommandRecordConfig {
                     instance,
@@ -2279,6 +2334,12 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     source_buffer: source_buffer.buffer,
                     decode_image: image.image,
                     image_view: image.view,
+                    readback: readback_buffer.as_ref().map(|buffer| {
+                        Av1DecodeCommandReadbackConfig {
+                            buffer: buffer.buffer,
+                            plan: &readback_plan,
+                        }
+                    }),
                 })
             } else {
                 upload_plan.record_decode_command_sequence(
@@ -2290,22 +2351,50 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     |_| Ok(()),
                 )
             };
-            let command_buffer_submit_requested = command_buffer_record_requested
-                && std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1");
             let summary = session.summary;
             let decode_image_barrier_layers = image_barrier.subresource_range.layer_count;
+            let record_summary = match record_result {
+                Ok(summary) => summary,
+                Err(err) => {
+                    if let Some(readback_buffer) = readback_buffer {
+                        destroy_av1_decode_readback_buffer(&device, readback_buffer);
+                    }
+                    destroy_av1_decode_session_resource(instance, &device, session);
+                    destroy_av1_decode_image(&device, image);
+                    destroy_av1_decode_source_buffer(&device, source_buffer);
+                    return Err(err);
+                }
+            };
+            let readback_sample = if let Some(readback_resource) = &readback_buffer {
+                match map_av1_decode_readback_buffer(&device, readback_resource) {
+                    Ok(sample) => sample,
+                    Err(err) => {
+                        if let Some(readback_resource) = readback_buffer {
+                            destroy_av1_decode_readback_buffer(&device, readback_resource);
+                        }
+                        destroy_av1_decode_session_resource(instance, &device, session);
+                        destroy_av1_decode_image(&device, image);
+                        destroy_av1_decode_source_buffer(&device, source_buffer);
+                        return Err(err);
+                    }
+                }
+            } else {
+                Av1DecodeReadbackSample::default()
+            };
+            if let Some(readback_buffer) = readback_buffer {
+                destroy_av1_decode_readback_buffer(&device, readback_buffer);
+            }
             destroy_av1_decode_session_resource(instance, &device, session);
             destroy_av1_decode_image(&device, image);
             destroy_av1_decode_source_buffer(&device, source_buffer);
-            record_result.map(|record_summary| {
-                (
-                    summary,
-                    record_summary,
-                    decode_image_barrier_layers,
-                    command_buffer_record_requested,
-                    command_buffer_submit_requested,
-                )
-            })
+            Ok((
+                summary,
+                record_summary,
+                decode_image_barrier_layers,
+                readback_sample,
+                command_buffer_record_requested,
+                command_buffer_submit_requested,
+            ))
         });
         // SAFETY: The device is no longer used after this point.
         unsafe {
@@ -2316,6 +2405,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 summary,
                 record_summary,
                 decode_image_barrier_layers,
+                readback_sample,
                 command_buffer_recorded,
                 command_buffer_submitted,
             )) => {
@@ -2336,6 +2426,9 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     decode_image_barrier_layers,
                     readback_bytes: readback_plan.buffer_size,
                     readback_region_count: readback_plan.regions.len(),
+                    readback_mapped_bytes: readback_sample.mapped_bytes,
+                    readback_non_zero: readback_sample.non_zero,
+                    readback_sample: readback_sample.sample,
                     command_record_decode_count: record_summary.decode_count,
                     command_buffer_recorded,
                     command_buffer_submitted,
@@ -2756,6 +2849,118 @@ fn destroy_av1_decode_source_buffer(device: &ash::Device, resource: Av1DecodeSou
     }
 }
 
+fn create_av1_decode_readback_buffer(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    size: u64,
+) -> Result<Av1DecodeReadbackBufferResource, String> {
+    if size == 0 {
+        return Err("AV1 decode readback buffer requires non-zero size".to_string());
+    }
+
+    let create_info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::TRANSFER_DST)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: Buffer create info contains only POD values.
+    let buffer = unsafe { device.create_buffer(&create_info, None) }
+        .map_err(|err| format!("vkCreateBuffer for AV1 decode readback failed: {err}"))?;
+
+    let result = (|| -> Result<vk::DeviceMemory, String> {
+        // SAFETY: `buffer` was created by this device.
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        // SAFETY: `physical_device` belongs to `instance`; this only reads memory metadata.
+        let memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let memory_type_index = select_av1_decode_memory_type_index(
+            &memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or_else(|| {
+            format!(
+                "no HOST_VISIBLE|HOST_COHERENT memory type for AV1 decode readback buffer (bits=0x{:X})",
+                requirements.memory_type_bits
+            )
+        })?;
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size.max(size))
+            .memory_type_index(memory_type_index);
+        // SAFETY: Allocation info is derived from Vulkan memory requirements.
+        let memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|err| format!("vkAllocateMemory for AV1 decode readback failed: {err}"))?;
+        // SAFETY: Buffer and memory were created by this device.
+        if let Err(err) = unsafe { device.bind_buffer_memory(buffer, memory, 0) } {
+            // SAFETY: `memory` was allocated above and has not been bound successfully.
+            unsafe { device.free_memory(memory, None) };
+            return Err(format!(
+                "vkBindBufferMemory for AV1 decode readback failed: {err}"
+            ));
+        }
+        Ok(memory)
+    })();
+
+    match result {
+        Ok(memory) => Ok(Av1DecodeReadbackBufferResource {
+            buffer,
+            memory,
+            size,
+        }),
+        Err(err) => {
+            // SAFETY: The buffer was created above and is no longer used after failure.
+            unsafe {
+                device.destroy_buffer(buffer, None);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn map_av1_decode_readback_buffer(
+    device: &ash::Device,
+    resource: &Av1DecodeReadbackBufferResource,
+) -> Result<Av1DecodeReadbackSample, String> {
+    let mapped_len = usize::try_from(resource.size)
+        .map_err(|_| "AV1 decode readback buffer size exceeds usize range".to_string())?;
+    // SAFETY: The readback memory is HOST_VISIBLE|HOST_COHERENT and the requested range fits the
+    // allocation used for the buffer.
+    let mapped = unsafe {
+        device.map_memory(
+            resource.memory,
+            0,
+            resource.size,
+            vk::MemoryMapFlags::empty(),
+        )
+    }
+    .map_err(|err| format!("vkMapMemory for AV1 decode readback failed: {err}"))?;
+    // SAFETY: The mapped pointer is valid for `mapped_len` bytes until unmap.
+    let mapped_slice = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), mapped_len) };
+    let sample_len = mapped_slice.len().min(256);
+    let sample = mapped_slice[..sample_len].to_vec();
+    let non_zero = mapped_slice.iter().any(|&byte| byte != 0);
+    // SAFETY: The memory was mapped above and is no longer accessed after this point.
+    unsafe {
+        device.unmap_memory(resource.memory);
+    }
+    Ok(Av1DecodeReadbackSample {
+        mapped_bytes: mapped_len,
+        non_zero,
+        sample,
+    })
+}
+
+fn destroy_av1_decode_readback_buffer(
+    device: &ash::Device,
+    resource: Av1DecodeReadbackBufferResource,
+) {
+    // SAFETY: The resource was created by this device and is no longer used.
+    unsafe {
+        device.destroy_buffer(resource.buffer, None);
+        device.free_memory(resource.memory, None);
+    }
+}
+
 fn create_av1_decode_image(
     instance: &ash::Instance,
     device: &ash::Device,
@@ -2997,6 +3202,53 @@ fn record_and_destroy_av1_decode_command_buffer(
                 }
             },
         )?;
+
+        if let Some(readback) = config.readback {
+            if record_mode != Av1DecodeCommandBufferRecordMode::Full {
+                return Err(
+                    "AV1 decode readback requires full command-buffer record mode".to_string(),
+                );
+            }
+            let decode_to_copy_image_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(config.decode_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let decode_to_copy_dependency = vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&decode_to_copy_image_barrier));
+            // SAFETY: Decode image and readback buffer are live and command buffer is recording.
+            unsafe {
+                device.cmd_pipeline_barrier2(command_buffer, &decode_to_copy_dependency);
+                device.cmd_copy_image_to_buffer(
+                    command_buffer,
+                    config.decode_image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    readback.buffer,
+                    &readback.plan.regions,
+                );
+            }
+            let copy_to_host_barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ);
+            let copy_to_host_dependency = vk::DependencyInfo::default()
+                .memory_barriers(std::slice::from_ref(&copy_to_host_barrier));
+            // SAFETY: The barrier only orders transfer writes before host readback after submit.
+            unsafe {
+                device.cmd_pipeline_barrier2(command_buffer, &copy_to_host_dependency);
+            }
+        }
 
         // SAFETY: Command buffer is recording and all command data has been emitted.
         unsafe { device.end_command_buffer(command_buffer) }
@@ -4735,7 +4987,7 @@ mod tests {
         match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
             Ok(probe) => {
                 eprintln!(
-                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, readback_bytes={}, readback_regions={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
+                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, readback_bytes={}, readback_regions={}, readback_mapped_bytes={}, readback_non_zero={}, readback_sample_len={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
                     probe.coded_width,
                     probe.coded_height,
                     probe.picture_format,
@@ -4744,6 +4996,9 @@ mod tests {
                     probe.decode_image_barrier_layers,
                     probe.readback_bytes,
                     probe.readback_region_count,
+                    probe.readback_mapped_bytes,
+                    probe.readback_non_zero,
+                    probe.readback_sample.len(),
                     probe.command_record_decode_count,
                     probe.command_buffer_recorded,
                     probe.command_buffer_submitted
@@ -4760,6 +5015,16 @@ mod tests {
                     assert!(
                         probe.command_buffer_submitted,
                         "submit probe env was set but command_buffer_submitted=false"
+                    );
+                }
+                if std::env::var("VIDEO_HW_VULKAN_AV1_READBACK").as_deref() == Ok("1") {
+                    assert_eq!(
+                        probe.readback_mapped_bytes as u64, probe.readback_bytes,
+                        "readback probe did not map the planned readback byte range"
+                    );
+                    assert!(
+                        !probe.readback_sample.is_empty(),
+                        "readback probe mapped no sample bytes"
                     );
                 }
             }

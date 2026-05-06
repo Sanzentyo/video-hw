@@ -198,14 +198,20 @@ Current implementation progress:
   with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`, `upload_bytes=256`,
   `image_layers=16`, `barrier_layers=16`, and `record_decodes=1` for decode
   modes; the `full --submit-command-buffer` probe also passes with
-  `command_buffer_submitted=true`, reaching queue submit and fence wait before
-  readback; NV12 AV1 readback planning now mirrors the HEVC plane-copy layout
+  `command_buffer_submitted=true`, reaching queue submit and fence wait; the
+  `--readback` probe now records a `VIDEO_DECODE_DST_KHR ->
+  TRANSFER_SRC_OPTIMAL` image transition, copies the decoded NV12 planes into a
+  host-visible buffer, orders `TRANSFER_WRITE -> HOST_READ`, waits on the submit
+  fence, maps the readback allocation, and passes on the current
+  Windows/Intel-visible adapter with `readback_bytes=86400`,
+  `readback_mapped_bytes=86400`, `readback_non_zero=true`, and
+  `readback_sample_len=256`; NV12 AV1 readback planning mirrors the HEVC
+  plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
-  readback byte/region counts, but the actual image-to-buffer copy/map gate is
-  still pending;
+  planned and mapped readback byte counts;
 - Vulkan AV1 capability is still false because real-bitstream session
-  readback, PSNR, and benchmark gates are not implemented;
+  PSNR and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -215,6 +221,7 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo test -p video-hw-backend-vulkan --features backend-vulkan av1`
 - `cargo check -p video-hw-backend-vulkan --features backend-vulkan`
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -237,11 +244,9 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Build the real Vulkan AV1 `VideoDecodeInfoKHR` chain from the decode-info
-   skeleton, allocate resources, and record the first `vkCmdDecodeVideoKHR`
-   key-frame submit.
-2. Add Vulkan AV1 decode readback and PSNR check against FFmpeg software
-   decode.
+1. Replace the reduced-still synthetic probe payload with real generated AV1
+   key-frame-only input and keep the submit/readback path passing.
+2. Add Vulkan AV1 decode PSNR check against FFmpeg software decode.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also

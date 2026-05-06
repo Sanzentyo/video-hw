@@ -150,8 +150,8 @@ Tasks:
    substructures for `pTileInfo`, `pQuantization`, `pSegmentation`,
    `pLoopFilter`, `pCDEF`, `pLoopRestoration`, and `pGlobalMotion`, matching
    the non-NULL picture-info shape used by FFmpeg's Vulkan AV1 path.
-   Actual queue submit/readback is still deferred to the submit/readback phase
-   rather than hidden inside the default capability probe.
+   Actual queue submit and readback are now covered by opt-in live probes rather
+   than hidden inside the default capability probe.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
@@ -177,7 +177,10 @@ Tasks:
    image format and coded extent constraints match AV1 capabilities. AV1 now
    has a pure NV12 readback plan for `G8_B8R8_2PLANE_420_UNORM` that matches the
    HEVC plane-copy layout, including odd-dimension chroma rounding and 4-byte
-   plane offset alignment; the command-buffer copy/map gate remains.
+   plane offset alignment; the opt-in `--readback` live probe records the
+   decode-output image transition, copies both NV12 planes into a host-visible
+   buffer, orders transfer writes before host reads, submits the command buffer,
+   and maps the full planned byte range.
 5. Convert NV12 to RGB24 through the existing facade conversion path.
 
 Acceptance:
