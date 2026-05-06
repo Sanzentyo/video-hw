@@ -84,6 +84,20 @@ impl Av1DecodeInfoSkeleton {
     pub(crate) fn tile_count(&self) -> usize {
         self.picture_info.tile_offsets.len()
     }
+
+    pub(crate) fn vk_decode_info<'a>(
+        &'a self,
+        src_buffer: vk::Buffer,
+        dst_picture_resource: vk::VideoPictureResourceInfoKHR<'a>,
+        av1_picture_info: &'a mut vk::VideoDecodeAV1PictureInfoKHR<'a>,
+    ) -> vk::VideoDecodeInfoKHR<'a> {
+        vk::VideoDecodeInfoKHR::default()
+            .src_buffer(src_buffer)
+            .src_buffer_offset(self.src_buffer_offset)
+            .src_buffer_range(self.src_buffer_range)
+            .dst_picture_resource(dst_picture_resource)
+            .push_next(av1_picture_info)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1862,6 +1876,35 @@ mod tests {
             vec![(tile_payload_start - source_start) as u32]
         );
         assert_eq!(decode.picture_info.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_info_skeleton_builds_vk_decode_info_chain() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let frame_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(6, &[0xaa, 0xbb, 0xcc]));
+        let decode = build_av1_decode_info_skeleton(&bitstream)
+            .expect("frame OBU should produce a decode info skeleton");
+        let mut av1_picture_info = decode.picture_info.vk_picture_info();
+        let av1_picture_info_ptr = &raw const av1_picture_info;
+        let dst_picture_resource = vk::VideoPictureResourceInfoKHR::default();
+
+        let vk_decode = decode.vk_decode_info(
+            vk::Buffer::null(),
+            dst_picture_resource,
+            &mut av1_picture_info,
+        );
+
+        assert_eq!(vk_decode.src_buffer, vk::Buffer::null());
+        assert_eq!(vk_decode.src_buffer_offset as usize, frame_obu_start + 2);
+        assert_eq!(vk_decode.src_buffer_range, 3);
+        assert_eq!(vk_decode.dst_picture_resource.coded_extent.width, 0);
+        assert_eq!(
+            vk_decode
+                .p_next
+                .cast::<vk::VideoDecodeAV1PictureInfoKHR<'_>>(),
+            av1_picture_info_ptr
+        );
     }
 
     #[test]

@@ -695,10 +695,18 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .unwrap_or_else(|err| format!("unavailable({err})")),
                 build_av1_decode_info_skeleton(bitstream)
                     .map(|decode| {
+                        let mut av1_picture_info = decode.picture_info.vk_picture_info();
+                        let vk_decode_info = decode.vk_decode_info(
+                            vk::Buffer::null(),
+                            vk::VideoPictureResourceInfoKHR::default(),
+                            &mut av1_picture_info,
+                        );
                         format!(
-                            "ready(src_offset={}, src_range={}, coded={}x{}, frame_header_offset={}, tile_count={})",
+                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, frame_header_offset={}, tile_count={})",
                             decode.src_buffer_offset,
                             decode.src_buffer_range,
+                            vk_decode_info.src_buffer_offset,
+                            vk_decode_info.src_buffer_range,
                             decode.coded_width,
                             decode.coded_height,
                             decode.picture_info.frame_header_offset,

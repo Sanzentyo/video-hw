@@ -98,6 +98,9 @@ Current implementation progress:
   `srcBufferOffset` / `srcBufferRange` covering the frame header and tiles,
   rebases AV1 frame/tile offsets relative to that range as Vulkan requires, and
   carries coded width/height from the parsed sequence header;
+- that decode-info skeleton can now build the ash `vk::VideoDecodeInfoKHR`
+  wrapper with `vk::VideoDecodeAV1PictureInfoKHR` in the `pNext` chain when
+  given caller-owned Vulkan buffer and destination-picture resources;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
