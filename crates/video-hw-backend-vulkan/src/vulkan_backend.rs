@@ -400,6 +400,19 @@ impl VulkanDecoderAdapter {
                 })
                 .collect();
         }
+        let display_frame_count = count_av1_display_frames(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode could not count display frames: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        if display_frame_count != decodes.len() {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 NV12 readback display mapping is not implemented for streams where display frame count ({display_frame_count}) differs from decode command count ({}); {}",
+                decodes.len(),
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            )));
+        }
         let readbacks = decode_av1_bitstream_to_nv12_frames(bitstream).map_err(|err| {
             BackendError::UnsupportedConfig(format!(
                 "Vulkan AV1 decode submit/readback failed: {err}; {}",

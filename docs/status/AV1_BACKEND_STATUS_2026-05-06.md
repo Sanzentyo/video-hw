@@ -468,9 +468,13 @@ Latest Vulkan AV1 scaffold verification:
   reports the display-frame count (`decode_to_yuv ... --output-mode metadata`
   prints `frames=16`) instead of the 17 decode-command count. The integrated
   run passes at 0.427s, while FFmpeg Vulkan decode passes at 0.313s. The PSNR
-  row still fails before comparison with
-  `readback frame count is too small: got 16, need 17`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077832379.md`). The generated
+  row still fails before comparison, now with an explicit safety guard:
+  `NV12 readback display mapping is not implemented for streams where display
+  frame count (16) differs from decode command count (17)`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078117672.md`). A trial that
+  simply treated the 16 readback samples as display-order frames produced
+  `psnr_y_min=19.9800`, so the backend deliberately rejects this scope instead
+  of returning incorrect pixels. The generated
   stream has 16 temporal units, 22 frame headers, 16 inter frames, and 5
   show-existing frames; the command skeleton reaches 17 decode commands with
   bounded slots `0/1/2/3/...`. The remaining gap is the current single coding
@@ -482,8 +486,8 @@ Latest Vulkan AV1 scaffold verification:
   0.311s:
   `output/benchmark-backends-av1-1778077931.md` /
   `output/benchmark-vulkan-av1-1778077931.md`. Its PSNR/NV12 row fails at the
-  same readback boundary
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077930197.md`).
+  same readback-display mapping guard
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078124794.md`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
