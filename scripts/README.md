@@ -242,6 +242,9 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --f
 - `--input-format fmp4` は FFmpeg fragmented MP4 (`av01`) を生成し、`decode_to_yuv --input-format mp4` 経由で同じ PSNR 比較を行う。FFmpeg 生成時は `delay_moov` を使い、`av1C` に sequence header OBU が入った fMP4 を作る。
 - `--gop-size <N>` は生成入力の `libaom-av1 -g` を切り替える。既定は現在のサポート範囲に合わせて `1`。`N>1` は inter-frame/GOP replay の未対応範囲を検出するための負荷として使う。
 - decode や PSNR setup で失敗した場合も FAIL markdown report を残す。
+- PASS/FAIL どちらの report にも、同じ入力を
+  `scripts/inspect_av1_frame_types.rs --expect-inter-frame ...` で検査する
+  `frame_type_gate` コマンドを記録する。
 - 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも 8-frame keyframe-only 入力で `--min-psnr-y 60` に PASS し、`psnr_y_min=inf`。
 
 ### 11.3) Vulkan AV1 encode binding check

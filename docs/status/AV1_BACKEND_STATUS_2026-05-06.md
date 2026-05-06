@@ -340,6 +340,13 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md`,
   `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 1 --skip-build --min-psnr-y 60`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778071142061.md`,
+  `psnr_y_min=inf`, report includes `frame_type_gate`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 2 --gop-size 30 --skip-build --min-psnr-y 60`
+  intentionally fails on inter-frame input
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778071155693.md`,
+  `failed_stage=decode Vulkan AV1 to NV12`, report includes `frame_type_gate`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)

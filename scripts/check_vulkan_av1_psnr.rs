@@ -347,8 +347,9 @@ fn write_failure_report(
     err: &anyhow::Error,
     report: &Path,
 ) -> Result<()> {
+    let frame_type_gate = frame_type_gate_command(args, input);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
@@ -356,7 +357,8 @@ fn write_failure_report(
         args.height,
         stage,
         err.to_string().replace('`', "'"),
-        args.min_psnr_y
+        args.min_psnr_y,
+        frame_type_gate.replace('`', "'")
     );
     fs::write(report, body).with_context(|| format!("write {}", report.display()))
 }
@@ -367,8 +369,9 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
     } else {
         "FAIL"
     };
+    let frame_type_gate = frame_type_gate_command(args, input);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
@@ -377,9 +380,27 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
         args.height,
         summary.avg_y,
         summary.min_y,
-        args.min_psnr_y
+        args.min_psnr_y,
+        frame_type_gate.replace('`', "'")
     );
     fs::write(report, body).with_context(|| format!("write {}", report.display()))
+}
+
+fn frame_type_gate_command(args: &Args, input: &Path) -> String {
+    let input_format = match args.input_format {
+        Av1InputFormat::Obu => "obu",
+        Av1InputFormat::Fmp4 => "fmp4",
+    };
+    let expected = args.gop_size > 1;
+    format!(
+        "cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input {} --input-format {input_format} --width {} --height {} --frames {} --fps {} --gop-size {} --expect-inter-frame {expected}",
+        input.display(),
+        args.width,
+        args.height,
+        args.frames,
+        args.fps,
+        args.gop_size
+    )
 }
 
 fn decode_to_yuv_executable() -> PathBuf {
