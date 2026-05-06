@@ -290,7 +290,10 @@ Acceptance:
 Tasks:
 
 1. Update `scripts/benchmark_ffmpeg_backends.rs` so Vulkan AV1 video-hw decode
-   is measured when the bootstrap probe passes.
+   is measured when the bootstrap probe passes. The runner now accepts
+   `--vulkan-av1-gop-size` and defaults generated AV1 Vulkan decode inputs to
+   `-g 30 -lag-in-frames 0`, with `--vulkan-av1-gop-size 1` available for
+   legacy keyframe-only comparison.
 2. Keep FFmpeg `av1_vulkan` adapter comparison in the report.
 3. Treat Intel Vulkan encode as unavailable when FFmpeg also cannot encode on
    that adapter; do not claim parity for unsupported hardware.

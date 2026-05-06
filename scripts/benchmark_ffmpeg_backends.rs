@@ -169,6 +169,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = VulkanDecodeInputFormat::Annexb)]
     vulkan_decode_input_format: VulkanDecodeInputFormat,
 
+    /// GOP size for generated Vulkan AV1 decode inputs.
+    #[arg(long, default_value_t = 30)]
+    vulkan_av1_gop_size: usize,
+
     #[arg(long, default_value = "output")]
     output_dir: PathBuf,
 }
@@ -678,7 +682,9 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
         args.codec.as_cli()
     ));
     write_vulkan_report(&report_path, args, &decode_input, &cases)?;
-    let status = if cases.iter().any(|case| case.status.starts_with("failed:")) {
+    let status = if cases.is_empty() {
+        BackendStatus::Failed("no Vulkan adapter cases matched the selection".to_string())
+    } else if cases.iter().any(|case| case.status.starts_with("failed:")) {
         BackendStatus::Failed("one or more Vulkan adapter cases failed".to_string())
     } else {
         BackendStatus::Passed
@@ -866,13 +872,19 @@ fn unavailable_case(label: &str, adapter_name: &str, reason: &str) -> CaseSummar
 fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create output directory: {}", args.output_dir.display()))?;
+    let av1_gop_suffix = if args.codec == Codec::Av1 {
+        format!("-gop{}", args.vulkan_av1_gop_size)
+    } else {
+        String::new()
+    };
     let path = args.output_dir.join(format!(
-        "benchmark-vulkan-decode-input-{}-{}-{}x{}-{}f.{}",
+        "benchmark-vulkan-decode-input-{}-{}-{}x{}-{}f{}.{}",
         args.codec.as_cli(),
         args.vulkan_decode_input_format.as_cli(),
         args.width,
         args.height,
         args.frame_count,
+        av1_gop_suffix,
         args.vulkan_decode_input_format.output_extension(args.codec)
     ));
     let mut command = Command::new("ffmpeg");
@@ -917,7 +929,16 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
             ]);
         }
         Codec::Av1 => {
-            command.args(["-cpu-used", "8", "-row-mt", "1", "-g", "1", "-lag-in-frames", "0"]);
+            command.args([
+                "-cpu-used",
+                "8",
+                "-row-mt",
+                "1",
+                "-g",
+                &args.vulkan_av1_gop_size.to_string(),
+                "-lag-in-frames",
+                "0",
+            ]);
         }
     }
     match args.vulkan_decode_input_format {
@@ -1271,6 +1292,9 @@ fn write_vulkan_report(
         "decode_input_format: {}",
         args.vulkan_decode_input_format.as_cli()
     )?;
+    if args.codec == Codec::Av1 {
+        writeln!(&mut report, "vulkan_av1_gop_size: {}", args.vulkan_av1_gop_size)?;
+    }
     writeln!(&mut report, "decode_input: {}", decode_input.display())?;
     writeln!(&mut report)?;
     writeln!(

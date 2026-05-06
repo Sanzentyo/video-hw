@@ -187,6 +187,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv,intel
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec h264 --vulkan-adapter-indexes 0,1 --allow-failures true
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 0 --repeat 1 --allow-failures true
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-decode-input-format fmp4 --warmup 0 --repeat 1 --allow-failures true
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-av1-gop-size 30 --warmup 1 --repeat 3 --allow-failures true
 ```
 
 - 生成レポート: `output/benchmark-backends-<codec>-<epoch>.md`
@@ -195,7 +196,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - NV/Intel/VT は子レポートの parity / verification 結果も統合statusへ反映する。
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
 - Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B / OBU 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`, AV1=`libaom-av1`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
-- Vulkan AV1 decode は現状 keyframe-only OBU 入力（生成時 `-g 1 -lag-in-frames 0`）を測定対象にする。NVIDIA では `video-hw decode` と FFmpeg Vulkan decode を同じ入力で比較し、unsupported adapter の失敗理由も同じ report に残す。Vulkan AV1 encode は現行 `ash` binding が `VK_KHR_video_encode_av1` を公開していないため `unavailable` として記録する。
+- Vulkan AV1 decode は既定で generated long-GOP OBU 入力（生成時 `-g 30 -lag-in-frames 0`）を測定対象にする。`--vulkan-av1-gop-size <N>` でGOPサイズを変更でき、keyframe-only比較が必要な場合は `--vulkan-av1-gop-size 1` を指定する。NVIDIA では `video-hw decode` と FFmpeg Vulkan decode を同じ入力で比較し、unsupported adapter の失敗理由も同じ report に残す。Vulkan AV1 encode は現行 `ash` binding が `VK_KHR_video_encode_av1` を公開していないため `unavailable` として記録する。
 - `--vulkan-decode-input-format fmp4` を指定すると、Vulkan AV1 decode比較用入力を fragmented MP4 (`av01`) として生成し、`decode_to_yuv --input-format mp4` と FFmpeg MP4 demuxerで測定する。現状この指定は AV1 専用。
 - VideoToolbox AV1 は video-hw では未実装。macOS で `--backends vt --codec av1` を指定した場合、VT precise script は AV1 未実装を明示した FAIL report を生成し、統合 runner は parity 対象として成功扱いにしない。
 - FFmpeg Vulkan の adapter 指定は `-init_hw_device vulkan:<index>` を使う。Windows hybrid GPU 環境では `vulkan=vk:<index>` が指定した物理デバイスを選ばず、NVIDIA encode ケースが Intel 側へ流れることがあった。

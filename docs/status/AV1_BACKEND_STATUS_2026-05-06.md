@@ -425,6 +425,20 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-decode-input-format fmp4 --warmup 1 --repeat 3 --frame-count 8 --width 320 --height 180 --release true --allow-failures true`
   (`output/benchmark-backends-av1-1778068469.md`,
   `output/benchmark-vulkan-av1-1778068469.md`)
+- `scripts/benchmark_ffmpeg_backends.rs` now accepts
+  `--vulkan-av1-gop-size` and defaults generated Vulkan AV1 decode inputs to
+  `-g 30 -lag-in-frames 0`, so integrated Vulkan AV1 decode comparisons no
+  longer silently measure keyframe-only input unless `--vulkan-av1-gop-size 1`
+  is requested.
+- Short smoke reports for the updated generated GOP30 integrated benchmark:
+  `output/benchmark-backends-av1-1778076098.md` /
+  `output/benchmark-vulkan-av1-1778076098.md` for OBU input and
+  `output/benchmark-backends-av1-1778076116.md` /
+  `output/benchmark-vulkan-av1-1778076116.md` for fMP4 input. The NVIDIA
+  decode rows pass in both reports; unsupported/failed Vulkan encode and Intel
+  Vulkan rows remain explicit. The runner now also marks an empty adapter
+  selection as failed instead of writing a passing report with no cases
+  (`output/benchmark-backends-av1-1778076131.md`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
