@@ -189,6 +189,18 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - adapter ごとに失敗理由も report に残すため、複数 GPU 環境では `--allow-failures true` で全候補を走査する。
 - Vulkan HEVC encode は NVIDIA adapter 上で実験的な IDR-only production path を測定できる。runner は FFmpeg `hevc_vulkan` で同サイズの parameter/header sample を生成し、名前/vendor/device idで対応したFFmpeg Vulkan adapter番号を使って `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH` を自動設定する。現状は1回の `flush` 内で Vulkan video session / session parameters を再利用し、warmup後の統合benchmarkではFFmpeg Vulkan HEVC encode以上のthroughputを確認済み。長寿命encoder sessionと参照フレーム/GOP encodeは未実装。失敗adapterや非公開adapterも report に残す。診断用には `cargo +nightly -Zscript scripts/check_vulkan_hevc_encode_probe.rs --adapter-index <n>`、または `cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture` を明示実行する。
 
+### 11.1) Vulkan AV1 command record probe
+
+```bash
+cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs
+cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --no-record-command-buffer
+```
+
+- 生成レポート: `output/vulkan-av1-record-probe/vulkan-av1-record-probe-<epoch>.md`
+- 既定で `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` を付け、ignored live test を通じて AV1 decode command buffer の begin/reset/decode/end record probe を実行する。
+- `--no-record-command-buffer` は通常diagnosticsと同じく driver command path を発行せず、session/source/image/barrier/command sequence の構築だけを確認する。
+- これは submit/readback/PSNR ではない。Vulkan AV1 backend はまだ実装完了扱いにしない。
+
 ### 12) fMP4 decode access pattern benchmark
 
 ```bash

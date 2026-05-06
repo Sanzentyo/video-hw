@@ -4326,6 +4326,39 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "live Vulkan AV1 command-buffer record probe; opt in explicitly"]
+    fn live_av1_decode_command_record_probe_reports_status() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12, 0x13, 0x14]));
+
+        match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
+            Ok(probe) => {
+                eprintln!(
+                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, record_decodes={}, command_buffer_recorded={}",
+                    probe.coded_width,
+                    probe.coded_height,
+                    probe.picture_format,
+                    probe.bitstream_upload_bytes,
+                    probe.decode_image_layers,
+                    probe.decode_image_barrier_layers,
+                    probe.command_record_decode_count,
+                    probe.command_buffer_recorded
+                );
+                if std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1")
+                {
+                    assert!(
+                        probe.command_buffer_recorded,
+                        "record probe env was set but command_buffer_recorded=false"
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!("AV1 Vulkan command record probe unavailable: {err}");
+            }
+        }
+    }
+
     fn make_obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
         let mut out = vec![(obu_type << 3) | 0x02];
         out.extend(write_leb128(payload.len()));

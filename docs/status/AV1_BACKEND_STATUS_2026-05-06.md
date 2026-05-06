@@ -182,7 +182,9 @@ Current implementation progress:
   `vkCmdControlVideoCodingKHR(RESET)`, `vkCmdDecodeVideoKHR`, and
   `vkCmdEndVideoCodingKHR` using those live resources, while the default probe
   still avoids issuing the driver command path until submit/readback has a
-  dedicated gate;
+  dedicated gate; `scripts/check_vulkan_av1_record_probe.rs` runs the ignored
+  live probe and writes a small command-record report under
+  `output/vulkan-av1-record-probe/`;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
