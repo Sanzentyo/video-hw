@@ -129,6 +129,8 @@ Current implementation progress:
   slot infos, and Vulkan reference-slot chains for the bound DPB resources;
 - begin-coding scaffolding can now materialize `vk::VideoBeginCodingInfoKHR`
   plus the mandatory initial RESET `vk::VideoCodingControlInfoKHR`;
+- coding-scope scaffolding now also materializes the default
+  `vk::VideoEndCodingInfoKHR` used to close a future AV1 decode command scope;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

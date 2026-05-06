@@ -215,6 +215,10 @@ impl Av1DecodeCommandSkeleton {
     pub(crate) fn vk_reset_coding_control_info(&self) -> vk::VideoCodingControlInfoKHR<'static> {
         vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET)
     }
+
+    pub(crate) fn vk_end_coding_info(&self) -> vk::VideoEndCodingInfoKHR<'static> {
+        vk::VideoEndCodingInfoKHR::default()
+    }
 }
 
 impl Av1DecodeInfoSkeleton {
@@ -2450,6 +2454,9 @@ mod tests {
                 .flags
                 .contains(vk::VideoCodingControlFlagsKHR::RESET)
         );
+
+        let end_coding_info = command.vk_end_coding_info();
+        assert!(end_coding_info.flags.is_empty());
     }
 
     #[test]
