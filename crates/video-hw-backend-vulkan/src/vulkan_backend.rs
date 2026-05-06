@@ -16,9 +16,9 @@ use crate::{
     vulkan_av1_decode::{
         Av1DecodePrerequisiteProbe, build_av1_decode_info_skeleton,
         build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
-        build_av1_decode_submit_skeleton, extract_av1_std_sequence_header,
-        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
-        probe_av1_decode_session_parameters_for_bitstream,
+        build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
+        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
+        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -645,7 +645,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
     match inspect_av1_low_overhead_obus(bitstream) {
         Ok(inspection) => {
             message.push_str(&format!(
-                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}, decode_info_count={}",
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}, decode_info_count={}, command_skeleton={}",
                 inspection.obu_count,
                 inspection.temporal_unit_count,
                 inspection.has_sequence_header,
@@ -729,6 +729,22 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .unwrap_or_else(|err| format!("unavailable({err})")),
                 build_av1_decode_info_skeletons(bitstream)
                     .map(|decodes| decodes.len().to_string())
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_key_frame_decode_command_skeleton(bitstream, 4)
+                    .map(|command| {
+                        format!(
+                            "ready(frames={}, coded={}x{}, slots={})",
+                            command.frames.len(),
+                            command.coded_width,
+                            command.coded_height,
+                            command
+                                .frames
+                                .iter()
+                                .map(|frame| frame.setup_slot_index.to_string())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        )
+                    })
                     .unwrap_or_else(|err| format!("unavailable({err})"))
             ));
         }

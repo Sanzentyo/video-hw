@@ -117,6 +117,9 @@ Current implementation progress:
   `StdVideoDecodeAV1ReferenceInfo`, `VideoDecodeAV1DpbSlotInfoKHR`, and
   `VideoReferenceSlotInfoKHR` so the next step can attach a reconstructed
   picture slot to the real decode command;
+- key-frame command skeleton extraction now assigns ordered frames to rotating
+  setup DPB slots so command recording can use deterministic slot indices
+  before full inter-frame reference management is implemented;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

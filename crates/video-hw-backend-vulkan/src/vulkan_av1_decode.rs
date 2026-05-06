@@ -74,12 +74,30 @@ impl Av1DecodePictureInfoSkeleton {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Av1DecodeInfoSkeleton {
+    pub temporal_unit_index: usize,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
     pub coded_width: u32,
     pub coded_height: u32,
     pub picture_info: Av1DecodePictureInfoSkeleton,
     pub setup_reference_info: StdVideoDecodeAV1ReferenceInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeFrameCommandSkeleton {
+    pub frame_index: usize,
+    pub temporal_unit_index: usize,
+    pub setup_slot_index: i32,
+    pub src_buffer_offset: u64,
+    pub src_buffer_range: u64,
+    pub tile_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeCommandSkeleton {
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub frames: Vec<Av1DecodeFrameCommandSkeleton>,
 }
 
 impl Av1DecodeInfoSkeleton {
@@ -401,6 +419,7 @@ fn build_av1_decode_info_skeleton_from_submit(
     let rebased_picture_info = rebase_av1_picture_info_offsets(picture_info, src_buffer_offset)?;
 
     Ok(Av1DecodeInfoSkeleton {
+        temporal_unit_index: submit.temporal_unit_index,
         src_buffer_offset: u64::from(src_buffer_offset),
         src_buffer_range: u64::from(src_buffer_range),
         coded_width,
@@ -417,6 +436,44 @@ pub(crate) fn build_av1_decode_info_skeleton(
         .into_iter()
         .next()
         .ok_or_else(|| "missing AV1 frame or tile-group OBU for decode info".to_string())
+}
+
+pub(crate) fn build_av1_key_frame_decode_command_skeleton(
+    bitstream: &[u8],
+    max_dpb_slots: u32,
+) -> Result<Av1DecodeCommandSkeleton, String> {
+    if max_dpb_slots == 0 {
+        return Err("AV1 decode command skeleton requires at least one DPB slot".to_string());
+    }
+    let max_dpb_slots = usize::try_from(max_dpb_slots)
+        .map_err(|_| "AV1 max_dpb_slots does not fit usize".to_string())?;
+    let decodes = build_av1_decode_info_skeletons(bitstream)?;
+    let first = decodes
+        .first()
+        .ok_or_else(|| "missing AV1 frames for decode command skeleton".to_string())?;
+
+    let frames = decodes
+        .iter()
+        .enumerate()
+        .map(|(frame_index, decode)| {
+            let setup_slot_index = i32::try_from(frame_index % max_dpb_slots)
+                .map_err(|_| "AV1 setup slot index exceeds i32 range".to_string())?;
+            Ok(Av1DecodeFrameCommandSkeleton {
+                frame_index,
+                temporal_unit_index: decode.temporal_unit_index,
+                setup_slot_index,
+                src_buffer_offset: decode.src_buffer_offset,
+                src_buffer_range: decode.src_buffer_range,
+                tile_count: decode.tile_count(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(Av1DecodeCommandSkeleton {
+        coded_width: first.coded_width,
+        coded_height: first.coded_height,
+        frames,
+    })
 }
 
 pub(crate) fn build_av1_decode_picture_info_skeleton(
@@ -2118,6 +2175,7 @@ mod tests {
         assert_eq!(decodes.len(), 2);
         assert_eq!(decodes[0].src_buffer_offset as usize, first_frame_start + 2);
         assert_eq!(decodes[0].src_buffer_range, 2);
+        assert_eq!(decodes[0].temporal_unit_index, 0);
         assert_eq!(decodes[0].coded_width, 320);
         assert_eq!(decodes[0].coded_height, 180);
         assert_eq!(decodes[0].picture_info.frame_header_offset, 0);
@@ -2126,7 +2184,60 @@ mod tests {
             second_frame_start + 2
         );
         assert_eq!(decodes[1].src_buffer_range, 3);
+        assert_eq!(decodes[1].temporal_unit_index, 1);
         assert_eq!(decodes[1].picture_info.frame_header_offset, 0);
+    }
+
+    #[test]
+    fn key_frame_decode_command_skeleton_rotates_setup_slots() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11]));
+        bitstream.extend_from_slice(&make_obu(2, &[]));
+        bitstream.extend_from_slice(&make_obu(6, &[0x21, 0x22]));
+        bitstream.extend_from_slice(&make_obu(2, &[]));
+        bitstream.extend_from_slice(&make_obu(6, &[0x31, 0x32, 0x33]));
+
+        let command = build_av1_key_frame_decode_command_skeleton(&bitstream, 2)
+            .expect("multi-frame key-frame stream should produce a command skeleton");
+
+        assert_eq!(command.coded_width, 320);
+        assert_eq!(command.coded_height, 180);
+        assert_eq!(command.frames.len(), 3);
+        assert_eq!(
+            command
+                .frames
+                .iter()
+                .map(|frame| frame.setup_slot_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 0]
+        );
+        assert_eq!(
+            command
+                .frames
+                .iter()
+                .map(|frame| frame.temporal_unit_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            command
+                .frames
+                .iter()
+                .map(|frame| frame.tile_count)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn key_frame_decode_command_skeleton_rejects_zero_dpb_slots() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11]));
+
+        let err = build_av1_key_frame_decode_command_skeleton(&bitstream, 0)
+            .expect_err("zero DPB slots should be rejected");
+
+        assert!(err.contains("requires at least one DPB slot"));
     }
 
     #[test]

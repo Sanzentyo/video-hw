@@ -105,7 +105,8 @@ Tasks:
    picture-info `pNext` chain and HEVC-style destination picture resource
    construction are now covered. Key-frame setup-reference scaffolding now
    builds AV1 std reference info, AV1 DPB slot info, and the Vulkan reference
-   slot chain. Vulkan command recording remains.
+   slot chain; key-frame command skeleton extraction also assigns frames to
+   deterministic rotating setup slots. Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
