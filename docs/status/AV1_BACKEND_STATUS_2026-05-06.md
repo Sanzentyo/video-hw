@@ -461,33 +461,29 @@ Latest Vulkan AV1 scaffold verification:
   `0`, preserving the passing generated-GOP30 scope. A new bounded-DPB unit test
   (`reference_name_slot_replay_keeps_slots_within_dpb_capacity`) verifies that
   reference-name replay no longer records unbounded frame indexes as DPB slots.
-  Stress report `output/benchmark-backends-av1-1778077834.md` /
-  `output/benchmark-vulkan-av1-1778077834.md` uses
+  Stress report `output/benchmark-backends-av1-1778078784.md` /
+  `output/benchmark-vulkan-av1-1778078784.md` uses
   `--frames 16 --gop-size 30 --vulkan-av1-lag-in-frames 25 --verify`. NVIDIA
   video-hw metadata decode now separates command submit from NV12 readback and
   reports the display-frame count (`decode_to_yuv ... --output-mode metadata`
-  prints `frames=16`) instead of the 17 decode-command count. The integrated
-  run passes at 0.427s, while FFmpeg Vulkan decode passes at 0.313s. The PSNR
-  row still fails before comparison, now with an explicit safety guard:
-  `NV12 readback display mapping is not implemented for streams where display
-  frame count (16) differs from decode command count (17)`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078117672.md`). A trial that
-  simply treated the 16 readback samples as display-order frames produced
-  `psnr_y_min=19.9800`, so the backend deliberately rejects this scope instead
-  of returning incorrect pixels. The generated
+  prints `frames=16`) instead of the 17 decode-command count. NV12 readback now
+  decouples logical DPB slots from output image layers and maps display frames,
+  including show-existing frames, back to the correct readback layer. The
+  integrated run passes video-hw decode at 0.452s with PSNR verify PASS at
+  0.348s, while FFmpeg Vulkan decode passes at 0.377s; direct PSNR also passes
+  with `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078756687.md`). The generated
   stream has 16 temporal units, 22 frame headers, 16 inter frames, and 5
   show-existing frames; the command skeleton reaches 17 decode commands with
-  bounded slots `0/1/2/3/...`. The remaining gap is the current single coding
-  scope / post-submit DPB readback design: it cannot return every displayed
-  frame once coded decode commands exceed the retained DPB readback samples.
+  bounded slots `0/1/2/3/...`.
   The same lag25 stress through fMP4 input also preserves the display-frame
   count (`decode_to_yuv ... --input-format mp4 --output-mode metadata` prints
-  `frames=16`) and passes metadata decode at 0.231s vs FFmpeg Vulkan fMP4 decode
-  0.311s:
-  `output/benchmark-backends-av1-1778077931.md` /
-  `output/benchmark-vulkan-av1-1778077931.md`. Its PSNR/NV12 row fails at the
-  same readback-display mapping guard
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078124794.md`).
+  `frames=16`) and passes video-hw decode at 0.455s with PSNR verify PASS at
+  0.270s vs FFmpeg Vulkan fMP4 decode 0.394s:
+  `output/benchmark-backends-av1-1778078783.md` /
+  `output/benchmark-vulkan-av1-1778078783.md`. Direct fMP4 PSNR passes with
+  `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778078756691.md`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)

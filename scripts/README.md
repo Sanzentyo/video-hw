@@ -198,7 +198,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
 - Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B / OBU 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`, AV1=`libaom-av1`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
 - Vulkan AV1 decode は既定で generated long-GOP OBU 入力（生成時 `-g 30 -lag-in-frames 0`）を測定対象にする。`--vulkan-av1-gop-size <N>` で GOP サイズ、`--vulkan-av1-lag-in-frames <N>` で libaom lookahead を変更できる。keyframe-only 比較が必要な場合は `--vulkan-av1-gop-size 1` を指定する。NVIDIA では `video-hw decode` と FFmpeg Vulkan decode を同じ入力で比較し、unsupported adapter の失敗理由も同じ report に残す。Vulkan AV1 encode は現行 `ash` binding が `VK_KHR_video_encode_av1` を公開していないため `unavailable` として記録する。
-- `--vulkan-av1-lag-in-frames 25` のような alt-ref/show-existing を含む入力は、現在の Vulkan AV1 実装の未対応範囲を明示的に測る負荷として使う。2026-05-06 の NVIDIA 実測では DPB slot replay は bounded slot に収まり、metadata decode は readback なし command submit として PASS し、表示フレーム数を報告する。一方、PSNR/NV12 readback は single command scope の最後に DPB image をまとめて読む設計のため、16 表示フレーム / 17 decode command の入力で `NV12 readback display mapping is not implemented` として FAIL する。単純に16 readback sampleを表示順として扱うと低PSNRになるため、誤った画素を返さず明示的に止める。
+- `--vulkan-av1-lag-in-frames 25` のような alt-ref/show-existing を含む入力は、Vulkan AV1 の DPB replay と表示フレーム選択を測る負荷として使う。2026-05-06 の NVIDIA 実測では DPB slot replay は bounded slot に収まり、metadata decode は readback なし command submit として PASS し、表示フレーム数を報告する。PSNR/NV12 readback は論理DPB slotと出力image layerを分離し、show-existingを含む表示フレームを正しいreadback layerへmapする。OBU/fMP4とも `psnr_y_min=inf` でPASS済み。
 - Vulkan AV1 decode で `--verify` を付けると、各 `video-hw` Vulkan adapter に対して同じ生成入力と測定に使った `decode_to_yuv` binary を `scripts/check_vulkan_av1_psnr.rs` に渡し、FFmpeg software decode reference との `psnr_y_min >= 60 dB` を統合レポートの `video-hw PSNR verify` 行として記録する。
 - `--vulkan-decode-input-format fmp4` を指定すると、Vulkan AV1 decode比較用入力を fragmented MP4 (`av01`) として生成し、`decode_to_yuv --input-format mp4` と FFmpeg MP4 demuxerで測定する。現状この指定は AV1 専用。
 - VideoToolbox AV1 は video-hw では未実装。macOS で `--backends vt --codec av1` を指定した場合、VT precise script は AV1 未実装を明示した FAIL report を生成し、統合 runner は parity 対象として成功扱いにしない。
@@ -247,8 +247,8 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 16 --gop-size 
 - `--decode-bin <PATH>` を指定すると、その `decode_to_yuv` binary をPSNR確認に使う。未指定かつ `--skip-build` なしの場合は debug example をbuildして使う。
 - `--input-format fmp4` は FFmpeg fragmented MP4 (`av01`) を生成し、`decode_to_yuv --input-format mp4` 経由で同じ PSNR 比較を行う。FFmpeg 生成時は `delay_moov` を使い、`av1C` に sequence header OBU が入った fMP4 を作る。
 - `--gop-size <N>` は生成入力の `libaom-av1 -g` を切り替える。既定は現在のサポート範囲に合わせて `1`。`N>1` は inter-frame/GOP replay の負荷として使う。
-- `--lag-in-frames <N>` は生成入力の libaom lookahead を切り替える。既定は `0`。`N>0` は alt-ref/show-existing を含む入力を作り、readback や表示フレーム選択の未対応範囲を検出するための負荷として使う。
-- AV1 metadata decode は PSNR 用の NV12 readback とは分離されており、readback なしで Vulkan decode command の record/submit を測る。PSNR check は従来どおり NV12 readback 必須なので、画素出力の未対応は `video-hw PSNR verify` 行で失敗として残る。
+- `--lag-in-frames <N>` は生成入力の libaom lookahead を切り替える。既定は `0`。`N>0` は alt-ref/show-existing を含む入力を作り、DPB replay、readback、表示フレーム選択の負荷として使う。
+- AV1 metadata decode は PSNR 用の NV12 readback とは分離されており、readback なしで Vulkan decode command の record/submit を測る。PSNR check は従来どおり NV12 readback 必須で、display frame to readback layer mapping も含めて検証する。
 - decode や PSNR setup で失敗した場合も FAIL markdown report を残す。
 - PASS/FAIL どちらの report にも、同じ入力を
   `scripts/inspect_av1_frame_types.rs --expect-inter-frame ...` で検査する

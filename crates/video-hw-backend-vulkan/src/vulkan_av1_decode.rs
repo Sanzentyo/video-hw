@@ -562,6 +562,7 @@ pub(crate) struct Av1DecodeInfoSkeleton {
     pub picture_info: Av1DecodePictureInfoSkeleton,
     pub setup_reference_info: StdVideoDecodeAV1ReferenceInfo,
     pub reference_slot_infos: Vec<StdVideoDecodeAV1ReferenceInfo>,
+    pub reference_base_array_layers: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,7 +570,9 @@ pub(crate) struct Av1DecodeFrameCommandSkeleton {
     pub frame_index: usize,
     pub temporal_unit_index: usize,
     pub setup_slot_index: i32,
+    pub dst_base_array_layer: u32,
     pub reference_slot_indices: Vec<i32>,
+    pub reference_base_array_layers: Vec<u32>,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
     pub tile_count: usize,
@@ -689,6 +692,7 @@ impl Av1DecodeBitstreamUploadPlan {
                 decode_info_index: record.decode_info_index,
                 setup_slot_index: record.setup_slot_index,
                 reference_slot_indices: record.reference_slot_indices,
+                reference_base_array_layers: record.reference_base_array_layers,
                 dst_base_array_layer: record.dst_base_array_layer,
                 src_buffer_offset: record.src_buffer_offset,
                 src_buffer_range: record.src_buffer_range,
@@ -743,8 +747,11 @@ impl Av1DecodeBitstreamUploadPlan {
             &setup_picture_resource,
             &mut setup_dpb_info,
         );
-        let reference_picture_resources = decode
-            .reference_picture_resources(picture_views.reference, &bundle.reference_slot_indices)?;
+        let reference_picture_resources = decode.reference_picture_resources(
+            picture_views.reference,
+            &bundle.reference_slot_indices,
+            &bundle.reference_base_array_layers,
+        )?;
         let reference_std_infos = decode.reference_std_infos(&bundle.reference_slot_indices);
         let mut reference_dpb_infos = decode.reference_dpb_slot_infos(&reference_std_infos);
         let reference_slots = decode.reference_slots(
@@ -875,6 +882,7 @@ pub(crate) struct Av1DecodeFrameRecordBundle {
     pub decode_info_index: usize,
     pub setup_slot_index: i32,
     pub reference_slot_indices: Vec<i32>,
+    pub reference_base_array_layers: Vec<u32>,
     pub dst_base_array_layer: u32,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
@@ -888,6 +896,7 @@ pub(crate) struct Av1DecodeFrameSubmitBundle {
     pub decode_info_index: usize,
     pub setup_slot_index: i32,
     pub reference_slot_indices: Vec<i32>,
+    pub reference_base_array_layers: Vec<u32>,
     pub dst_base_array_layer: u32,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
@@ -979,7 +988,14 @@ impl Av1DecodeCommandSkeleton {
         if self.begin_slots.is_empty() {
             return Err("AV1 decode image requires at least one begin slot".to_string());
         }
-        u32::try_from(self.begin_slots.len())
+        let begin_layers = self.begin_slots.len();
+        let frame_layers = self
+            .frames
+            .iter()
+            .map(|frame| usize::try_from(frame.dst_base_array_layer).unwrap_or(usize::MAX - 1) + 1)
+            .max()
+            .unwrap_or(0);
+        u32::try_from(begin_layers.max(frame_layers))
             .map_err(|_| "AV1 decode image array layer count exceeds u32 range".to_string())
     }
 
@@ -1103,7 +1119,7 @@ impl Av1DecodeCommandSkeleton {
                         frame.frame_index
                     ));
                 }
-                let slot = self
+                self
                     .begin_slots
                     .iter()
                     .find(|slot| slot.slot_index == frame.setup_slot_index)
@@ -1113,21 +1129,14 @@ impl Av1DecodeCommandSkeleton {
                             frame.frame_index, frame.setup_slot_index
                         )
                     })?;
-                let setup_slot_index = u32::try_from(frame.setup_slot_index)
-                    .map_err(|_| "AV1 frame setup slot index is negative".to_string())?;
-                if slot.base_array_layer != setup_slot_index {
-                    return Err(format!(
-                        "AV1 setup slot/base layer mismatch: slot={}, base_layer={}",
-                        frame.setup_slot_index, slot.base_array_layer
-                    ));
-                }
                 Ok(Av1DecodeFrameRecordBundle {
                     frame_index: frame.frame_index,
                     temporal_unit_index: frame.temporal_unit_index,
                     decode_info_index,
                     setup_slot_index: frame.setup_slot_index,
                     reference_slot_indices: frame.reference_slot_indices.clone(),
-                    dst_base_array_layer: slot.base_array_layer,
+                    reference_base_array_layers: frame.reference_base_array_layers.clone(),
+                    dst_base_array_layer: frame.dst_base_array_layer,
                     src_buffer_offset: frame.src_buffer_offset,
                     src_buffer_range: frame.src_buffer_range,
                     tile_count: frame.tile_count,
@@ -1265,13 +1274,25 @@ impl Av1DecodeInfoSkeleton {
         &self,
         image_view: vk::ImageView,
         reference_slot_indices: &[i32],
+        reference_base_array_layers: &[u32],
     ) -> Result<Vec<vk::VideoPictureResourceInfoKHR<'a>>, String> {
+        if reference_slot_indices.len() != reference_base_array_layers.len() {
+            return Err(format!(
+                "AV1 reference slot/base-layer count mismatch: slots={}, base_layers={}",
+                reference_slot_indices.len(),
+                reference_base_array_layers.len()
+            ));
+        }
         reference_slot_indices
             .iter()
-            .map(|slot_index| {
-                let base_array_layer = u32::try_from(*slot_index)
-                    .map_err(|_| format!("AV1 reference slot index is negative: {slot_index}"))?;
-                Ok(self.dst_picture_resource(image_view, base_array_layer))
+            .zip(reference_base_array_layers)
+            .map(|(slot_index, base_array_layer)| {
+                if *slot_index < 0 {
+                    return Err(format!(
+                        "AV1 reference slot index is negative: {slot_index}"
+                    ));
+                }
+                Ok(self.dst_picture_resource(image_view, *base_array_layer))
             })
             .collect()
     }
@@ -1745,6 +1766,10 @@ pub(crate) fn decode_av1_bitstream_to_nv12_frames(
 }
 
 pub(crate) fn count_av1_display_frames(bitstream: &[u8]) -> Result<usize, String> {
+    Ok(av1_display_readback_indices(bitstream)?.len())
+}
+
+pub(crate) fn av1_display_readback_indices(bitstream: &[u8]) -> Result<Vec<u32>, String> {
     let records = parse_av1_low_overhead_obus(bitstream)?;
     let sequence_header = records
         .iter()
@@ -1756,30 +1781,59 @@ pub(crate) fn count_av1_display_frames(bitstream: &[u8]) -> Result<usize, String
         .transpose()?
         .ok_or_else(|| "missing AV1 sequence header OBU".to_string())?;
     let mut dpb = OxideAv1Dpb::new();
-    records
+    let mut reference_base_array_layers: [Option<u32>; 8] = [None; 8];
+    let mut decode_index = 0_u32;
+    let mut display_indices = Vec::new();
+
+    for record in records
         .iter()
         .filter(|record| matches!(record.obu_type, Av1ObuType::Frame | Av1ObuType::FrameHeader))
-        .try_fold(0usize, |count, record| {
-            let payload = bitstream
-                .get(record.payload_range.clone())
-                .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
-            let frame_header = match record.obu_type {
-                Av1ObuType::Frame => {
-                    let (frame_header, _) =
-                        parse_frame_obu_with_dpb(&sequence_header, payload, &dpb)
-                            .map_err(|err| format!("oxideav AV1 frame OBU parse failed: {err}"))?;
-                    frame_header
+    {
+        let payload = bitstream
+            .get(record.payload_range.clone())
+            .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
+        let frame_header = match record.obu_type {
+            Av1ObuType::Frame => {
+                let (frame_header, _) =
+                    parse_frame_obu_with_dpb(&sequence_header, payload, &dpb)
+                        .map_err(|err| format!("oxideav AV1 frame OBU parse failed: {err}"))?;
+                frame_header
+            }
+            Av1ObuType::FrameHeader => parse_frame_header_with_dpb(&sequence_header, payload, &dpb)
+                .map_err(|err| format!("oxideav AV1 frame-header parse failed: {err}"))?,
+            _ => unreachable!("filtered to AV1 frame-bearing OBUs"),
+        };
+
+        if frame_header.show_existing_frame {
+            let map_idx = usize::from(frame_header.frame_to_show_map_idx);
+            let base_array_layer = reference_base_array_layers
+                .get(map_idx)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    format!(
+                        "AV1 show-existing frame references unavailable frame map index {map_idx}"
+                    )
+                })?;
+            display_indices.push(base_array_layer);
+        } else {
+            if frame_header.show_frame {
+                display_indices.push(decode_index);
+            }
+            for (ref_index, base_array_layer) in reference_base_array_layers.iter_mut().enumerate()
+            {
+                if (frame_header.refresh_frame_flags & (1_u8 << ref_index)) != 0 {
+                    *base_array_layer = Some(decode_index);
                 }
-                Av1ObuType::FrameHeader => {
-                    parse_frame_header_with_dpb(&sequence_header, payload, &dpb)
-                        .map_err(|err| format!("oxideav AV1 frame-header parse failed: {err}"))?
-                }
-                _ => unreachable!("filtered to AV1 frame-bearing OBUs"),
-            };
-            let shown = frame_header.show_frame || frame_header.show_existing_frame;
-            update_oxideav_dpb_from_frame_header(&mut dpb, &frame_header);
-            Ok(count + usize::from(shown))
-        })
+            }
+            decode_index = decode_index.checked_add(1).ok_or_else(|| {
+                "AV1 decode index overflow while mapping display frames".to_string()
+            })?;
+        }
+        update_oxideav_dpb_from_frame_header(&mut dpb, &frame_header);
+    }
+
+    Ok(display_indices)
 }
 
 pub(crate) fn submit_av1_bitstream_without_readback(
@@ -1959,6 +2013,7 @@ fn apply_av1_reference_name_slot_replay(
     #[derive(Clone, Copy)]
     struct ReferenceFrameReplayState {
         slot_index: i32,
+        base_array_layer: u32,
         order_hint: u8,
         reference_info: StdVideoDecodeAV1ReferenceInfo,
     }
@@ -1968,6 +2023,8 @@ fn apply_av1_reference_name_slot_replay(
     for (frame_index, decode) in decodes.iter_mut().enumerate() {
         let setup_slot_index = i32::try_from(frame_index % max_dpb_slots)
             .map_err(|_| "AV1 replay frame index exceeds i32 slot range".to_string())?;
+        let setup_base_array_layer = u32::try_from(frame_index)
+            .map_err(|_| "AV1 replay frame index exceeds u32 layer range".to_string())?;
         if let Some(summary) = decode.picture_info.frame_header_summary {
             let mut ref_frame_sign_bias = 0_u8;
             if summary.is_key_frame() {
@@ -1977,6 +2034,7 @@ fn apply_av1_reference_name_slot_replay(
                     overrides.order_hints = [0; 8];
                 }
                 decode.reference_slot_infos.clear();
+                decode.reference_base_array_layers.clear();
             } else {
                 let mut order_hints = [0_u8; 8];
                 for (name_index, ref_frame_idx) in summary.ref_frame_idx.iter().enumerate() {
@@ -2026,6 +2084,23 @@ fn apply_av1_reference_name_slot_replay(
                             })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
+                decode.reference_base_array_layers = decode
+                    .reference_slot_indices()
+                    .into_iter()
+                    .map(|slot_index| {
+                        reference_frame_slots
+                            .iter()
+                            .flatten()
+                            .find_map(|state| {
+                                (state.slot_index == slot_index).then_some(state.base_array_layer)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "AV1 reference slot {slot_index} is missing base array layer"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
             }
 
             let mut setup_reference_info = av1_std_reference_info(&decode.picture_info);
@@ -2035,6 +2110,7 @@ fn apply_av1_reference_name_slot_replay(
                 if (summary.refresh_frame_flags & (1_u8 << ref_index)) != 0 {
                     *reference_frame_slot = Some(ReferenceFrameReplayState {
                         slot_index: setup_slot_index,
+                        base_array_layer: setup_base_array_layer,
                         order_hint: decode.picture_info.std_picture_info.OrderHint,
                         reference_info: setup_reference_info,
                     });
@@ -2051,10 +2127,12 @@ fn apply_av1_reference_name_slot_replay(
                 [decode.picture_info.std_picture_info.OrderHint; 8];
             reference_frame_slots.fill(Some(ReferenceFrameReplayState {
                 slot_index: setup_slot_index,
+                base_array_layer: setup_base_array_layer,
                 order_hint: decode.picture_info.std_picture_info.OrderHint,
                 reference_info: setup_reference_info,
             }));
             decode.reference_slot_infos.clear();
+            decode.reference_base_array_layers.clear();
             decode.setup_reference_info = setup_reference_info;
         }
     }
@@ -2081,6 +2159,7 @@ fn build_av1_decode_info_skeleton_from_submit(
         coded_height,
         setup_reference_info: av1_std_reference_info(&rebased_picture_info),
         reference_slot_infos: Vec::new(),
+        reference_base_array_layers: Vec::new(),
         picture_info: rebased_picture_info,
     })
 }
@@ -2232,7 +2311,10 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
                 frame_index,
                 temporal_unit_index: decode.temporal_unit_index,
                 setup_slot_index,
+                dst_base_array_layer: u32::try_from(frame_index)
+                    .map_err(|_| "AV1 dst base array layer exceeds u32 range".to_string())?,
                 reference_slot_indices: decode.reference_slot_indices(),
+                reference_base_array_layers: decode.reference_base_array_layers.clone(),
                 src_buffer_offset: decode.src_buffer_offset,
                 src_buffer_range: decode.src_buffer_range,
                 tile_count: decode.tile_count(),
@@ -6372,6 +6454,7 @@ mod tests {
             coded_height: 180,
             setup_reference_info: av1_std_reference_info(&picture),
             reference_slot_infos: Vec::new(),
+            reference_base_array_layers: Vec::new(),
             picture_info: picture,
         };
         let command = build_av1_key_frame_decode_command_skeleton_from_decodes(&[decode], 8)
@@ -6428,6 +6511,7 @@ mod tests {
                     coded_height: 180,
                     setup_reference_info: av1_std_reference_info(&picture_info),
                     reference_slot_infos: Vec::new(),
+                    reference_base_array_layers: Vec::new(),
                     picture_info,
                 }
             })
@@ -6600,7 +6684,7 @@ mod tests {
         assert_eq!(image_plan.format, vk::Format::G8_B8R8_2PLANE_420_UNORM);
         assert_eq!(image_plan.extent.width, 320);
         assert_eq!(image_plan.extent.height, 180);
-        assert_eq!(image_plan.array_layers, 2);
+        assert_eq!(image_plan.array_layers, 3);
         assert!(
             image_plan
                 .usage
@@ -6617,7 +6701,7 @@ mod tests {
         assert_eq!(image_create_info.format, image_plan.format);
         assert_eq!(image_create_info.extent.width, 320);
         assert_eq!(image_create_info.extent.height, 180);
-        assert_eq!(image_create_info.array_layers, 2);
+        assert_eq!(image_create_info.array_layers, 3);
         assert_eq!(image_create_info.usage, image_plan.usage);
         let source_barrier = Av1DecodeCommandSkeleton::vk_decode_source_memory_barrier();
         assert_eq!(source_barrier.src_stage_mask, vk::PipelineStageFlags2::HOST);
@@ -6645,14 +6729,14 @@ mod tests {
             image_barrier.dst_access_mask,
             vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
         );
-        assert_eq!(image_barrier.subresource_range.layer_count, 2);
+        assert_eq!(image_barrier.subresource_range.layer_count, 3);
         let readback_plan = command
             .decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM)
             .expect("NV12 readback plan should be built");
-        assert_eq!(readback_plan.sample_count, 2);
+        assert_eq!(readback_plan.sample_count, 3);
         assert_eq!(readback_plan.sample_stride, 320 * 180 + 320 * 90);
-        assert_eq!(readback_plan.buffer_size, (320 * 180 + 320 * 90) * 2);
-        assert_eq!(readback_plan.regions.len(), 4);
+        assert_eq!(readback_plan.buffer_size, (320 * 180 + 320 * 90) * 3);
+        assert_eq!(readback_plan.regions.len(), 6);
         assert_eq!(
             readback_plan.regions[0].image_subresource.aspect_mask,
             vk::ImageAspectFlags::PLANE_0
@@ -6679,7 +6763,7 @@ mod tests {
         assert_eq!(frame_resources.len(), 3);
         assert_eq!(frame_resources[0].base_array_layer, 0);
         assert_eq!(frame_resources[1].base_array_layer, 1);
-        assert_eq!(frame_resources[2].base_array_layer, 0);
+        assert_eq!(frame_resources[2].base_array_layer, 2);
         assert_eq!(frame_resources[2].coded_extent.width, 320);
         assert_eq!(frame_resources[2].coded_extent.height, 180);
 
@@ -6695,6 +6779,7 @@ mod tests {
                     decode_info_index: 0,
                     setup_slot_index: 0,
                     reference_slot_indices: vec![],
+                    reference_base_array_layers: vec![],
                     dst_base_array_layer: 0,
                     src_buffer_offset: command.frames[0].src_buffer_offset,
                     src_buffer_range: 3,
@@ -6706,6 +6791,7 @@ mod tests {
                     decode_info_index: 1,
                     setup_slot_index: 1,
                     reference_slot_indices: vec![],
+                    reference_base_array_layers: vec![],
                     dst_base_array_layer: 1,
                     src_buffer_offset: command.frames[1].src_buffer_offset,
                     src_buffer_range: 4,
@@ -6717,7 +6803,8 @@ mod tests {
                     decode_info_index: 2,
                     setup_slot_index: 0,
                     reference_slot_indices: vec![],
-                    dst_base_array_layer: 0,
+                    reference_base_array_layers: vec![],
+                    dst_base_array_layer: 2,
                     src_buffer_offset: command.frames[2].src_buffer_offset,
                     src_buffer_range: 5,
                     tile_count: 1,
@@ -6859,6 +6946,7 @@ mod tests {
                     decode_info_index: 0,
                     setup_slot_index: 0,
                     reference_slot_indices: vec![],
+                    reference_base_array_layers: vec![],
                     dst_base_array_layer: 0,
                     src_buffer_offset: 0,
                     src_buffer_range: 8,
@@ -6871,6 +6959,7 @@ mod tests {
                     decode_info_index: 1,
                     setup_slot_index: 1,
                     reference_slot_indices: vec![],
+                    reference_base_array_layers: vec![],
                     dst_base_array_layer: 1,
                     src_buffer_offset: 16,
                     src_buffer_range: 8,
@@ -7122,7 +7211,9 @@ mod tests {
                 frame_index: 0,
                 temporal_unit_index: 0,
                 setup_slot_index: 1,
+                dst_base_array_layer: 0,
                 reference_slot_indices: vec![],
+                reference_base_array_layers: vec![],
                 src_buffer_offset: 12,
                 src_buffer_range: 3,
                 tile_count: 1,
@@ -7137,7 +7228,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_record_bundles_reject_slot_base_layer_mismatch() {
+    fn frame_record_bundles_allow_slot_base_layer_decoupling() {
         let command = Av1DecodeCommandSkeleton {
             coded_width: 320,
             coded_height: 180,
@@ -7149,18 +7240,20 @@ mod tests {
                 frame_index: 0,
                 temporal_unit_index: 0,
                 setup_slot_index: 1,
+                dst_base_array_layer: 7,
                 reference_slot_indices: vec![],
+                reference_base_array_layers: vec![],
                 src_buffer_offset: 12,
                 src_buffer_range: 3,
                 tile_count: 1,
             }],
         };
 
-        let err = command
+        let resources = command
             .frame_picture_resources(vk::ImageView::null())
-            .expect_err("slot/base layer mismatch should be rejected");
+            .expect("logical DPB slot and output layer may differ");
 
-        assert!(err.contains("setup slot/base layer mismatch"));
+        assert_eq!(resources[0].base_array_layer, 7);
     }
 
     #[test]

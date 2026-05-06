@@ -16,13 +16,13 @@ use crate::{
     argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
         Av1DecodeCommandVisit, Av1DecodePictureViews, Av1DecodePrerequisiteProbe,
-        build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
-        build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
-        build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
-        count_av1_display_frames, decode_av1_bitstream_to_nv12_frames,
-        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
-        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
-        submit_av1_bitstream_without_readback,
+        av1_display_readback_indices, build_av1_aligned_key_frame_decode_command_skeleton,
+        build_av1_decode_info_skeleton, build_av1_decode_info_skeletons,
+        build_av1_decode_picture_info_skeleton, build_av1_decode_submit_skeleton,
+        build_av1_key_frame_decode_command_skeleton, count_av1_display_frames,
+        decode_av1_bitstream_to_nv12_frames, extract_av1_std_sequence_header,
+        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
+        probe_av1_decode_session_parameters_for_bitstream, submit_av1_bitstream_without_readback,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -400,30 +400,33 @@ impl VulkanDecoderAdapter {
                 })
                 .collect();
         }
-        let display_frame_count = count_av1_display_frames(bitstream).map_err(|err| {
+        let display_readback_indices = av1_display_readback_indices(bitstream).map_err(|err| {
             BackendError::UnsupportedConfig(format!(
-                "Vulkan AV1 decode could not count display frames: {err}; {}",
+                "Vulkan AV1 decode could not map display frames: {err}; {}",
                 av1_decode_blocker_message_with_bitstream(bitstream)
             ))
         })?;
-        if display_frame_count != decodes.len() {
-            return Err(BackendError::UnsupportedConfig(format!(
-                "Vulkan AV1 NV12 readback display mapping is not implemented for streams where display frame count ({display_frame_count}) differs from decode command count ({}); {}",
-                decodes.len(),
-                av1_decode_blocker_message_with_bitstream(bitstream)
-            )));
-        }
         let readbacks = decode_av1_bitstream_to_nv12_frames(bitstream).map_err(|err| {
             BackendError::UnsupportedConfig(format!(
                 "Vulkan AV1 decode submit/readback failed: {err}; {}",
                 av1_decode_blocker_message_with_bitstream(bitstream)
             ))
         })?;
-        if readbacks.len() < decodes.len() {
+        let required_readback_count = display_readback_indices
+            .iter()
+            .copied()
+            .map(|index| {
+                usize::try_from(index)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+            })
+            .max()
+            .unwrap_or(0);
+        if readbacks.len() < required_readback_count {
             return Err(BackendError::UnsupportedConfig(format!(
                 "Vulkan AV1 decode readback frame count is too small: got {}, need {}; {}",
                 readbacks.len(),
-                decodes.len(),
+                required_readback_count,
                 av1_decode_blocker_message_with_bitstream(bitstream)
             )));
         }
@@ -437,11 +440,22 @@ impl VulkanDecoderAdapter {
             BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
         })?;
         let pts_step = decode_pts_step(self.config.fps);
-        readbacks
+        display_readback_indices
             .into_iter()
-            .take(decodes.len())
             .enumerate()
-            .map(|(index, readback)| {
+            .map(|(index, readback_index)| {
+                let readback = readbacks
+                    .get(usize::try_from(readback_index).map_err(|_| {
+                        BackendError::InvalidInput(
+                            "AV1 display readback index does not fit usize".to_string(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        BackendError::UnsupportedConfig(format!(
+                            "Vulkan AV1 display readback index {readback_index} is out of range for {} samples",
+                            readbacks.len()
+                        ))
+                    })?;
                 let pts = self
                     .next_pts_90k
                     .saturating_add(usize_to_i64(index).saturating_mul(pts_step));

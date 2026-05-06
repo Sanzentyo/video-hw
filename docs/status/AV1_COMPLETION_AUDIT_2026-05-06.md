@@ -21,7 +21,7 @@ better.
 | FFmpeg parity comparison | `scripts/benchmark_ffmpeg_backends.rs`; NV/Intel precise scripts; `output/*av1*.md` reports listed in `AV1_BACKEND_STATUS_2026-05-06.md` | NVIDIA/Intel AV1 parity is recorded; Vulkan keyframe-only AV1 decode parity is recorded | Done for NVIDIA/Intel; partial for Vulkan |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; `scripts/check_av1_fmp4_roundtrip.rs`; `scripts/check_vulkan_av1_psnr.rs`; fMP4 access benchmark reports | Encode/decode and fMP4 decode correctness are checked against FFmpeg references; Vulkan generated OBU and fMP4 GOP30 now pass at `psnr_y_min=inf` | Done for supported NVIDIA/Intel paths; generated-GOP partial for Vulkan |
 | Vulkan AV1 decode | `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076585814.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076599799.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778077258665.md`; `output/benchmark-vulkan-av1-1778068460.md`; `output/benchmark-vulkan-av1-1778068469.md`; `output/benchmark-vulkan-av1-1778076588.md`; `output/benchmark-vulkan-av1-1778076603.md` | Generated keyframe-only OBU/fMP4, short GOP OBU, long-GOP OBU, and long-GOP fMP4 decode on NVIDIA pass PSNR; integrated Vulkan benchmark `--verify` records passing OBU and fMP4 PSNR rows for generated GOP30/lag0 input using the measured `decode_to_yuv` binary | Partial |
-| Vulkan AV1 inter-frame/GOP replay | `scripts/check_vulkan_av1_psnr.rs --gop-size 2`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30 --lag-in-frames 25`; reports `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778078117672.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778078124794.md`; `output/benchmark-vulkan-av1-1778077834.md`; `output/benchmark-vulkan-av1-1778077931.md` | Generated GOP replay with `lag-in-frames 0` passes with `psnr_y_min=inf`; bounded-DPB replay now avoids unbounded reference slot indexes. `lag-in-frames 25` creates alt-ref/show-existing input; OBU and fMP4 metadata decode command submit pass and report 16 displayed frames. PSNR/NV12 readback now fails with an explicit `NV12 readback display mapping is not implemented` guard because the current post-submit DPB readback cannot safely map 16 display frames from 17 decode commands; a direct display-order trial produced `psnr_y_min=19.9800`, so returning pixels here would be incorrect. | Partial |
+| Vulkan AV1 inter-frame/GOP replay | `scripts/check_vulkan_av1_psnr.rs --gop-size 2`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30 --lag-in-frames 25`; reports `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778078756687.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778078756691.md`; `output/benchmark-vulkan-av1-1778078784.md`; `output/benchmark-vulkan-av1-1778078783.md` | Generated GOP replay with `lag-in-frames 0` passes with `psnr_y_min=inf`; bounded-DPB replay now avoids unbounded reference slot indexes. `lag-in-frames 25` creates alt-ref/show-existing input; OBU and fMP4 metadata decode command submit pass and report 16 displayed frames. PSNR/NV12 readback now maps displayed frames to decoupled output image layers and passes for both OBU and fMP4 with `psnr_y_min=inf`. | Done for generated NVIDIA stress inputs |
 | Vulkan AV1 encode | `scripts/check_vulkan_av1_encode_bindings.rs`; `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md` | `ash 0.38.0+1.3.281` exposes AV1 decode bindings but no AV1 encode bindings | Blocked |
 | Intel Vulkan AV1 | `output/benchmark-vulkan-av1-1778068460.md`; `docs/status/AV1_BACKEND_STATUS_2026-05-06.md` | FFmpeg Vulkan AV1 decode exits with Windows access violation on this host; FFmpeg `av1_vulkan` encode reports unsupported implementation | Not a passing target on this host |
 | VideoToolbox AV1 | `crates/video-hw-backend-vt/src/vt_backend.rs`; `scripts/benchmark_ffmpeg_vt_precise.rs`; `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests` | Current contract explicitly reports unsupported AV1 and cross-target check passes | Not implemented |
@@ -29,11 +29,9 @@ better.
 ## Current Blockers
 
 1. Vulkan AV1 decode is still not an arbitrary-stream support claim. Generated
-   keyframe-only, short GOP, long GOP OBU, and long GOP fMP4 pass PSNR with
-   `lag-in-frames 0`, but `lag-in-frames 25` alt-ref/show-existing input fails
-   before PSNR because the current single coding scope / post-submit DPB
-   readback path cannot emit every displayed frame when decode-command count
-   exceeds retained readback samples.
+   keyframe-only, short GOP, long GOP OBU/fMP4, and `lag-in-frames 25`
+   alt-ref/show-existing OBU/fMP4 now pass PSNR on NVIDIA, but broader
+   arbitrary-stream hardening still needs more corpus coverage.
 2. Vulkan AV1 encode cannot be implemented safely with the current `ash`
    binding set because the required `VK_KHR_video_encode_av1` symbols are not
    exposed.
@@ -44,6 +42,6 @@ better.
 
 The objective is not complete. NVIDIA and Intel oneVPL AV1 encode/decode plus
 AV1 fMP4 read/write are implemented and verified against FFmpeg. Vulkan AV1 is
-verified for generated keyframe-only, short-GOP, long-GOP OBU, and long-GOP
-fMP4 decode on NVIDIA; arbitrary-stream Vulkan decode hardening, Vulkan AV1
-encode, and VideoToolbox AV1 remain open.
+verified for generated keyframe-only, short-GOP, long-GOP OBU/fMP4, and
+alt-ref/show-existing OBU/fMP4 decode on NVIDIA; arbitrary-stream Vulkan decode
+hardening, Vulkan AV1 encode, and VideoToolbox AV1 remain open.
