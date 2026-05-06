@@ -108,6 +108,18 @@ pub(crate) struct Av1DecodeCommandSkeleton {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeFrameRecordBundle {
+    pub frame_index: usize,
+    pub temporal_unit_index: usize,
+    pub decode_info_index: usize,
+    pub setup_slot_index: i32,
+    pub dst_base_array_layer: u32,
+    pub src_buffer_offset: u64,
+    pub src_buffer_range: u64,
+    pub tile_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Av1DecodeRecordStep {
     BeginCoding {
         reference_slot_count: usize,
@@ -178,6 +190,41 @@ impl Av1DecodeCommandSkeleton {
                     .coded_extent(self.coded_extent())
                     .base_array_layer(slot.base_array_layer)
                     .image_view_binding(image_view))
+            })
+            .collect()
+    }
+
+    pub(crate) fn frame_record_bundles(&self) -> Result<Vec<Av1DecodeFrameRecordBundle>, String> {
+        self.frames
+            .iter()
+            .enumerate()
+            .map(|(decode_info_index, frame)| {
+                if frame.frame_index != decode_info_index {
+                    return Err(format!(
+                        "AV1 frame/decode-info index mismatch: frame_index={}, decode_info_index={decode_info_index}",
+                        frame.frame_index
+                    ));
+                }
+                let slot = self
+                    .begin_slots
+                    .iter()
+                    .find(|slot| slot.slot_index == frame.setup_slot_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "AV1 frame {} references unavailable setup slot {}",
+                            frame.frame_index, frame.setup_slot_index
+                        )
+                    })?;
+                Ok(Av1DecodeFrameRecordBundle {
+                    frame_index: frame.frame_index,
+                    temporal_unit_index: frame.temporal_unit_index,
+                    decode_info_index,
+                    setup_slot_index: frame.setup_slot_index,
+                    dst_base_array_layer: slot.base_array_layer,
+                    src_buffer_offset: frame.src_buffer_offset,
+                    src_buffer_range: frame.src_buffer_range,
+                    tile_count: frame.tile_count,
+                })
             })
             .collect()
     }
@@ -2482,6 +2529,45 @@ mod tests {
         assert_eq!(frame_resources[2].coded_extent.width, 320);
         assert_eq!(frame_resources[2].coded_extent.height, 180);
 
+        let frame_bundles = command
+            .frame_record_bundles()
+            .expect("frame bundles should align with decode info indices");
+        assert_eq!(
+            frame_bundles,
+            vec![
+                Av1DecodeFrameRecordBundle {
+                    frame_index: 0,
+                    temporal_unit_index: 0,
+                    decode_info_index: 0,
+                    setup_slot_index: 0,
+                    dst_base_array_layer: 0,
+                    src_buffer_offset: command.frames[0].src_buffer_offset,
+                    src_buffer_range: 1,
+                    tile_count: 1,
+                },
+                Av1DecodeFrameRecordBundle {
+                    frame_index: 1,
+                    temporal_unit_index: 1,
+                    decode_info_index: 1,
+                    setup_slot_index: 1,
+                    dst_base_array_layer: 1,
+                    src_buffer_offset: command.frames[1].src_buffer_offset,
+                    src_buffer_range: 2,
+                    tile_count: 1,
+                },
+                Av1DecodeFrameRecordBundle {
+                    frame_index: 2,
+                    temporal_unit_index: 2,
+                    decode_info_index: 2,
+                    setup_slot_index: 0,
+                    dst_base_array_layer: 0,
+                    src_buffer_offset: command.frames[2].src_buffer_offset,
+                    src_buffer_range: 3,
+                    tile_count: 1,
+                },
+            ]
+        );
+
         let begin_reference_infos = command.begin_std_reference_infos();
         assert_eq!(begin_reference_infos.len(), 2);
         assert_eq!(
@@ -2604,6 +2690,32 @@ mod tests {
             .expect_err("resource count mismatch should be rejected");
 
         assert!(err.contains("picture resource count mismatch"));
+    }
+
+    #[test]
+    fn frame_record_bundles_reject_unavailable_setup_slots() {
+        let command = Av1DecodeCommandSkeleton {
+            coded_width: 320,
+            coded_height: 180,
+            begin_slots: vec![Av1BeginCodingSlotSkeleton {
+                slot_index: 0,
+                base_array_layer: 0,
+            }],
+            frames: vec![Av1DecodeFrameCommandSkeleton {
+                frame_index: 0,
+                temporal_unit_index: 0,
+                setup_slot_index: 1,
+                src_buffer_offset: 12,
+                src_buffer_range: 3,
+                tile_count: 1,
+            }],
+        };
+
+        let err = command
+            .frame_record_bundles()
+            .expect_err("unavailable setup slot should be rejected");
+
+        assert!(err.contains("unavailable setup slot"));
     }
 
     #[test]

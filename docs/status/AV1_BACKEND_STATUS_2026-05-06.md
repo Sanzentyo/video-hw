@@ -135,6 +135,9 @@ Current implementation progress:
   begin-coding, RESET control, one decode step per frame, and end-coding;
 - frame-level picture resource scaffolding now maps each planned decode frame
   to the destination array layer selected by its setup DPB slot;
+- frame record bundles now tie each decode-info index to its frame metadata,
+  source range, setup slot, and destination base array layer before the future
+  `vkCmdDecodeVideoKHR` loop consumes them;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

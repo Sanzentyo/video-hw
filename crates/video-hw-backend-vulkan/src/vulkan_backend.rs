@@ -738,6 +738,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                         let frame_resources = command
                             .frame_picture_resources(vk::ImageView::null())
                             .unwrap_or_default();
+                        let frame_bundles = command.frame_record_bundles().unwrap_or_default();
                         let begin_reference_infos = command.begin_std_reference_infos();
                         let mut begin_dpb_infos = command
                             .begin_dpb_slot_infos(&begin_reference_infos)
@@ -756,13 +757,14 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                         let end_coding_info = command.vk_end_coding_info();
                         let record_steps = command.record_steps();
                         format!(
-                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, frame_resources={}, begin_reference_slots={}, vk_begin_refs={}, reset={}, end_flags_empty={}, record_steps={}, slots={})",
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, frame_resources={}, frame_bundles={}, begin_reference_slots={}, vk_begin_refs={}, reset={}, end_flags_empty={}, record_steps={}, slots={})",
                             command.frames.len(),
                             command.coded_width,
                             command.coded_height,
                             command.begin_slots.len(),
                             begin_resources.len(),
                             frame_resources.len(),
+                            frame_bundles.len(),
                             begin_reference_slots.len(),
                             begin_coding_info.reference_slot_count,
                             reset_control.flags.contains(vk::VideoCodingControlFlagsKHR::RESET),
