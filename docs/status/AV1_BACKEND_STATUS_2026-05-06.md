@@ -205,8 +205,13 @@ Current implementation progress:
   fence, maps the readback allocation, and passes on the current
   Windows/Intel-visible adapter with `readback_bytes=86400`,
   `readback_mapped_bytes=86400`, `readback_non_zero=true`, and
-  `readback_sample_len=256`; NV12 AV1 readback planning mirrors the HEVC
-  plane-copy layout
+  `readback_sample_len=256`; the live probe can now read an external AV1
+  low-overhead OBU elementary stream through
+  `VIDEO_HW_VULKAN_AV1_PROBE_BITSTREAM_PATH`, and
+  `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
+  generates a one-frame `libaom-av1` OBU with FFmpeg and passes the same
+  submit/readback gate with `upload_bytes=1536`; NV12 AV1 readback planning
+  mirrors the HEVC plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
@@ -222,6 +227,7 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo check -p video-hw-backend-vulkan --features backend-vulkan`
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -244,8 +250,8 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Replace the reduced-still synthetic probe payload with real generated AV1
-   key-frame-only input and keep the submit/readback path passing.
+1. Promote the FFmpeg-generated one-frame OBU submit/readback probe into a
+   reusable decode output path for `decode_to_yuv`.
 2. Add Vulkan AV1 decode PSNR check against FFmpeg software decode.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and

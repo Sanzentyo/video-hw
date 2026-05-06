@@ -4981,8 +4981,15 @@ mod tests {
     #[test]
     #[ignore = "live Vulkan AV1 command-buffer record probe; opt in explicitly"]
     fn live_av1_decode_command_record_probe_reports_status() {
-        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
-        bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12, 0x13, 0x14]));
+        let bitstream = if let Ok(path) = std::env::var("VIDEO_HW_VULKAN_AV1_PROBE_BITSTREAM_PATH")
+        {
+            std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("failed to read AV1 probe bitstream {path}: {err}"))
+        } else {
+            let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+            bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12, 0x13, 0x14]));
+            bitstream
+        };
 
         match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
             Ok(probe) => {

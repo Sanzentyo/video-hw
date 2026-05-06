@@ -197,16 +197,19 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --no-record-com
 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --record-mode barrier_only
 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --submit-command-buffer
 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback
+cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1
 ```
 
 - 生成レポート: `output/vulkan-av1-record-probe/vulkan-av1-record-probe-<epoch>.md`
 - 既定で `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` を付け、ignored live test を通じて AV1 decode command buffer の begin/reset/decode/end record probe を実行する。
+- `--input <obu>` で AV1 low-overhead OBU elementary stream を live probe に渡せる。
+- `--generate-ffmpeg-obu` は FFmpeg `libaom-av1` で1フレームの OBU elementary stream を生成して、その入力で live probe を走らせる。`--ffmpeg` または `FFMPEG_PATH` で ffmpeg 実行ファイルを指定できる。
 - `--record-mode barrier_only|begin_end|reset_end|first_decode|full` で command-buffer record の停止位置を切り分けられる。
 - `--submit-command-buffer` で record 済み command buffer を queue submit し、5秒 fence wait まで進める。
 - `--readback` は `--record-mode full` / submit を強制し、decode output image から NV12 plane を readback buffer へ copy して map する。
 - `--no-record-command-buffer` は通常diagnosticsと同じく driver command path を発行せず、session/source/image/barrier/command sequence の構築だけを確認する。
-- 2026-05-06 の Windows/Intel-visible 環境では `--no-record-command-buffer` / `--record-mode barrier_only` / `begin_end` / `reset_end` / `first_decode` / `full` が PASS。`--record-mode full --submit-command-buffer` も PASS し、queue submit と fence wait まで到達する。`--readback` も PASS し、`readback_bytes=86400`、`readback_mapped_bytes=86400`、`readback_non_zero=true` を確認済み。
-- これは synthetic reduced-still probe の submit/readback であり、PSNR や実AV1 file decode parity ではない。Vulkan AV1 backend はまだ実装完了扱いにしない。
+- 2026-05-06 の Windows/Intel-visible 環境では `--no-record-command-buffer` / `--record-mode barrier_only` / `begin_end` / `reset_end` / `first_decode` / `full` が PASS。`--record-mode full --submit-command-buffer` も PASS し、queue submit と fence wait まで到達する。`--readback` も synthetic reduced-still OBU と FFmpeg生成OBUの両方で PASS し、`readback_bytes=86400`、`readback_mapped_bytes=86400`、`readback_non_zero=true` を確認済み。
+- これは isolated probe の submit/readback であり、PSNR や実AV1 file decode parity ではない。Vulkan AV1 backend はまだ実装完了扱いにしない。
 
 ### 12) fMP4 decode access pattern benchmark
 

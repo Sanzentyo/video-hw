@@ -180,7 +180,10 @@ Tasks:
    plane offset alignment; the opt-in `--readback` live probe records the
    decode-output image transition, copies both NV12 planes into a host-visible
    buffer, orders transfer writes before host reads, submits the command buffer,
-   and maps the full planned byte range.
+   and maps the full planned byte range. The same probe can now accept an
+   external AV1 low-overhead OBU stream, and
+   `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
+   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback.
 5. Convert NV12 to RGB24 through the existing facade conversion path.
 
 Acceptance:
