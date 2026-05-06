@@ -108,7 +108,8 @@ Tasks:
    slot chain; key-frame command skeleton extraction also assigns frames to
    deterministic rotating setup slots, and decode-info construction can attach
    that setup slot. Begin-coding DPB slot bindings and picture resources are
-   now modeled. Vulkan command recording remains.
+   now modeled, including AV1 DPB slot info and Vulkan reference-slot chains.
+   Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

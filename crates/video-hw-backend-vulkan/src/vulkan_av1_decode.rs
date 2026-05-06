@@ -130,6 +130,67 @@ impl Av1DecodeCommandSkeleton {
             })
             .collect()
     }
+
+    pub(crate) fn begin_std_reference_infos(&self) -> Vec<StdVideoDecodeAV1ReferenceInfo> {
+        vec![key_frame_std_reference_info_for_order_hint(0); self.begin_slots.len()]
+    }
+
+    pub(crate) fn begin_dpb_slot_infos<'a>(
+        &self,
+        reference_infos: &'a [StdVideoDecodeAV1ReferenceInfo],
+    ) -> Result<Vec<vk::VideoDecodeAV1DpbSlotInfoKHR<'a>>, String> {
+        if reference_infos.len() != self.begin_slots.len() {
+            return Err(format!(
+                "AV1 begin reference info count mismatch: refs={}, slots={}",
+                reference_infos.len(),
+                self.begin_slots.len()
+            ));
+        }
+
+        Ok(reference_infos
+            .iter()
+            .map(|reference_info| {
+                vk::VideoDecodeAV1DpbSlotInfoKHR::default().std_reference_info(reference_info)
+            })
+            .collect())
+    }
+
+    pub(crate) fn begin_reference_slots<'a>(
+        &self,
+        picture_resources: &'a [vk::VideoPictureResourceInfoKHR<'a>],
+        dpb_slot_infos: &'a mut [vk::VideoDecodeAV1DpbSlotInfoKHR<'a>],
+    ) -> Result<Vec<vk::VideoReferenceSlotInfoKHR<'a>>, String> {
+        if picture_resources.len() != self.begin_slots.len() {
+            return Err(format!(
+                "AV1 begin picture resource count mismatch: resources={}, slots={}",
+                picture_resources.len(),
+                self.begin_slots.len()
+            ));
+        }
+        if dpb_slot_infos.len() != self.begin_slots.len() {
+            return Err(format!(
+                "AV1 begin DPB slot info count mismatch: dpb_infos={}, slots={}",
+                dpb_slot_infos.len(),
+                self.begin_slots.len()
+            ));
+        }
+
+        let mut slots = Vec::with_capacity(self.begin_slots.len());
+        for ((slot, picture_resource), dpb_slot_info) in self
+            .begin_slots
+            .iter()
+            .zip(picture_resources.iter())
+            .zip(dpb_slot_infos.iter_mut())
+        {
+            slots.push(
+                vk::VideoReferenceSlotInfoKHR::default()
+                    .slot_index(slot.slot_index)
+                    .picture_resource(picture_resource)
+                    .push_next(dpb_slot_info),
+            );
+        }
+        Ok(slots)
+    }
 }
 
 impl Av1DecodeInfoSkeleton {
@@ -654,15 +715,19 @@ fn rebase_av1_picture_info_offsets(
 fn key_frame_std_reference_info(
     picture_info: &Av1DecodePictureInfoSkeleton,
 ) -> StdVideoDecodeAV1ReferenceInfo {
+    key_frame_std_reference_info_for_order_hint(picture_info.std_picture_info.OrderHint)
+}
+
+fn key_frame_std_reference_info_for_order_hint(order_hint: u8) -> StdVideoDecodeAV1ReferenceInfo {
     StdVideoDecodeAV1ReferenceInfo {
         flags: StdVideoDecodeAV1ReferenceInfoFlags {
             _bitfield_align_1: [],
             _bitfield_1: StdVideoDecodeAV1ReferenceInfoFlags::new_bitfield_1(0, 0, 0),
         },
-        frame_type: picture_info.std_picture_info.frame_type as u8,
+        frame_type: StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY as u8,
         RefFrameSignBias: 0,
-        OrderHint: picture_info.std_picture_info.OrderHint,
-        SavedOrderHints: picture_info.std_picture_info.OrderHints,
+        OrderHint: order_hint,
+        SavedOrderHints: [0; 8],
     }
 }
 
@@ -2305,6 +2370,37 @@ mod tests {
         assert_eq!(begin_resources[0].base_array_layer, 0);
         assert_eq!(begin_resources[1].base_array_layer, 1);
         assert_eq!(begin_resources[1].image_view_binding, vk::ImageView::null());
+
+        let begin_reference_infos = command.begin_std_reference_infos();
+        assert_eq!(begin_reference_infos.len(), 2);
+        assert_eq!(
+            u32::from(begin_reference_infos[0].frame_type),
+            StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY
+        );
+        assert_eq!(begin_reference_infos[0].OrderHint, 0);
+        let mut begin_dpb_infos = command
+            .begin_dpb_slot_infos(&begin_reference_infos)
+            .expect("matching begin reference infos should produce DPB slot infos");
+        let begin_dpb_info_ptrs = begin_dpb_infos
+            .iter()
+            .map(|info| info as *const vk::VideoDecodeAV1DpbSlotInfoKHR<'_>)
+            .collect::<Vec<_>>();
+        let begin_reference_slots = command
+            .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
+            .expect("matching begin resources and DPB infos should produce reference slots");
+        assert_eq!(begin_reference_slots.len(), 2);
+        assert_eq!(begin_reference_slots[0].slot_index, 0);
+        assert_eq!(begin_reference_slots[1].slot_index, 1);
+        assert_eq!(
+            begin_reference_slots[0].p_picture_resource,
+            &raw const begin_resources[0]
+        );
+        assert_eq!(
+            begin_reference_slots[1]
+                .p_next
+                .cast::<vk::VideoDecodeAV1DpbSlotInfoKHR<'_>>(),
+            begin_dpb_info_ptrs[1]
+        );
     }
 
     #[test]
@@ -2316,6 +2412,24 @@ mod tests {
             .expect_err("zero DPB slots should be rejected");
 
         assert!(err.contains("requires at least one DPB slot"));
+    }
+
+    #[test]
+    fn begin_reference_slots_reject_mismatched_resource_counts() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11]));
+        let command = build_av1_key_frame_decode_command_skeleton(&bitstream, 2)
+            .expect("single frame should produce a command skeleton");
+        let begin_reference_infos = command.begin_std_reference_infos();
+        let mut begin_dpb_infos = command
+            .begin_dpb_slot_infos(&begin_reference_infos)
+            .expect("matching begin reference infos should produce DPB slot infos");
+
+        let err = command
+            .begin_reference_slots(&[], &mut begin_dpb_infos)
+            .expect_err("resource count mismatch should be rejected");
+
+        assert!(err.contains("picture resource count mismatch"));
     }
 
     #[test]

@@ -735,13 +735,21 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .map(|command| {
                         let begin_resources =
                             command.begin_picture_resources(vk::ImageView::null());
+                        let begin_reference_infos = command.begin_std_reference_infos();
+                        let mut begin_dpb_infos = command
+                            .begin_dpb_slot_infos(&begin_reference_infos)
+                            .unwrap_or_default();
+                        let begin_reference_slots = command
+                            .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
+                            .unwrap_or_default();
                         format!(
-                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, slots={})",
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, begin_reference_slots={}, slots={})",
                             command.frames.len(),
                             command.coded_width,
                             command.coded_height,
                             command.begin_slots.len(),
                             begin_resources.len(),
+                            begin_reference_slots.len(),
                             command
                                 .frames
                                 .iter()
