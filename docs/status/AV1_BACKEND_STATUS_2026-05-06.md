@@ -497,6 +497,14 @@ Latest Vulkan AV1 scaffold verification:
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778079216167.md` (fMP4). The frame
   inspection helper now reports `show_frame` and `frame_to_show_map_idx` to make
   these display/reference cases diagnosable.
+- `scripts/check_vulkan_av1_corpus_matrix.rs` now runs the reusable Vulkan AV1
+  corpus gate. Latest matrix
+  `output/vulkan-av1-corpus-matrix/vulkan-av1-corpus-matrix-1778079826467.md`
+  covers 10 OBU/fMP4 cases: keyframe-only, generated GOP30, 16-frame
+  alt-ref/show-existing, 32-frame GOP16/lag8, and expected unsupported
+  32-frame GOP30/lag25 alias cases. All expected-pass rows reported
+  `psnr_y_min=inf`; both alias rows failed only with the explicit
+  `aliases Vulkan DPB slot` guard.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)

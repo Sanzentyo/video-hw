@@ -241,6 +241,7 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --f
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --gop-size 30 --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --gop-size 30 --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 16 --gop-size 30 --lag-in-frames 25 --vulkan-adapter-index 0 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_corpus_matrix.rs --skip-build --vulkan-adapter-index 0 --decode-bin target\release\examples\decode_to_yuv.exe
 ```
 
 - 生成レポート: `output/vulkan-av1-psnr/vulkan-av1-psnr-<epoch>.md`
@@ -255,6 +256,7 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 16 --gop-size 
   `scripts/inspect_av1_frame_types.rs --expect-inter-frame ...` で検査する
   `frame_type_gate` コマンドを記録する。
 - `scripts/inspect_av1_frame_types.rs` は `show_existing_frame` に加えて `show_frame` と `frame_to_show_map_idx` も出力するため、alt-ref/show-existing の表示順とDPB参照を追跡できる。
+- `scripts/check_vulkan_av1_corpus_matrix.rs` は OBU/fMP4、keyframe-only、generated GOP、alt-ref/show-existing、expected unsupported alias case をまとめて実行し、PASSすべきケースと明示的unsupportedにすべきケースを1つのmatrix reportに記録する。
 - 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも 8-frame keyframe-only 入力で `--min-psnr-y 60` に PASS し、`psnr_y_min=inf`。
 
 ### 11.3) Vulkan AV1 encode binding check
