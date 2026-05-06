@@ -109,6 +109,18 @@ cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --rele
 - decode pixel PSNR は `video-hw decode_to_yuv --output-mode rgb24` と FFmpeg RGB24 reference を比較する
 - 320x180/30 frames の確認では NVIDIA / Intel とも encode PSNR-Y avg 55 dB 以上、decode PSNR-Y min 50 dB 以上で PASS
 
+### 6.2) AV1 fMP4 roundtrip smoke
+
+```bash
+cargo +nightly -Zscript scripts/check_av1_fmp4_roundtrip.rs --backends nvidia,intel --release true --require-hardware true
+```
+
+- 生成レポート: `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-<epoch>.md`
+- `video-hw-fmp4` の `write_synthetic_fmp4` で backend AV1 encode 出力を `av01` fMP4 に書き込む。
+- `read_fmp4_file` で reader sample数を確認する。
+- `ffprobe` で `codec_name=av1` / `codec_tag_string=av01` / duration を確認する。
+- FFmpeg software decode と `decode_to_yuv --input-format mp4 --output-mode metadata` の両方が通ることを確認する。
+
 ### 7) Intel oneVPL fallback セットアップ（Windows CLI）
 
 ```bash

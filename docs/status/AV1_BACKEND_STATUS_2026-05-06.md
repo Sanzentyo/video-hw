@@ -15,8 +15,8 @@ or better.
 | NVIDIA AV1 encode | `NvEncoderAdapter` maps AV1 to NVENC and repeats sequence header; FFmpeg parity report shows PASS | Done |
 | Intel oneVPL AV1 decode | `OneVplCodec::AV1`; Intel AV1 RGB decode fixed by `874bc71`; PSNR report has Intel decode PASS | Done |
 | Intel oneVPL AV1 encode | `OneVplCodec::AV1`; CQP default for AV1; integrated benchmark `output/benchmark-intel-precise-av1-1778050647.md` | Done |
-| AV1 fMP4 writer | `av01` sample entry / `av1C` box; writer helper tests cover OBU passthrough and `config_obus` | Done |
-| AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
+| AV1 fMP4 writer | `av01` sample entry / `av1C` box; writer helper tests cover OBU passthrough and `config_obus`; `scripts/check_av1_fmp4_roundtrip.rs` verifies NVIDIA/Intel hardware AV1 fMP4 generation | Done |
+| AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough; roundtrip smoke verifies reader sample count plus `decode_to_yuv --input-format mp4` metadata decode | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
 | Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated keyframe-only AV1 OBU/fMP4 decode through submit/readback on NVIDIA; PSNR gates pass against FFmpeg software reference. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode partial, encode blocked |
@@ -38,9 +38,10 @@ or better.
   - `output/av1-psnr/av1-psnr-1778051481.md`
   - NVIDIA encode PSNR-Y avg 60.43 dB; decode PSNR-Y min 50.54 dB
   - Intel encode PSNR-Y avg 55.62 dB; decode PSNR-Y min 50.48 dB
-- AV1 fMP4 smoke files:
-  - `output/synthetic-av1-fmp4.mp4`
-  - `output/synthetic-intel-av1-fmp4.mp4`
+- AV1 fMP4 roundtrip smoke:
+  - `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-1778068732.md`
+  - NVIDIA: 30 reader samples, 30 `decode_to_yuv --input-format mp4` metadata frames, `codec=av1`, `tag=av01`, duration `1.000000`
+  - Intel: 30 reader samples, 30 metadata frames, `codec=av1`, `tag=av01`, duration `1.000000`
 - Vulkan AV1 integrated benchmark:
   - `output/benchmark-backends-av1-1778068460.md`
   - detail: `output/benchmark-vulkan-av1-1778068460.md`
