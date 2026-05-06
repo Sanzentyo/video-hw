@@ -191,6 +191,30 @@ impl Av1DecodeCommandSkeleton {
         }
         Ok(slots)
     }
+
+    pub(crate) fn vk_begin_coding_info<'a>(
+        &self,
+        video_session: vk::VideoSessionKHR,
+        video_session_parameters: vk::VideoSessionParametersKHR,
+        reference_slots: &'a [vk::VideoReferenceSlotInfoKHR<'a>],
+    ) -> Result<vk::VideoBeginCodingInfoKHR<'a>, String> {
+        if reference_slots.len() != self.begin_slots.len() {
+            return Err(format!(
+                "AV1 begin reference slot count mismatch: reference_slots={}, slots={}",
+                reference_slots.len(),
+                self.begin_slots.len()
+            ));
+        }
+
+        Ok(vk::VideoBeginCodingInfoKHR::default()
+            .video_session(video_session)
+            .video_session_parameters(video_session_parameters)
+            .reference_slots(reference_slots))
+    }
+
+    pub(crate) fn vk_reset_coding_control_info(&self) -> vk::VideoCodingControlInfoKHR<'static> {
+        vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET)
+    }
 }
 
 impl Av1DecodeInfoSkeleton {
@@ -2401,6 +2425,31 @@ mod tests {
                 .cast::<vk::VideoDecodeAV1DpbSlotInfoKHR<'_>>(),
             begin_dpb_info_ptrs[1]
         );
+
+        let begin_coding_info = command
+            .vk_begin_coding_info(
+                vk::VideoSessionKHR::null(),
+                vk::VideoSessionParametersKHR::null(),
+                &begin_reference_slots,
+            )
+            .expect("matching begin reference slots should build begin coding info");
+        assert_eq!(begin_coding_info.video_session, vk::VideoSessionKHR::null());
+        assert_eq!(
+            begin_coding_info.video_session_parameters,
+            vk::VideoSessionParametersKHR::null()
+        );
+        assert_eq!(begin_coding_info.reference_slot_count, 2);
+        assert_eq!(
+            begin_coding_info.p_reference_slots,
+            begin_reference_slots.as_ptr()
+        );
+
+        let reset_control = command.vk_reset_coding_control_info();
+        assert!(
+            reset_control
+                .flags
+                .contains(vk::VideoCodingControlFlagsKHR::RESET)
+        );
     }
 
     #[test]
@@ -2430,6 +2479,24 @@ mod tests {
             .expect_err("resource count mismatch should be rejected");
 
         assert!(err.contains("picture resource count mismatch"));
+    }
+
+    #[test]
+    fn begin_coding_info_rejects_mismatched_reference_slot_counts() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11]));
+        let command = build_av1_key_frame_decode_command_skeleton(&bitstream, 2)
+            .expect("single frame should produce a command skeleton");
+
+        let err = command
+            .vk_begin_coding_info(
+                vk::VideoSessionKHR::null(),
+                vk::VideoSessionParametersKHR::null(),
+                &[],
+            )
+            .expect_err("reference slot count mismatch should be rejected");
+
+        assert!(err.contains("begin reference slot count mismatch"));
     }
 
     #[test]

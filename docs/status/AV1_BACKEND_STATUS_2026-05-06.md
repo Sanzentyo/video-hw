@@ -127,6 +127,8 @@ Current implementation progress:
   and can materialize HEVC-style begin picture resources over array layers;
 - begin-coding helper scaffolding now builds AV1 std reference infos, AV1 DPB
   slot infos, and Vulkan reference-slot chains for the bound DPB resources;
+- begin-coding scaffolding can now materialize `vk::VideoBeginCodingInfoKHR`
+  plus the mandatory initial RESET `vk::VideoCodingControlInfoKHR`;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

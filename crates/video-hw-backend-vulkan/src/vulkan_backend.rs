@@ -742,14 +742,24 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                         let begin_reference_slots = command
                             .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
                             .unwrap_or_default();
+                        let begin_coding_info = command
+                            .vk_begin_coding_info(
+                                vk::VideoSessionKHR::null(),
+                                vk::VideoSessionParametersKHR::null(),
+                                &begin_reference_slots,
+                            )
+                            .unwrap_or_default();
+                        let reset_control = command.vk_reset_coding_control_info();
                         format!(
-                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, begin_reference_slots={}, slots={})",
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, begin_reference_slots={}, vk_begin_refs={}, reset={}, slots={})",
                             command.frames.len(),
                             command.coded_width,
                             command.coded_height,
                             command.begin_slots.len(),
                             begin_resources.len(),
                             begin_reference_slots.len(),
+                            begin_coding_info.reference_slot_count,
+                            reset_control.flags.contains(vk::VideoCodingControlFlagsKHR::RESET),
                             command
                                 .frames
                                 .iter()
