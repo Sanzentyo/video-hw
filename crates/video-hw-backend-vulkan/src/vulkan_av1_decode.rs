@@ -45,6 +45,12 @@ pub(crate) struct Av1BitstreamInspection {
     pub has_sequence_header: bool,
     pub has_frame_payload: bool,
     pub sequence_header_obu_len: Option<usize>,
+    pub frame_header_count: usize,
+    pub key_frame_count: usize,
+    pub inter_frame_count: usize,
+    pub intra_only_frame_count: usize,
+    pub switch_frame_count: usize,
+    pub show_existing_frame_count: usize,
     pub coded_width: Option<u32>,
     pub coded_height: Option<u32>,
 }
@@ -1296,6 +1302,7 @@ pub(crate) fn inspect_av1_low_overhead_obus(
         .map(|record| record.temporal_unit_index)
         .max()
         .map_or(0, |index| index + 1);
+    let frame_type_counts = inspect_av1_frame_type_counts(bitstream, &records)?;
 
     Ok(Av1BitstreamInspection {
         obu_count: records.len(),
@@ -1303,6 +1310,12 @@ pub(crate) fn inspect_av1_low_overhead_obus(
         has_sequence_header,
         has_frame_payload,
         sequence_header_obu_len,
+        frame_header_count: frame_type_counts.frame_header_count,
+        key_frame_count: frame_type_counts.key_frame_count,
+        inter_frame_count: frame_type_counts.inter_frame_count,
+        intra_only_frame_count: frame_type_counts.intra_only_frame_count,
+        switch_frame_count: frame_type_counts.switch_frame_count,
+        show_existing_frame_count: frame_type_counts.show_existing_frame_count,
         coded_width: parsed_sequence_header
             .as_ref()
             .map(ParsedAv1SequenceHeader::coded_width),
@@ -1310,6 +1323,47 @@ pub(crate) fn inspect_av1_low_overhead_obus(
             .as_ref()
             .map(ParsedAv1SequenceHeader::coded_height),
     })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Av1FrameTypeCounts {
+    frame_header_count: usize,
+    key_frame_count: usize,
+    inter_frame_count: usize,
+    intra_only_frame_count: usize,
+    switch_frame_count: usize,
+    show_existing_frame_count: usize,
+}
+
+fn inspect_av1_frame_type_counts(
+    bitstream: &[u8],
+    records: &[Av1ObuRecord],
+) -> Result<Av1FrameTypeCounts, String> {
+    records
+        .iter()
+        .filter(|record| matches!(record.obu_type, Av1ObuType::Frame | Av1ObuType::FrameHeader))
+        .try_fold(Av1FrameTypeCounts::default(), |mut counts, record| {
+            let payload = bitstream
+                .get(record.payload_range.clone())
+                .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
+            let mut bits = BitReader::new(payload);
+            counts.frame_header_count = counts.frame_header_count.saturating_add(1);
+            if bits.read_bool("show_existing_frame")? {
+                counts.show_existing_frame_count =
+                    counts.show_existing_frame_count.saturating_add(1);
+                return Ok(counts);
+            }
+            match bits.read_bits_u8(2, "frame_type")? {
+                0 => counts.key_frame_count = counts.key_frame_count.saturating_add(1),
+                1 => counts.inter_frame_count = counts.inter_frame_count.saturating_add(1),
+                2 => {
+                    counts.intra_only_frame_count = counts.intra_only_frame_count.saturating_add(1)
+                }
+                3 => counts.switch_frame_count = counts.switch_frame_count.saturating_add(1),
+                _ => unreachable!("2-bit AV1 frame_type cannot exceed 3"),
+            }
+            Ok(counts)
+        })
 }
 
 pub(crate) fn extract_av1_std_sequence_header(
@@ -4832,8 +4886,30 @@ mod tests {
         assert_eq!(inspection.temporal_unit_count, 1);
         assert!(inspection.has_sequence_header);
         assert!(inspection.has_frame_payload);
+        assert_eq!(inspection.frame_header_count, 1);
+        assert_eq!(inspection.key_frame_count, 1);
+        assert_eq!(inspection.inter_frame_count, 0);
+        assert_eq!(inspection.show_existing_frame_count, 0);
         assert_eq!(inspection.coded_width, Some(320));
         assert_eq!(inspection.coded_height, Some(180));
+    }
+
+    #[test]
+    fn low_overhead_obu_inspection_counts_inter_and_show_existing_frames() {
+        let bitstream = [
+            make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180)),
+            make_obu(6, &[0x20, 0x00]),
+            make_obu(2, &[]),
+            make_obu(6, &[0x80]),
+        ]
+        .concat();
+
+        let inspection =
+            inspect_av1_low_overhead_obus(&bitstream).expect("synthetic AV1 OBUs should parse");
+        assert_eq!(inspection.frame_header_count, 2);
+        assert_eq!(inspection.key_frame_count, 0);
+        assert_eq!(inspection.inter_frame_count, 1);
+        assert_eq!(inspection.show_existing_frame_count, 1);
     }
 
     #[test]

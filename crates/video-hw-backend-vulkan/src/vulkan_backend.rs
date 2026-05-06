@@ -697,7 +697,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
     match inspect_av1_low_overhead_obus(bitstream) {
         Ok(inspection) => {
             message.push_str(&format!(
-                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}, decode_info_count={}, command_skeleton={}",
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, frame_headers={}, key_frames={}, inter_frames={}, intra_only_frames={}, switch_frames={}, show_existing_frames={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}, decode_info_count={}, command_skeleton={}",
                 inspection.obu_count,
                 inspection.temporal_unit_count,
                 inspection.has_sequence_header,
@@ -705,6 +705,12 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 inspection
                     .sequence_header_obu_len
                     .map_or_else(|| "none".to_string(), |len| len.to_string()),
+                inspection.frame_header_count,
+                inspection.key_frame_count,
+                inspection.inter_frame_count,
+                inspection.intra_only_frame_count,
+                inspection.switch_frame_count,
+                inspection.show_existing_frame_count,
                 inspection
                     .coded_width
                     .map_or_else(|| "unknown".to_string(), |width| width.to_string()),
@@ -1761,6 +1767,10 @@ mod tests {
         assert!(message.contains("Vulkan AV1 decode initialization failed"));
         assert!(message.contains("parsed AV1 OBUs"));
         assert!(message.contains("sequence_header=true"));
+        assert!(message.contains("frame_headers=1"));
+        assert!(message.contains("key_frames=1"));
+        assert!(message.contains("inter_frames=0"));
+        assert!(message.contains("show_existing_frames=0"));
         assert!(message.contains("coded=320x180"));
         assert!(message.contains("aligned_upload=ready"));
         assert!(message.contains("first_decode_info=true"));
