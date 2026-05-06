@@ -20,17 +20,17 @@ better.
 | fMP4 decode access/caching behavior | `scripts/benchmark_fmp4_decode_access.rs`; `output/benchmark-fmp4-decode-access-1778069696.md`; `output/benchmark-fmp4-decode-access-1778070138.md`; `cargo test -p video-hw-fmp4 --features "backend-nvidia backend-intel backend-vulkan"` | Sequential, random, reverse, reverse-prefetch, reverse-mismatch, and ping-pong access are benchmarked with MSE/PSNR and cache stats | Done for NVIDIA/Intel; Intel large run is a stress case |
 | FFmpeg parity comparison | `scripts/benchmark_ffmpeg_backends.rs`; NV/Intel precise scripts; `output/*av1*.md` reports listed in `AV1_BACKEND_STATUS_2026-05-06.md` | NVIDIA/Intel AV1 parity is recorded; Vulkan keyframe-only AV1 decode parity is recorded | Done for NVIDIA/Intel; partial for Vulkan |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; `scripts/check_av1_fmp4_roundtrip.rs`; `scripts/check_vulkan_av1_psnr.rs`; fMP4 access benchmark reports | Encode/decode and fMP4 decode correctness are checked against FFmpeg references | Done for supported NVIDIA/Intel paths; partial for Vulkan |
-| Vulkan AV1 decode | `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`; `output/benchmark-vulkan-av1-1778068460.md`; `output/benchmark-vulkan-av1-1778068469.md` | Generated keyframe-only OBU and fMP4 decode on NVIDIA pass PSNR and outperform FFmpeg Vulkan for the measured scope | Partial |
-| Vulkan AV1 inter-frame/GOP replay | `scripts/check_vulkan_av1_psnr.rs --gop-size 30`; `scripts/inspect_av1_frame_types.rs --expect-inter-frame`; reports `output/vulkan-av1-psnr/vulkan-av1-psnr-1778071155693.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778068145633.md`, `output/av1-frame-types/av1-frame-types-1778071020279919100.md`, `output/av1-frame-types/av1-frame-types-1778071024653131000.md` | The gap is explicitly detected: generated GOP input has `frame_type=1` after the keyframe, PSNR FAIL reports now include the exact `frame_type_gate`, and current Vulkan AV1 decode rejects it | Not done |
+| Vulkan AV1 decode | `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`; `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`; `output/benchmark-vulkan-av1-1778068460.md`; `output/benchmark-vulkan-av1-1778068469.md` | Generated keyframe-only OBU/fMP4 and short GOP OBU decode on NVIDIA pass PSNR and keyframe-only benchmark scope outperforms FFmpeg Vulkan | Partial |
+| Vulkan AV1 inter-frame/GOP replay | `scripts/check_vulkan_av1_psnr.rs --gop-size 2`; `scripts/check_vulkan_av1_psnr.rs --gop-size 30`; reports `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`, `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074653056.md` | Short generated GOP replay now passes with `psnr_y_min=inf`; long GOP still fails at `psnr_y_min=20.9200`, so full reference/state replay remains open | Partial |
 | Vulkan AV1 encode | `scripts/check_vulkan_av1_encode_bindings.rs`; `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md` | `ash 0.38.0+1.3.281` exposes AV1 decode bindings but no AV1 encode bindings | Blocked |
 | Intel Vulkan AV1 | `output/benchmark-vulkan-av1-1778068460.md`; `docs/status/AV1_BACKEND_STATUS_2026-05-06.md` | FFmpeg Vulkan AV1 decode exits with Windows access violation on this host; FFmpeg `av1_vulkan` encode reports unsupported implementation | Not a passing target on this host |
 | VideoToolbox AV1 | `crates/video-hw-backend-vt/src/vt_backend.rs`; `scripts/benchmark_ffmpeg_vt_precise.rs`; `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests` | Current contract explicitly reports unsupported AV1 and cross-target check passes | Not implemented |
 
 ## Current Blockers
 
-1. Vulkan AV1 inter-frame/GOP replay needs real reference-frame parsing and DPB
-   management. The current generated GOP reports prove the failure is no longer
-   ambiguous: frames after the keyframe are `frame_type=1`.
+1. Vulkan AV1 long-GOP replay still needs complete reference/state management.
+   Short GOP generated inputs now pass PSNR, but `--frames 8 --gop-size 30`
+   still fails at `psnr_y_min=20.9200`.
 2. Vulkan AV1 encode cannot be implemented safely with the current `ash`
    binding set because the required `VK_KHR_video_encode_av1` symbols are not
    exposed.
@@ -41,5 +41,5 @@ better.
 
 The objective is not complete. NVIDIA and Intel oneVPL AV1 encode/decode plus
 AV1 fMP4 read/write are implemented and verified against FFmpeg. Vulkan AV1 is
-verified only for generated keyframe-only decode on NVIDIA; Vulkan GOP replay,
-Vulkan AV1 encode, and VideoToolbox AV1 remain open.
+verified for generated keyframe-only and short-GOP decode on NVIDIA; long-GOP
+Vulkan replay, Vulkan AV1 encode, and VideoToolbox AV1 remain open.

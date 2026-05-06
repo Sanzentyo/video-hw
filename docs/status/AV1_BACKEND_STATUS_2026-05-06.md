@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough; roundtrip smoke verifies reader sample count plus `decode_to_yuv --input-format mp4` metadata and RGB24 decode PSNR vs FFmpeg | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated keyframe-only AV1 OBU/fMP4 decode through submit/readback on NVIDIA; PSNR gates pass against FFmpeg software reference. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode partial, encode blocked |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated AV1 OBU/fMP4 decode through submit/readback on NVIDIA for keyframe-only and short GOP replay cases; PSNR gates pass against FFmpeg software reference for those scopes. Long GOP replay still fails PSNR. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode partial, encode blocked |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -274,8 +274,8 @@ Current implementation progress:
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
 - Vulkan AV1 capability is still conservative because the implemented scope is
-  generated keyframe-only decode and does not yet include inter-frame/GOP replay
-  or encode. Earlier FFmpeg-reference PSNR work recorded a one-frame
+  generated keyframe-only decode plus short GOP replay and does not yet include
+  long GOP reference/state replay or encode. Earlier FFmpeg-reference PSNR work recorded a one-frame
   generated-OBU result as `psnr_y_min=12.9600` after fixing the explicit submit
   path and proving the readback copy overwrites a sentinel buffer. Follow-up
   parity work now also gives AV1 session parameters an 8-bit
@@ -378,7 +378,22 @@ Latest Vulkan AV1 scaffold verification:
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778073517033.md`
   (`--frames 2 --gop-size 2`, `psnr_y_min=12.5300`). This shows the remaining
   blocker is full AV1 frame-header/std-picture parity before GOP replay can be
-  accepted by PSNR.
+  accepted by PSNR. The next pass maps oxideav frame-header fields into the
+  Vulkan std picture structures more completely (`disable_cdf_update`,
+  screen-content/integer-MV flags, frame-size override, intrabc,
+  `disable_frame_end_update_cdf`, reduced-tx-set, and delta-q params), submits
+  the source range from the Frame/Header OBU start as required by Vulkan, and
+  fixes planned DPB slot rotation to use allocated slots. Short-GOP live PSNR
+  now passes exactly:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`
+  (`--frames 1 --gop-size 2`, `psnr_y_min=inf`),
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`
+  (`--frames 2 --gop-size 2`, `psnr_y_min=inf`), and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`
+  (`--frames 8 --gop-size 2`, `psnr_y_min=inf`). Long GOP replay is still not
+  complete:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074653056.md`
+  (`--frames 8 --gop-size 30`, `psnr_y_min=20.9200`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)

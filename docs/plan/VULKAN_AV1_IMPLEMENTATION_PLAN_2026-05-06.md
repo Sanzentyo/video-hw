@@ -10,8 +10,9 @@ plan covers the missing work tracked in
 ## Current Boundary
 
 - NVIDIA and Intel oneVPL AV1 are implemented and verified.
-- Vulkan AV1 decode now supports the generated keyframe-only OBU/fMP4 scope on
-  NVIDIA and is still not a full capability claim for arbitrary AV1 streams.
+- Vulkan AV1 decode now supports generated keyframe-only OBU/fMP4 and short GOP
+  replay scopes on NVIDIA and is still not a full capability claim for arbitrary
+  AV1 streams.
 - Vulkan AV1 decode prerequisite probing and low-overhead OBU inspection are now
   implemented in `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`.
 - FFmpeg `av1_vulkan` decode and encode work on the NVIDIA adapter in this
@@ -266,7 +267,19 @@ Acceptance:
   submit/readback with bad pixels. Current live gates still fail at
   `psnr_y_min=12.5300` for `--frames 1 --gop-size 2` and
   `--frames 2 --gop-size 2`, so the next implementation task is full
-  non-reduced frame-header/std-picture parity, not merely slot plumbing.
+  non-reduced frame-header/std-picture parity, not merely slot plumbing. The
+  follow-up std-picture parity pass now maps the remaining oxideav frame-header
+  flags needed by short generated GOPs, starts the submitted source range at the
+  Frame/Header OBU start as required by Vulkan, and fixes setup-slot rotation to
+  use allocated DPB slots. With that pass, `--frames 1 --gop-size 2`,
+  `--frames 2 --gop-size 2`, and `--frames 8 --gop-size 2` all pass with
+  `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`,
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`,
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`). Long GOP replay
+  still fails and remains the next decode task:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074653056.md`
+  (`--frames 8 --gop-size 30`, `psnr_y_min=20.9200`).
 - The same gate now covers fragmented MP4 input:
   `--input-format fmp4 --gop-size 1` passes at `psnr_y_min=inf`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), while
