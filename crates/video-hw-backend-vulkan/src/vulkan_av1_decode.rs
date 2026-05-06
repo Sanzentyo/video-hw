@@ -3444,6 +3444,9 @@ fn create_av1_decode_image(
                 "vkBindImageMemory for AV1 decode image failed: {err}"
             ));
         }
+        let mut view_usage_create_info = vk::ImageViewUsageCreateInfo::default().usage(
+            vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
+        );
         let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(if plan.array_layers == 1 {
@@ -3452,6 +3455,7 @@ fn create_av1_decode_image(
                 vk::ImageViewType::TYPE_2D_ARRAY
             })
             .format(plan.format)
+            .push_next(&mut view_usage_create_info)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
