@@ -164,31 +164,13 @@ impl Av1DecodeCommandSkeleton {
         &self,
         image_view: vk::ImageView,
     ) -> Result<Vec<vk::VideoPictureResourceInfoKHR<'a>>, String> {
-        self.frames
+        self.frame_record_bundles()?
             .iter()
-            .map(|frame| {
-                let setup_slot_index = u32::try_from(frame.setup_slot_index)
-                    .map_err(|_| "AV1 frame setup slot index is negative".to_string())?;
-                let slot = self
-                    .begin_slots
-                    .iter()
-                    .find(|slot| slot.slot_index == frame.setup_slot_index)
-                    .ok_or_else(|| {
-                        format!(
-                            "AV1 frame {} references unavailable setup slot {}",
-                            frame.frame_index, frame.setup_slot_index
-                        )
-                    })?;
-                if slot.base_array_layer != setup_slot_index {
-                    return Err(format!(
-                        "AV1 setup slot/base layer mismatch: slot={}, base_layer={}",
-                        frame.setup_slot_index, slot.base_array_layer
-                    ));
-                }
+            .map(|bundle| {
                 Ok(vk::VideoPictureResourceInfoKHR::default()
                     .coded_offset(vk::Offset2D { x: 0, y: 0 })
                     .coded_extent(self.coded_extent())
-                    .base_array_layer(slot.base_array_layer)
+                    .base_array_layer(bundle.dst_base_array_layer)
                     .image_view_binding(image_view))
             })
             .collect()
@@ -215,6 +197,14 @@ impl Av1DecodeCommandSkeleton {
                             frame.frame_index, frame.setup_slot_index
                         )
                     })?;
+                let setup_slot_index = u32::try_from(frame.setup_slot_index)
+                    .map_err(|_| "AV1 frame setup slot index is negative".to_string())?;
+                if slot.base_array_layer != setup_slot_index {
+                    return Err(format!(
+                        "AV1 setup slot/base layer mismatch: slot={}, base_layer={}",
+                        frame.setup_slot_index, slot.base_array_layer
+                    ));
+                }
                 Ok(Av1DecodeFrameRecordBundle {
                     frame_index: frame.frame_index,
                     temporal_unit_index: frame.temporal_unit_index,
@@ -2716,6 +2706,32 @@ mod tests {
             .expect_err("unavailable setup slot should be rejected");
 
         assert!(err.contains("unavailable setup slot"));
+    }
+
+    #[test]
+    fn frame_record_bundles_reject_slot_base_layer_mismatch() {
+        let command = Av1DecodeCommandSkeleton {
+            coded_width: 320,
+            coded_height: 180,
+            begin_slots: vec![Av1BeginCodingSlotSkeleton {
+                slot_index: 1,
+                base_array_layer: 0,
+            }],
+            frames: vec![Av1DecodeFrameCommandSkeleton {
+                frame_index: 0,
+                temporal_unit_index: 0,
+                setup_slot_index: 1,
+                src_buffer_offset: 12,
+                src_buffer_range: 3,
+                tile_count: 1,
+            }],
+        };
+
+        let err = command
+            .frame_picture_resources(vk::ImageView::null())
+            .expect_err("slot/base layer mismatch should be rejected");
+
+        assert!(err.contains("setup slot/base layer mismatch"));
     }
 
     #[test]
