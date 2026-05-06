@@ -200,6 +200,45 @@ impl Av1DecodeBitstreamUploadPlan {
             })
             .collect())
     }
+
+    pub(crate) fn with_frame_decode_info<R>(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+        frame_index: usize,
+        src_buffer: vk::Buffer,
+        image_view: vk::ImageView,
+        f: impl FnOnce(&vk::VideoDecodeInfoKHR<'_>, &Av1DecodeFrameSubmitBundle) -> R,
+    ) -> Result<R, String> {
+        let bundle = self
+            .frame_submit_bundles(command)?
+            .into_iter()
+            .find(|bundle| bundle.frame_index == frame_index)
+            .ok_or_else(|| format!("AV1 frame {frame_index} is missing from submit bundles"))?;
+        let decode = self.decodes.get(bundle.decode_info_index).ok_or_else(|| {
+            format!(
+                "AV1 frame {} references missing decode info {}",
+                bundle.frame_index, bundle.decode_info_index
+            )
+        })?;
+
+        let dst_picture_resource =
+            decode.dst_picture_resource(image_view, bundle.dst_base_array_layer);
+        let mut av1_picture_info = decode.picture_info.vk_picture_info();
+        let mut setup_dpb_info = decode.vk_setup_dpb_slot_info();
+        let setup_reference_slot = decode.vk_setup_reference_slot(
+            bundle.setup_slot_index,
+            &dst_picture_resource,
+            &mut setup_dpb_info,
+        );
+        let vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
+            src_buffer,
+            dst_picture_resource,
+            &setup_reference_slot,
+            &mut av1_picture_info,
+        );
+
+        Ok(f(&vk_decode_info, &bundle))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2936,6 +2975,26 @@ mod tests {
                 },
             ]
         );
+
+        let summary = plan
+            .with_frame_decode_info(
+                &command,
+                1,
+                vk::Buffer::null(),
+                vk::ImageView::null(),
+                |decode_info, bundle| {
+                    (
+                        bundle.frame_index,
+                        decode_info.src_buffer_offset,
+                        decode_info.src_buffer_range,
+                        decode_info.dst_picture_resource.base_array_layer,
+                        !decode_info.p_next.is_null(),
+                        !decode_info.p_setup_reference_slot.is_null(),
+                    )
+                },
+            )
+            .expect("frame decode info should be materialized inside the callback");
+        assert_eq!(summary, (1, 16, 8, 1, true, true));
     }
 
     #[test]

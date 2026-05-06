@@ -150,7 +150,9 @@ Current implementation progress:
   command-frame source range maps back into the aligned upload buffer before a
   future `vkCmdDecodeVideoKHR` loop consumes it, and produces per-frame submit
   bundles tying decode-info index, DPB setup slot, destination array layer, and
-  upload byte range together;
+  upload byte range together; blocker diagnostics now also materialize the first
+  frame's `VideoDecodeInfoKHR`/AV1 picture-info/setup-slot chain from the
+  aligned plan;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

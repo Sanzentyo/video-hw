@@ -804,11 +804,24 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                 let submit_bundles = upload_plan
                                     .frame_submit_bundles(&aligned_command)
                                     .unwrap_or_default();
+                                let first_decode_info_ready = upload_plan
+                                    .with_frame_decode_info(
+                                        &aligned_command,
+                                        0,
+                                        vk::Buffer::null(),
+                                        vk::ImageView::null(),
+                                        |decode_info, _bundle| {
+                                            !decode_info.p_next.is_null()
+                                                && !decode_info.p_setup_reference_slot.is_null()
+                                        },
+                                    )
+                                    .unwrap_or(false);
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
                                     submit_bundles.len(),
+                                    first_decode_info_ready,
                                     offset_alignment,
                                     size_alignment,
                                     alignment_source,
@@ -1541,6 +1554,7 @@ mod tests {
         assert!(message.contains("sequence_header=true"));
         assert!(message.contains("coded=320x180"));
         assert!(message.contains("aligned_upload=ready"));
+        assert!(message.contains("first_decode_info=true"));
     }
 
     #[test]
