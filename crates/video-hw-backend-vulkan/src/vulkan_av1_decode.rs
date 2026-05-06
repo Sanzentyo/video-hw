@@ -57,6 +57,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub decode_image_barrier_layers: u32,
     pub command_record_decode_count: usize,
     pub command_buffer_recorded: bool,
+    pub command_buffer_submitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2263,6 +2264,8 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     |_| Ok(()),
                 )
             };
+            let command_buffer_submit_requested = command_buffer_record_requested
+                && std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1");
             let summary = session.summary;
             let decode_image_barrier_layers = image_barrier.subresource_range.layer_count;
             destroy_av1_decode_session_resource(instance, &device, session);
@@ -2274,6 +2277,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     record_summary,
                     decode_image_barrier_layers,
                     command_buffer_record_requested,
+                    command_buffer_submit_requested,
                 )
             })
         });
@@ -2282,7 +2286,13 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             device.destroy_device(None);
         }
         match result {
-            Ok((summary, record_summary, decode_image_barrier_layers, command_buffer_recorded)) => {
+            Ok((
+                summary,
+                record_summary,
+                decode_image_barrier_layers,
+                command_buffer_recorded,
+                command_buffer_submitted,
+            )) => {
                 return Ok(Av1DecodeBitstreamSessionProbe {
                     coded_width,
                     coded_height,
@@ -2300,6 +2310,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     decode_image_barrier_layers,
                     command_record_decode_count: record_summary.decode_count,
                     command_buffer_recorded,
+                    command_buffer_submitted,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2962,12 +2973,44 @@ fn record_and_destroy_av1_decode_command_buffer(
         // SAFETY: Command buffer is recording and all command data has been emitted.
         unsafe { device.end_command_buffer(command_buffer) }
             .map_err(|err| format!("vkEndCommandBuffer for AV1 decode failed: {err}"))?;
+        if std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1") {
+            submit_av1_decode_command_buffer(device, config.queue_family_index, command_buffer)?;
+        }
         Ok(record_summary)
     })();
 
     // SAFETY: Command pool and allocated command buffers are no longer used.
     unsafe {
         device.destroy_command_pool(command_pool, None);
+    }
+    result
+}
+
+fn submit_av1_decode_command_buffer(
+    device: &ash::Device,
+    queue_family_index: u32,
+    command_buffer: vk::CommandBuffer,
+) -> Result<(), String> {
+    let fence_info = vk::FenceCreateInfo::default();
+    // SAFETY: Fence create info contains only POD values.
+    let fence = unsafe { device.create_fence(&fence_info, None) }
+        .map_err(|err| format!("vkCreateFence for AV1 decode submit failed: {err}"))?;
+    let result = (|| -> Result<(), String> {
+        // SAFETY: Queue family index is the decode queue family used to create the device.
+        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let command_buffers = [command_buffer];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        // SAFETY: Submit info references a recorded command buffer that stays alive until wait.
+        unsafe { device.queue_submit(queue, std::slice::from_ref(&submit_info), fence) }
+            .map_err(|err| format!("vkQueueSubmit for AV1 decode failed: {err}"))?;
+        // SAFETY: Fence belongs to this device and was used for the submit above.
+        unsafe { device.wait_for_fences(std::slice::from_ref(&fence), true, 5_000_000_000) }
+            .map_err(|err| format!("vkWaitForFences for AV1 decode failed: {err}"))?;
+        Ok(())
+    })();
+    // SAFETY: Fence is no longer used after the wait/error path.
+    unsafe {
+        device.destroy_fence(fence, None);
     }
     result
 }
@@ -4542,7 +4585,7 @@ mod tests {
         match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
             Ok(probe) => {
                 eprintln!(
-                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, record_decodes={}, command_buffer_recorded={}",
+                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
                     probe.coded_width,
                     probe.coded_height,
                     probe.picture_format,
@@ -4550,13 +4593,21 @@ mod tests {
                     probe.decode_image_layers,
                     probe.decode_image_barrier_layers,
                     probe.command_record_decode_count,
-                    probe.command_buffer_recorded
+                    probe.command_buffer_recorded,
+                    probe.command_buffer_submitted
                 );
                 if std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1")
                 {
                     assert!(
                         probe.command_buffer_recorded,
                         "record probe env was set but command_buffer_recorded=false"
+                    );
+                }
+                if std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1")
+                {
+                    assert!(
+                        probe.command_buffer_submitted,
+                        "submit probe env was set but command_buffer_submitted=false"
                     );
                 }
             }

@@ -186,7 +186,8 @@ Current implementation progress:
   live probe and writes a small command-record report under
   `output/vulkan-av1-record-probe/`; the script supports
   `--record-mode barrier_only|begin_end|reset_end|first_decode|full` for
-  command-buffer crash localization;
+  command-buffer crash localization and `--submit-command-buffer` for an
+  opt-in queue-submit/fence-wait probe;
 - FFmpeg's Vulkan AV1 decode path passes concrete AV1 std substructures
   (`pTileInfo`, `pQuantization`, `pSegmentation`, `pLoopFilter`, `pCDEF`,
   `pLoopRestoration`, `pGlobalMotion`) with each picture. The AV1 record path
@@ -196,10 +197,11 @@ Current implementation progress:
   `reset_end`, `first_decode`, and `full` command-buffer record probes all pass
   with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`, `upload_bytes=256`,
   `image_layers=16`, `barrier_layers=16`, and `record_decodes=1` for decode
-  modes;
+  modes; the `full --submit-command-buffer` probe also passes with
+  `command_buffer_submitted=true`, reaching queue submit and fence wait before
+  readback;
 - Vulkan AV1 capability is still false because real-bitstream session
-  `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
-  implemented;
+  readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
