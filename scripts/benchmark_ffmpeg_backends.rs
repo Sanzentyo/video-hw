@@ -86,6 +86,35 @@ impl Codec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum VulkanDecodeInputFormat {
+    Annexb,
+    Fmp4,
+}
+
+impl VulkanDecodeInputFormat {
+    fn as_cli(self) -> &'static str {
+        match self {
+            Self::Annexb => "annexb",
+            Self::Fmp4 => "fmp4",
+        }
+    }
+
+    fn decode_to_yuv_input_format(self) -> &'static str {
+        match self {
+            Self::Annexb => "annexb",
+            Self::Fmp4 => "mp4",
+        }
+    }
+
+    fn output_extension(self, codec: Codec) -> &'static str {
+        match self {
+            Self::Annexb => codec.annexb_extension(),
+            Self::Fmp4 => "mp4",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(about = "Run integrated video-hw backend benchmarks against ffmpeg")]
 struct Args {
@@ -135,6 +164,10 @@ struct Args {
     /// Vulkan adapter indexes to test. Defaults to all adapters reported by vulkaninfo.
     #[arg(long, value_delimiter = ',')]
     vulkan_adapter_indexes: Vec<usize>,
+
+    /// Vulkan decode input container. fmp4 is currently supported for AV1 only.
+    #[arg(long, value_enum, default_value_t = VulkanDecodeInputFormat::Annexb)]
+    vulkan_decode_input_format: VulkanDecodeInputFormat,
 
     #[arg(long, default_value = "output")]
     output_dir: PathBuf,
@@ -452,6 +485,11 @@ fn run_child_precise_script(
 }
 
 fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
+    if args.vulkan_decode_input_format == VulkanDecodeInputFormat::Fmp4
+        && args.codec != Codec::Av1
+    {
+        bail!("--vulkan-decode-input-format fmp4 is currently supported only with --codec av1");
+    }
     build_vulkan_examples(args.release)?;
     let profile = if args.release { "release" } else { "debug" };
     let decode_bin = example_bin_path(profile, "decode_to_yuv");
@@ -829,12 +867,13 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create output directory: {}", args.output_dir.display()))?;
     let path = args.output_dir.join(format!(
-        "benchmark-vulkan-decode-input-{}-{}x{}-{}f.{}",
+        "benchmark-vulkan-decode-input-{}-{}-{}x{}-{}f.{}",
         args.codec.as_cli(),
+        args.vulkan_decode_input_format.as_cli(),
         args.width,
         args.height,
         args.frame_count,
-        args.codec.annexb_extension()
+        args.vulkan_decode_input_format.output_extension(args.codec)
     ));
     let mut command = Command::new("ffmpeg");
     command.args([
@@ -881,11 +920,20 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
             command.args(["-cpu-used", "8", "-row-mt", "1", "-g", "1", "-lag-in-frames", "0"]);
         }
     }
-    command.args([
-        "-f",
-        args.codec.ffmpeg_demuxer(),
-        &path.to_string_lossy(),
-    ]);
+    match args.vulkan_decode_input_format {
+        VulkanDecodeInputFormat::Annexb => {
+            command.args(["-f", args.codec.ffmpeg_demuxer(), &path.to_string_lossy()]);
+        }
+        VulkanDecodeInputFormat::Fmp4 => {
+            command.args([
+                "-movflags",
+                "+frag_keyframe+empty_moov+delay_moov+default_base_moof",
+                "-f",
+                "mp4",
+                &path.to_string_lossy(),
+            ]);
+        }
+    }
     run_inherited(&mut command)
         .with_context(|| format!("generate Vulkan decode input: {}", path.display()))?;
     Ok(path)
@@ -907,7 +955,8 @@ fn vulkan_decode_command(
         "--input",
         &decode_input,
         "--input-format",
-        "annexb",
+        args.vulkan_decode_input_format
+            .decode_to_yuv_input_format(),
         "--output-mode",
         "metadata",
         "--chunk-bytes",
@@ -1059,14 +1108,11 @@ fn ffmpeg_vulkan_decode_command(
         "vulkan",
         "-hwaccel_output_format",
         "vulkan",
-        "-f",
-        args.codec.ffmpeg_demuxer(),
-        "-i",
-        &decode_input,
-        "-f",
-        "null",
-        &null_sink.to_string_lossy(),
     ]);
+    if args.vulkan_decode_input_format == VulkanDecodeInputFormat::Annexb {
+        command.args(["-f", args.codec.ffmpeg_demuxer()]);
+    }
+    command.args(["-i", &decode_input, "-f", "null", &null_sink.to_string_lossy()]);
     command
 }
 
@@ -1220,6 +1266,11 @@ fn write_vulkan_report(
     writeln!(&mut report, "frame_count: {}", args.frame_count)?;
     writeln!(&mut report, "width: {}", args.width)?;
     writeln!(&mut report, "height: {}", args.height)?;
+    writeln!(
+        &mut report,
+        "decode_input_format: {}",
+        args.vulkan_decode_input_format.as_cli()
+    )?;
     writeln!(&mut report, "decode_input: {}", decode_input.display())?;
     writeln!(&mut report)?;
     writeln!(
