@@ -99,7 +99,8 @@ Tasks:
    decode-info source range construction now covers `srcBufferOffset`,
    `srcBufferRange`, coded extent propagation, and relative AV1 frame/tile
    offsets within the range; ash `VideoDecodeInfoKHR` construction with the AV1
-   picture-info `pNext` chain is now covered. Vulkan command recording remains.
+   picture-info `pNext` chain and HEVC-style destination picture resource
+   construction are now covered. Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
@@ -116,7 +117,8 @@ Tasks:
 2. Chain `VideoDecodeAV1PictureInfoKHR` onto `VideoDecodeInfoKHR`. The pure
    decode-info skeleton now validates the source bitstream range and relative
    AV1 offsets, and can build the ash decode-info chain with caller-owned
-   resources; real buffer/image allocation and command submission remain.
+   source buffers plus destination image views/base layers; real buffer/image
+   allocation and command submission remain.
 3. For reference frames, populate `StdVideoDecodeAV1ReferenceInfo` and chain
    `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots.
 4. Reuse the HEVC readback path for NV12 output only after verifying the output

@@ -100,7 +100,9 @@ Current implementation progress:
   carries coded width/height from the parsed sequence header;
 - that decode-info skeleton can now build the ash `vk::VideoDecodeInfoKHR`
   wrapper with `vk::VideoDecodeAV1PictureInfoKHR` in the `pNext` chain when
-  given caller-owned Vulkan buffer and destination-picture resources;
+  given caller-owned Vulkan buffer and destination image view/base layer,
+  including a HEVC-style destination picture resource with the parsed coded
+  extent;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

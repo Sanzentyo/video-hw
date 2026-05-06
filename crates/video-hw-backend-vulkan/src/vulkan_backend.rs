@@ -698,17 +698,19 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                         let mut av1_picture_info = decode.picture_info.vk_picture_info();
                         let vk_decode_info = decode.vk_decode_info(
                             vk::Buffer::null(),
-                            vk::VideoPictureResourceInfoKHR::default(),
+                            decode.dst_picture_resource(vk::ImageView::null(), 0),
                             &mut av1_picture_info,
                         );
                         format!(
-                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, frame_header_offset={}, tile_count={})",
+                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, dst_extent={}x{}, frame_header_offset={}, tile_count={})",
                             decode.src_buffer_offset,
                             decode.src_buffer_range,
                             vk_decode_info.src_buffer_offset,
                             vk_decode_info.src_buffer_range,
                             decode.coded_width,
                             decode.coded_height,
+                            vk_decode_info.dst_picture_resource.coded_extent.width,
+                            vk_decode_info.dst_picture_resource.coded_extent.height,
                             decode.picture_info.frame_header_offset,
                             decode.tile_count()
                         )

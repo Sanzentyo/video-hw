@@ -85,6 +85,25 @@ impl Av1DecodeInfoSkeleton {
         self.picture_info.tile_offsets.len()
     }
 
+    pub(crate) fn coded_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.coded_width,
+            height: self.coded_height,
+        }
+    }
+
+    pub(crate) fn dst_picture_resource<'a>(
+        &self,
+        image_view: vk::ImageView,
+        base_array_layer: u32,
+    ) -> vk::VideoPictureResourceInfoKHR<'a> {
+        vk::VideoPictureResourceInfoKHR::default()
+            .coded_offset(vk::Offset2D { x: 0, y: 0 })
+            .coded_extent(self.coded_extent())
+            .base_array_layer(base_array_layer)
+            .image_view_binding(image_view)
+    }
+
     pub(crate) fn vk_decode_info<'a>(
         &'a self,
         src_buffer: vk::Buffer,
@@ -1887,7 +1906,7 @@ mod tests {
             .expect("frame OBU should produce a decode info skeleton");
         let mut av1_picture_info = decode.picture_info.vk_picture_info();
         let av1_picture_info_ptr = &raw const av1_picture_info;
-        let dst_picture_resource = vk::VideoPictureResourceInfoKHR::default();
+        let dst_picture_resource = decode.dst_picture_resource(vk::ImageView::null(), 2);
 
         let vk_decode = decode.vk_decode_info(
             vk::Buffer::null(),
@@ -1898,7 +1917,15 @@ mod tests {
         assert_eq!(vk_decode.src_buffer, vk::Buffer::null());
         assert_eq!(vk_decode.src_buffer_offset as usize, frame_obu_start + 2);
         assert_eq!(vk_decode.src_buffer_range, 3);
-        assert_eq!(vk_decode.dst_picture_resource.coded_extent.width, 0);
+        assert_eq!(vk_decode.dst_picture_resource.coded_offset.x, 0);
+        assert_eq!(vk_decode.dst_picture_resource.coded_offset.y, 0);
+        assert_eq!(vk_decode.dst_picture_resource.coded_extent.width, 320);
+        assert_eq!(vk_decode.dst_picture_resource.coded_extent.height, 180);
+        assert_eq!(vk_decode.dst_picture_resource.base_array_layer, 2);
+        assert_eq!(
+            vk_decode.dst_picture_resource.image_view_binding,
+            vk::ImageView::null()
+        );
         assert_eq!(
             vk_decode
                 .p_next
