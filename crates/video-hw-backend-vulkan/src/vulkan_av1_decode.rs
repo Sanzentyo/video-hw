@@ -169,6 +169,37 @@ impl Av1DecodeBitstreamUploadPlan {
             })
             .collect()
     }
+
+    pub(crate) fn frame_submit_bundles(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+    ) -> Result<Vec<Av1DecodeFrameSubmitBundle>, String> {
+        let frame_records = command.frame_record_bundles()?;
+        let upload_ranges = self.frame_upload_ranges(command)?;
+        if frame_records.len() != upload_ranges.len() {
+            return Err(format!(
+                "AV1 frame submit bundle count mismatch: records={}, ranges={}",
+                frame_records.len(),
+                upload_ranges.len()
+            ));
+        }
+
+        Ok(frame_records
+            .into_iter()
+            .zip(upload_ranges)
+            .map(|(record, upload_range)| Av1DecodeFrameSubmitBundle {
+                frame_index: record.frame_index,
+                temporal_unit_index: record.temporal_unit_index,
+                decode_info_index: record.decode_info_index,
+                setup_slot_index: record.setup_slot_index,
+                dst_base_array_layer: record.dst_base_array_layer,
+                src_buffer_offset: record.src_buffer_offset,
+                src_buffer_range: record.src_buffer_range,
+                tile_count: record.tile_count,
+                upload_range,
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +212,19 @@ pub(crate) struct Av1DecodeFrameRecordBundle {
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
     pub tile_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeFrameSubmitBundle {
+    pub frame_index: usize,
+    pub temporal_unit_index: usize,
+    pub decode_info_index: usize,
+    pub setup_slot_index: i32,
+    pub dst_base_array_layer: u32,
+    pub src_buffer_offset: u64,
+    pub src_buffer_range: u64,
+    pub tile_count: usize,
+    pub upload_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2863,6 +2907,34 @@ mod tests {
             plan.frame_upload_ranges(&command)
                 .expect("command frames should map into upload byte ranges"),
             vec![0..8, 16..24]
+        );
+        assert_eq!(
+            plan.frame_submit_bundles(&command)
+                .expect("aligned plan and command should produce submit bundles"),
+            vec![
+                Av1DecodeFrameSubmitBundle {
+                    frame_index: 0,
+                    temporal_unit_index: 0,
+                    decode_info_index: 0,
+                    setup_slot_index: 0,
+                    dst_base_array_layer: 0,
+                    src_buffer_offset: 0,
+                    src_buffer_range: 8,
+                    tile_count: 1,
+                    upload_range: 0..8,
+                },
+                Av1DecodeFrameSubmitBundle {
+                    frame_index: 1,
+                    temporal_unit_index: 1,
+                    decode_info_index: 1,
+                    setup_slot_index: 1,
+                    dst_base_array_layer: 1,
+                    src_buffer_offset: 16,
+                    src_buffer_range: 8,
+                    tile_count: 1,
+                    upload_range: 16..24,
+                },
+            ]
         );
     }
 

@@ -148,7 +148,9 @@ Current implementation progress:
   blocker diagnostics use those capability-derived alignments when available
   with a 4096/4096 fallback; upload planning now also validates that every
   command-frame source range maps back into the aligned upload buffer before a
-  future `vkCmdDecodeVideoKHR` loop consumes it;
+  future `vkCmdDecodeVideoKHR` loop consumes it, and produces per-frame submit
+  bundles tying decode-info index, DPB setup slot, destination array layer, and
+  upload byte range together;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
