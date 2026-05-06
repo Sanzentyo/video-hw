@@ -625,8 +625,8 @@ fn av1_decode_blocker_message() -> String {
         Av1DecodePrerequisiteProbe::MissingDecodeQueueFamily => {
             format!("{base}; no queue family advertises VIDEO_DECODE_KHR with AV1 decode operation")
         }
-        Av1DecodePrerequisiteProbe::DeviceInitializationFailed(details) => {
-            format!("{base}; device bootstrap for AV1 decode failed: {details}")
+        Av1DecodePrerequisiteProbe::SessionBootstrapFailed(details) => {
+            format!("{base}; AV1 decode session bootstrap failed: {details}")
         }
         Av1DecodePrerequisiteProbe::NoCompatibleAdapter => format!(
             "{base}; required extensions were observed but not on a single adapter that can run AV1 decode prerequisites"

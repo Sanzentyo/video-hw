@@ -80,8 +80,12 @@ Current implementation progress:
 - the AV1 decode prerequisite probe now builds the Vulkan AV1 decode profile,
   queries `VideoCapabilitiesKHR` / `VideoDecodeAV1CapabilitiesKHR`, and requires
   at least one decode output format before reporting prerequisites as ready;
-- Vulkan AV1 capability is still false because session parameter creation,
-  decode submit, readback, PSNR, and benchmark gates are not implemented;
+- the same probe now creates and destroys an AV1 `VideoSessionKHR` plus
+  `VideoDecodeAV1SessionParametersCreateInfoKHR` using a reduced-still synthetic
+  sequence header within the advertised coded-extent range;
+- Vulkan AV1 capability is still false because real-bitstream session
+  parameters, decode submit, readback, PSNR, and benchmark gates are not
+  implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 

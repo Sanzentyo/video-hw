@@ -18,7 +18,7 @@ pub(crate) enum Av1DecodePrerequisiteProbe {
     MissingExtensions { missing: Vec<&'static str> },
     MissingDecodeQueueFamily,
     NoCompatibleAdapter,
-    DeviceInitializationFailed(String),
+    SessionBootstrapFailed(String),
     ProbeUnavailable(String),
 }
 
@@ -91,6 +91,7 @@ struct Av1DecodeCapabilitySnapshot {
     max_dpb_slots: u32,
     max_active_reference_pictures: u32,
     max_level: ash::vk::native::StdVideoAV1Level,
+    std_header_version: vk::ExtensionProperties,
     decode_output_formats: Vec<vk::Format>,
 }
 
@@ -282,22 +283,28 @@ fn run_av1_decode_probe() -> Av1DecodePrerequisiteProbe {
             if support.extensions.supports_av1_decode()
                 && let Some(queue_family_index) = support.decode_queue_family_index
             {
-                match query_av1_decode_capability_snapshot(&entry, &instance, physical_device) {
+                let snapshot = match query_av1_decode_capability_snapshot(
+                    &entry,
+                    &instance,
+                    physical_device,
+                ) {
                     Ok(snapshot) => {
                         if let Err(err) = validate_av1_decode_capability_snapshot(&snapshot) {
                             device_init_errors.push(err);
                             continue;
                         }
+                        snapshot
                     }
                     Err(err) => {
                         device_init_errors.push(err);
                         continue;
                     }
-                }
-                match try_initialize_av1_decode_device(
+                };
+                match probe_av1_decode_session_parameters(
                     &instance,
                     physical_device,
                     queue_family_index,
+                    &snapshot,
                 ) {
                     Ok(()) => return Ok(Av1DecodePrerequisiteProbe::Ready),
                     Err(err) => device_init_errors.push(err),
@@ -322,7 +329,7 @@ fn run_av1_decode_probe() -> Av1DecodePrerequisiteProbe {
             return Ok(Av1DecodePrerequisiteProbe::MissingDecodeQueueFamily);
         }
         if !device_init_errors.is_empty() {
-            return Ok(Av1DecodePrerequisiteProbe::DeviceInitializationFailed(
+            return Ok(Av1DecodePrerequisiteProbe::SessionBootstrapFailed(
                 device_init_errors.join("; "),
             ));
         }
@@ -407,15 +414,24 @@ fn query_av1_decode_capability_snapshot(
 
     let decode_output_formats =
         query_av1_decode_output_formats(&video_queue, physical_device, profile)?;
+    let min_coded_width = capabilities.min_coded_extent.width;
+    let min_coded_height = capabilities.min_coded_extent.height;
+    let max_coded_width = capabilities.max_coded_extent.width;
+    let max_coded_height = capabilities.max_coded_extent.height;
+    let max_dpb_slots = capabilities.max_dpb_slots;
+    let max_active_reference_pictures = capabilities.max_active_reference_pictures;
+    let std_header_version = capabilities.std_header_version;
+    let max_level = decode_av1_capabilities.max_level;
 
     Ok(Av1DecodeCapabilitySnapshot {
-        min_coded_width: capabilities.min_coded_extent.width,
-        min_coded_height: capabilities.min_coded_extent.height,
-        max_coded_width: capabilities.max_coded_extent.width,
-        max_coded_height: capabilities.max_coded_extent.height,
-        max_dpb_slots: capabilities.max_dpb_slots,
-        max_active_reference_pictures: capabilities.max_active_reference_pictures,
-        max_level: decode_av1_capabilities.max_level,
+        min_coded_width,
+        min_coded_height,
+        max_coded_width,
+        max_coded_height,
+        max_dpb_slots,
+        max_active_reference_pictures,
+        max_level,
+        std_header_version,
         decode_output_formats,
     })
 }
@@ -437,6 +453,12 @@ fn validate_av1_decode_capability_snapshot(
             snapshot.max_coded_height
         ));
     }
+    if snapshot.min_coded_width == 0 || snapshot.min_coded_height == 0 {
+        return Err(format!(
+            "AV1 decode capability query returned zero minimum coded extent: {}x{}",
+            snapshot.min_coded_width, snapshot.min_coded_height
+        ));
+    }
     if snapshot.max_dpb_slots == 0 {
         return Err("AV1 decode capability query returned max_dpb_slots=0".to_string());
     }
@@ -447,6 +469,7 @@ fn validate_av1_decode_capability_snapshot(
         ));
     }
     let _max_level = snapshot.max_level;
+    let _std_header_version = snapshot.std_header_version;
     Ok(())
 }
 
@@ -596,17 +619,179 @@ fn find_video_codec_queue_family_index(
         })
 }
 
-fn try_initialize_av1_decode_device(
+fn probe_av1_decode_session_parameters(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
+    capability_snapshot: &Av1DecodeCapabilitySnapshot,
 ) -> Result<(), String> {
     let device = create_av1_decode_device(instance, physical_device, queue_family_index)?;
+    let result = create_and_destroy_av1_decode_session_parameters(
+        instance,
+        &device,
+        queue_family_index,
+        capability_snapshot,
+    );
     // SAFETY: The device is no longer used after this point.
     unsafe {
         device.destroy_device(None);
     }
+    result
+}
+
+fn create_and_destroy_av1_decode_session_parameters(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    queue_family_index: u32,
+    capability_snapshot: &Av1DecodeCapabilitySnapshot,
+) -> Result<(), String> {
+    let picture_format = *capability_snapshot
+        .decode_output_formats
+        .first()
+        .ok_or_else(|| "AV1 decode session parameter probe has no output format".to_string())?;
+    let coded_width = preferred_av1_probe_extent(
+        capability_snapshot.min_coded_width,
+        capability_snapshot.max_coded_width,
+    );
+    let coded_height = preferred_av1_probe_extent(
+        capability_snapshot.min_coded_height,
+        capability_snapshot.max_coded_height,
+    );
+    let std_sequence_header = build_probe_av1_std_sequence_header(coded_width, coded_height)?;
+
+    let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
+        .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
+        .film_grain_support(false);
+    let mut decode_usage = vk::VideoDecodeUsageInfoKHR::default()
+        .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+    let profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_AV1)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .push_next(&mut decode_av1_profile)
+        .push_next(&mut decode_usage);
+
+    let create_info = vk::VideoSessionCreateInfoKHR::default()
+        .queue_family_index(queue_family_index)
+        .video_profile(&profile)
+        .picture_format(picture_format)
+        .max_coded_extent(vk::Extent2D {
+            width: coded_width,
+            height: coded_height,
+        })
+        .reference_picture_format(picture_format)
+        .max_dpb_slots(capability_snapshot.max_dpb_slots)
+        .max_active_reference_pictures(capability_snapshot.max_active_reference_pictures)
+        .std_header_version(&capability_snapshot.std_header_version);
+    let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
+    let mut video_session = vk::VideoSessionKHR::null();
+
+    // SAFETY: All pointers in `create_info` live until the call returns.
+    let session_result = unsafe {
+        (video_queue_device.fp().create_video_session_khr)(
+            device.handle(),
+            &create_info,
+            std::ptr::null(),
+            &mut video_session,
+        )
+    };
+    if session_result != vk::Result::SUCCESS {
+        return Err(format!(
+            "vkCreateVideoSessionKHR for AV1 decode failed: {session_result:?}"
+        ));
+    }
+
+    let parameters_result = create_av1_decode_session_parameters(
+        device,
+        &video_queue_device,
+        video_session,
+        &std_sequence_header,
+    );
+
+    // SAFETY: `video_session` was created by this device and is no longer used.
+    unsafe {
+        (video_queue_device.fp().destroy_video_session_khr)(
+            device.handle(),
+            video_session,
+            std::ptr::null(),
+        );
+    }
+    parameters_result
+}
+
+fn create_av1_decode_session_parameters(
+    device: &ash::Device,
+    video_queue_device: &ash::khr::video_queue::Device,
+    video_session: vk::VideoSessionKHR,
+    std_sequence_header: &StdVideoAV1SequenceHeader,
+) -> Result<(), String> {
+    let mut decode_av1_session_parameters =
+        vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
+            .std_sequence_header(std_sequence_header);
+    let create_info = vk::VideoSessionParametersCreateInfoKHR::default()
+        .video_session(video_session)
+        .video_session_parameters_template(vk::VideoSessionParametersKHR::null())
+        .push_next(&mut decode_av1_session_parameters);
+    let mut video_session_parameters = vk::VideoSessionParametersKHR::null();
+
+    // SAFETY: `create_info` references stack data alive for this call.
+    let result = unsafe {
+        (video_queue_device.fp().create_video_session_parameters_khr)(
+            device.handle(),
+            &create_info,
+            std::ptr::null(),
+            &mut video_session_parameters,
+        )
+    };
+    if result != vk::Result::SUCCESS {
+        return Err(format!(
+            "vkCreateVideoSessionParametersKHR for AV1 decode failed: {result:?}"
+        ));
+    }
+
+    // SAFETY: `video_session_parameters` was created by this device and is no longer used.
+    unsafe {
+        (video_queue_device.fp().destroy_video_session_parameters_khr)(
+            device.handle(),
+            video_session_parameters,
+            std::ptr::null(),
+        );
+    }
     Ok(())
+}
+
+fn build_probe_av1_std_sequence_header(
+    coded_width: u32,
+    coded_height: u32,
+) -> Result<StdVideoAV1SequenceHeader, String> {
+    if coded_width == 0 || coded_height == 0 {
+        return Err(format!(
+            "AV1 probe sequence header dimensions must be positive, got {coded_width}x{coded_height}"
+        ));
+    }
+    let width_minus_1 = coded_width - 1;
+    let height_minus_1 = coded_height - 1;
+    let frame_width_bits_minus_1 = u8::try_from(31 - width_minus_1.leading_zeros())
+        .map_err(|_| "AV1 probe width bit count does not fit in u8".to_string())?;
+    let frame_height_bits_minus_1 = u8::try_from(31 - height_minus_1.leading_zeros())
+        .map_err(|_| "AV1 probe height bit count does not fit in u8".to_string())?;
+    build_av1_std_sequence_header(&ParsedAv1SequenceHeader {
+        seq_profile: 0,
+        still_picture: true,
+        reduced_still_picture_header: true,
+        frame_width_bits_minus_1,
+        frame_height_bits_minus_1,
+        max_frame_width_minus_1: width_minus_1,
+        max_frame_height_minus_1: height_minus_1,
+        use_128x128_superblock: false,
+        enable_filter_intra: false,
+        enable_intra_edge_filter: false,
+    })
+}
+
+fn preferred_av1_probe_extent(min: u32, max: u32) -> u32 {
+    16.clamp(min, max)
 }
 
 fn create_av1_decode_device(
@@ -955,6 +1140,7 @@ mod tests {
             max_dpb_slots: 4,
             max_active_reference_pictures: 3,
             max_level: ash::vk::native::StdVideoAV1Level_STD_VIDEO_AV1_LEVEL_4_0,
+            std_header_version: vk::ExtensionProperties::default(),
             decode_output_formats: Vec::new(),
         };
         let err = validate_av1_decode_capability_snapshot(&snapshot)
@@ -971,6 +1157,23 @@ mod tests {
         let err = validate_av1_decode_capability_snapshot(&snapshot)
             .expect_err("zero DPB slots should be rejected");
         assert!(err.contains("max_dpb_slots=0"));
+    }
+
+    #[test]
+    fn preferred_probe_extent_stays_inside_capability_range() {
+        assert_eq!(preferred_av1_probe_extent(1, 64), 16);
+        assert_eq!(preferred_av1_probe_extent(32, 64), 32);
+        assert_eq!(preferred_av1_probe_extent(1, 8), 8);
+    }
+
+    #[test]
+    fn probe_sequence_header_builder_uses_requested_extent() {
+        let std_header = build_probe_av1_std_sequence_header(32, 24)
+            .expect("probe sequence header dimensions should be valid");
+        assert_eq!(std_header.max_frame_width_minus_1, 31);
+        assert_eq!(std_header.max_frame_height_minus_1, 23);
+        assert_eq!(std_header.flags.still_picture(), 1);
+        assert_eq!(std_header.flags.reduced_still_picture_header(), 1);
     }
 
     #[test]
@@ -1094,7 +1297,7 @@ mod tests {
             | Av1DecodePrerequisiteProbe::MissingExtensions { .. }
             | Av1DecodePrerequisiteProbe::MissingDecodeQueueFamily
             | Av1DecodePrerequisiteProbe::NoCompatibleAdapter
-            | Av1DecodePrerequisiteProbe::DeviceInitializationFailed(_)
+            | Av1DecodePrerequisiteProbe::SessionBootstrapFailed(_)
             | Av1DecodePrerequisiteProbe::ProbeUnavailable(_) => {}
         }
     }
