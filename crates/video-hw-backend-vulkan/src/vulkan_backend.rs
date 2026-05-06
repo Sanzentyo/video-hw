@@ -641,14 +641,20 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
     match inspect_av1_low_overhead_obus(bitstream) {
         Ok(inspection) => {
             message.push_str(&format!(
-                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}",
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}",
                 inspection.obu_count,
                 inspection.temporal_unit_count,
                 inspection.has_sequence_header,
                 inspection.has_frame_payload,
                 inspection
                     .sequence_header_obu_len
-                    .map_or_else(|| "none".to_string(), |len| len.to_string())
+                    .map_or_else(|| "none".to_string(), |len| len.to_string()),
+                inspection
+                    .coded_width
+                    .map_or_else(|| "unknown".to_string(), |width| width.to_string()),
+                inspection
+                    .coded_height
+                    .map_or_else(|| "unknown".to_string(), |height| height.to_string())
             ));
         }
         Err(err) => {
@@ -1354,11 +1360,14 @@ mod tests {
 
     #[test]
     fn av1_decode_blocker_message_with_bitstream_appends_obu_status() {
-        let bitstream = [(2 << 3) | 0x02, 0, (1 << 3) | 0x02, 1, 0xab];
+        let sequence_header = av1_test_obu(1, &av1_test_sequence_header_payload(320, 180));
+        let mut bitstream = av1_test_obu(2, &[]);
+        bitstream.extend_from_slice(&sequence_header);
         let message = av1_decode_blocker_message_with_bitstream(&bitstream);
         assert!(message.contains("Vulkan AV1 decode initialization failed"));
         assert!(message.contains("parsed AV1 OBUs"));
         assert!(message.contains("sequence_header=true"));
+        assert!(message.contains("coded=320x180"));
     }
 
     #[test]
@@ -1538,5 +1547,72 @@ mod tests {
             pocs_and_pts,
             vec![(0, 0), (1, 3_000), (2, 6_000), (3, 9_000), (4, 12_000)]
         );
+    }
+
+    fn av1_test_obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![(obu_type << 3) | 0x02];
+        out.extend(av1_test_leb128(payload.len()));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn av1_test_leb128(mut value: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn av1_test_sequence_header_payload(width: u32, height: u32) -> Vec<u8> {
+        let width_minus_1 = width.checked_sub(1).expect("width must be positive");
+        let height_minus_1 = height.checked_sub(1).expect("height must be positive");
+        let width_bits = 32 - width_minus_1.leading_zeros();
+        let height_bits = 32 - height_minus_1.leading_zeros();
+        let mut writer = Av1TestBitWriter::default();
+        writer.write_bits(0, 3);
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0, 5);
+        writer.write_bits(u64::from(width_bits - 1), 4);
+        writer.write_bits(u64::from(height_bits - 1), 4);
+        writer.write_bits(u64::from(width_minus_1), width_bits as usize);
+        writer.write_bits(u64::from(height_minus_1), height_bits as usize);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.finish()
+    }
+
+    #[derive(Default)]
+    struct Av1TestBitWriter {
+        data: Vec<u8>,
+        bit_offset: usize,
+    }
+
+    impl Av1TestBitWriter {
+        fn write_bits(&mut self, value: u64, count: usize) {
+            for shift in (0..count).rev() {
+                if self.bit_offset.is_multiple_of(8) {
+                    self.data.push(0);
+                }
+                let bit = ((value >> shift) & 1) as u8;
+                let byte = self.data.last_mut().expect("byte exists after push");
+                *byte |= bit << (7 - (self.bit_offset % 8));
+                self.bit_offset += 1;
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.data
+        }
     }
 }

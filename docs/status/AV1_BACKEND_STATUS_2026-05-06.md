@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites and parses low-overhead OBUs; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, and extracts sequence-header coded extent; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -71,6 +71,8 @@ Current implementation progress:
 - low-overhead AV1 OBU inspection now reports OBU count, temporal-unit count,
   sequence-header presence, and frame-payload presence in Vulkan AV1 decode
   blocker messages;
+- sequence-header parsing now extracts reduced-still-picture coded width/height
+  and core sequence flags needed by the later session-parameter builder;
 - Vulkan AV1 capability is still false because session parameter creation,
   decode submit, readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,

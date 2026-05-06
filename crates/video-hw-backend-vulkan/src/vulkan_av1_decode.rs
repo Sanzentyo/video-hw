@@ -21,6 +21,22 @@ pub(crate) struct Av1BitstreamInspection {
     pub has_sequence_header: bool,
     pub has_frame_payload: bool,
     pub sequence_header_obu_len: Option<usize>,
+    pub coded_width: Option<u32>,
+    pub coded_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedAv1SequenceHeader {
+    pub seq_profile: u8,
+    pub still_picture: bool,
+    pub reduced_still_picture_header: bool,
+    pub frame_width_bits_minus_1: u8,
+    pub frame_height_bits_minus_1: u8,
+    pub max_frame_width_minus_1: u32,
+    pub max_frame_height_minus_1: u32,
+    pub use_128x128_superblock: bool,
+    pub enable_filter_intra: bool,
+    pub enable_intra_edge_filter: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +108,11 @@ pub(crate) fn inspect_av1_low_overhead_obus(
         .iter()
         .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
         .map(|record| record.obu_range.len());
+    let parsed_sequence_header = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .map(|record| parse_av1_sequence_header_payload(&bitstream[record.payload_range.clone()]))
+        .transpose()?;
     let temporal_unit_count = records
         .iter()
         .map(|record| record.temporal_unit_index)
@@ -104,7 +125,23 @@ pub(crate) fn inspect_av1_low_overhead_obus(
         has_sequence_header,
         has_frame_payload,
         sequence_header_obu_len,
+        coded_width: parsed_sequence_header
+            .as_ref()
+            .map(ParsedAv1SequenceHeader::coded_width),
+        coded_height: parsed_sequence_header
+            .as_ref()
+            .map(ParsedAv1SequenceHeader::coded_height),
     })
+}
+
+impl ParsedAv1SequenceHeader {
+    fn coded_width(&self) -> u32 {
+        self.max_frame_width_minus_1 + 1
+    }
+
+    fn coded_height(&self) -> u32 {
+        self.max_frame_height_minus_1 + 1
+    }
 }
 
 fn run_av1_decode_probe() -> Av1DecodePrerequisiteProbe {
@@ -423,6 +460,101 @@ fn parse_av1_low_overhead_obus(bitstream: &[u8]) -> Result<Vec<Av1ObuRecord>, St
     Ok(records)
 }
 
+fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1SequenceHeader, String> {
+    let mut bits = BitReader::new(payload);
+    let seq_profile = bits.read_bits_u8(3, "seq_profile")?;
+    let still_picture = bits.read_bool("still_picture")?;
+    let reduced_still_picture_header = bits.read_bool("reduced_still_picture_header")?;
+
+    if reduced_still_picture_header {
+        let _seq_level_idx_0 = bits.read_bits_u8(5, "seq_level_idx_0")?;
+    } else {
+        skip_av1_operating_points(&mut bits)?;
+    }
+
+    let frame_width_bits_minus_1 = bits.read_bits_u8(4, "frame_width_bits_minus_1")?;
+    let frame_height_bits_minus_1 = bits.read_bits_u8(4, "frame_height_bits_minus_1")?;
+    let max_frame_width_minus_1 = bits.read_bits_u32(
+        usize::from(frame_width_bits_minus_1) + 1,
+        "max_frame_width_minus_1",
+    )?;
+    let max_frame_height_minus_1 = bits.read_bits_u32(
+        usize::from(frame_height_bits_minus_1) + 1,
+        "max_frame_height_minus_1",
+    )?;
+
+    if !reduced_still_picture_header {
+        let frame_id_numbers_present_flag = bits.read_bool("frame_id_numbers_present_flag")?;
+        if frame_id_numbers_present_flag {
+            let _delta_frame_id_length_minus_2 =
+                bits.read_bits_u8(4, "delta_frame_id_length_minus_2")?;
+            let _additional_frame_id_length_minus_1 =
+                bits.read_bits_u8(3, "additional_frame_id_length_minus_1")?;
+        }
+    }
+
+    let use_128x128_superblock = bits.read_bool("use_128x128_superblock")?;
+    let enable_filter_intra = bits.read_bool("enable_filter_intra")?;
+    let enable_intra_edge_filter = bits.read_bool("enable_intra_edge_filter")?;
+
+    Ok(ParsedAv1SequenceHeader {
+        seq_profile,
+        still_picture,
+        reduced_still_picture_header,
+        frame_width_bits_minus_1,
+        frame_height_bits_minus_1,
+        max_frame_width_minus_1,
+        max_frame_height_minus_1,
+        use_128x128_superblock,
+        enable_filter_intra,
+        enable_intra_edge_filter,
+    })
+}
+
+fn skip_av1_operating_points(bits: &mut BitReader<'_>) -> Result<(), String> {
+    let timing_info_present_flag = bits.read_bool("timing_info_present_flag")?;
+    if timing_info_present_flag {
+        let _num_units_in_display_tick = bits.read_bits_u32(32, "num_units_in_display_tick")?;
+        let _time_scale = bits.read_bits_u32(32, "time_scale")?;
+        let equal_picture_interval = bits.read_bool("equal_picture_interval")?;
+        if equal_picture_interval {
+            let _num_ticks_per_picture_minus_1 = bits.read_uvlc("num_ticks_per_picture_minus_1")?;
+        }
+        let decoder_model_info_present_flag = bits.read_bool("decoder_model_info_present_flag")?;
+        if decoder_model_info_present_flag {
+            let _buffer_delay_length_minus_1 =
+                bits.read_bits_u8(5, "buffer_delay_length_minus_1")?;
+            let _num_units_in_decoding_tick =
+                bits.read_bits_u32(32, "num_units_in_decoding_tick")?;
+            let _buffer_removal_time_length_minus_1 =
+                bits.read_bits_u8(5, "buffer_removal_time_length_minus_1")?;
+            let _frame_presentation_time_length_minus_1 =
+                bits.read_bits_u8(5, "frame_presentation_time_length_minus_1")?;
+        }
+    }
+
+    let initial_display_delay_present_flag =
+        bits.read_bool("initial_display_delay_present_flag")?;
+    let operating_points_cnt_minus_1 = bits.read_bits_u8(5, "operating_points_cnt_minus_1")?;
+    for _ in 0..=operating_points_cnt_minus_1 {
+        let _operating_point_idc = bits.read_bits_u16(12, "operating_point_idc")?;
+        let seq_level_idx = bits.read_bits_u8(5, "seq_level_idx")?;
+        if seq_level_idx > 7 {
+            let _seq_tier = bits.read_bool("seq_tier")?;
+        }
+        if initial_display_delay_present_flag {
+            let initial_display_delay_present_for_this_op =
+                bits.read_bool("initial_display_delay_present_for_this_op")?;
+            if initial_display_delay_present_for_this_op {
+                let _initial_display_delay_minus_1 =
+                    bits.read_bits_u8(4, "initial_display_delay_minus_1")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn read_av1_leb128(bytes: &[u8]) -> Result<(usize, usize), String> {
     let mut value = 0u64;
     for (index, byte) in bytes.iter().copied().take(8).enumerate() {
@@ -452,6 +584,77 @@ fn av1_obu_type(raw: u8) -> Av1ObuType {
         8 => Av1ObuType::TileList,
         15 => Av1ObuType::Padding,
         other => Av1ObuType::Unknown(other),
+    }
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_bool(&mut self, field_name: &str) -> Result<bool, String> {
+        Ok(self.read_bits_u8(1, field_name)? != 0)
+    }
+
+    fn read_bits_u8(&mut self, count: usize, field_name: &str) -> Result<u8, String> {
+        u8::try_from(self.read_bits(count, field_name)?)
+            .map_err(|_| format!("{field_name} does not fit in u8"))
+    }
+
+    fn read_bits_u16(&mut self, count: usize, field_name: &str) -> Result<u16, String> {
+        u16::try_from(self.read_bits(count, field_name)?)
+            .map_err(|_| format!("{field_name} does not fit in u16"))
+    }
+
+    fn read_bits_u32(&mut self, count: usize, field_name: &str) -> Result<u32, String> {
+        u32::try_from(self.read_bits(count, field_name)?)
+            .map_err(|_| format!("{field_name} does not fit in u32"))
+    }
+
+    fn read_bits(&mut self, count: usize, field_name: &str) -> Result<u64, String> {
+        if count > 64 {
+            return Err(format!("{field_name} bit count {count} exceeds 64"));
+        }
+        let mut value = 0u64;
+        for _ in 0..count {
+            let byte = self
+                .data
+                .get(self.bit_offset / 8)
+                .ok_or_else(|| format!("sequence header ended while reading {field_name}"))?;
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            value = (value << 1) | u64::from(bit);
+            self.bit_offset = self
+                .bit_offset
+                .checked_add(1)
+                .ok_or_else(|| "bit offset overflow".to_string())?;
+        }
+        Ok(value)
+    }
+
+    fn read_uvlc(&mut self, field_name: &str) -> Result<u64, String> {
+        let mut leading_zeroes = 0usize;
+        while !self.read_bool(field_name)? {
+            leading_zeroes = leading_zeroes
+                .checked_add(1)
+                .ok_or_else(|| format!("{field_name} leading-zero count overflow"))?;
+        }
+        if leading_zeroes >= 63 {
+            return Err(format!("{field_name} UVLC value exceeds u64 range"));
+        }
+        let suffix = if leading_zeroes == 0 {
+            0
+        } else {
+            self.read_bits(leading_zeroes, field_name)?
+        };
+        Ok((1u64 << leading_zeroes) - 1 + suffix)
     }
 }
 
@@ -496,7 +699,7 @@ mod tests {
     fn low_overhead_obu_parser_extracts_sequence_header_and_frames() {
         let bitstream = [
             make_obu(2, &[]),
-            make_obu(1, &[0x01, 0x02, 0x03]),
+            make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180)),
             make_obu(6, &[0x04, 0x05]),
         ]
         .concat();
@@ -507,13 +710,14 @@ mod tests {
         assert_eq!(inspection.temporal_unit_count, 1);
         assert!(inspection.has_sequence_header);
         assert!(inspection.has_frame_payload);
-        assert_eq!(inspection.sequence_header_obu_len, Some(5));
+        assert_eq!(inspection.coded_width, Some(320));
+        assert_eq!(inspection.coded_height, Some(180));
     }
 
     #[test]
     fn low_overhead_obu_parser_splits_temporal_units() {
         let bitstream = [
-            make_obu(1, &[0x01]),
+            make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180)),
             make_obu(6, &[0x02]),
             make_obu(2, &[]),
             make_obu(6, &[0x03]),
@@ -548,6 +752,21 @@ mod tests {
     }
 
     #[test]
+    fn sequence_header_parser_reads_reduced_still_picture_dimensions() {
+        let payload = av1_reduced_still_sequence_header_payload(640, 360);
+        let parsed = parse_av1_sequence_header_payload(&payload)
+            .expect("synthetic reduced-still sequence header should parse");
+
+        assert_eq!(parsed.seq_profile, 0);
+        assert!(parsed.still_picture);
+        assert!(parsed.reduced_still_picture_header);
+        assert_eq!(parsed.coded_width(), 640);
+        assert_eq!(parsed.coded_height(), 360);
+        assert_eq!(parsed.frame_width_bits_minus_1, 9);
+        assert_eq!(parsed.frame_height_bits_minus_1, 8);
+    }
+
+    #[test]
     fn av1_decode_probe_returns_known_status_variant() {
         let status = probe_av1_decode_prerequisites();
         match status {
@@ -567,6 +786,26 @@ mod tests {
         out
     }
 
+    fn av1_reduced_still_sequence_header_payload(width: u32, height: u32) -> Vec<u8> {
+        let width_minus_1 = width.checked_sub(1).expect("width must be positive");
+        let height_minus_1 = height.checked_sub(1).expect("height must be positive");
+        let width_bits = 32 - width_minus_1.leading_zeros();
+        let height_bits = 32 - height_minus_1.leading_zeros();
+        let mut writer = BitWriter::default();
+        writer.write_bits(0, 3);
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0, 5);
+        writer.write_bits(u64::from(width_bits - 1), 4);
+        writer.write_bits(u64::from(height_bits - 1), 4);
+        writer.write_bits(u64::from(width_minus_1), width_bits as usize);
+        writer.write_bits(u64::from(height_minus_1), height_bits as usize);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.finish()
+    }
+
     fn write_leb128(mut value: usize) -> Vec<u8> {
         let mut out = Vec::new();
         loop {
@@ -581,5 +820,29 @@ mod tests {
             }
         }
         out
+    }
+
+    #[derive(Default)]
+    struct BitWriter {
+        data: Vec<u8>,
+        bit_offset: usize,
+    }
+
+    impl BitWriter {
+        fn write_bits(&mut self, value: u64, count: usize) {
+            for shift in (0..count).rev() {
+                if self.bit_offset.is_multiple_of(8) {
+                    self.data.push(0);
+                }
+                let bit = ((value >> shift) & 1) as u8;
+                let byte = self.data.last_mut().expect("byte exists after push");
+                *byte |= bit << (7 - (self.bit_offset % 8));
+                self.bit_offset += 1;
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.data
+        }
     }
 }
