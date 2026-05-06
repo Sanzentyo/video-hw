@@ -243,9 +243,11 @@ Acceptance:
   `psnr_y_min=inf` over 8 generated keyframe-only frames.
 - `scripts/check_vulkan_av1_psnr.rs --gop-size <N>` now allows the same PSNR
   gate to generate non-keyframe-only GOP input. On the current implementation
-  `--gop-size 30` fails at `psnr_y_min=12.8900`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067825157.md`), which is the
-  expected failure until AV1 reference-frame replay is implemented.
+  `--gop-size 30` fails at the Vulkan decode stage
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067977096.md`), which is the
+  expected failure until AV1 reference-frame replay is implemented. The script
+  writes FAIL markdown reports even when decode or PSNR setup fails before
+  per-frame PSNR can be computed.
 
 ### Phase 5: Integrated Benchmark
 

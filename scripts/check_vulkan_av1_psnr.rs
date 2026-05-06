@@ -83,13 +83,22 @@ fn main() -> Result<()> {
         .join(format!("vulkan-av1-{run_id}.nv12"));
     let ref_nv12 = args.output_dir.join(format!("ffmpeg-av1-{run_id}.nv12"));
     let stats = args.output_dir.join(format!("vulkan-av1-psnr-{run_id}.txt"));
-    decode_with_vulkan(&args, &input, &hw_nv12)?;
-    decode_with_ffmpeg(&args, &input, &ref_nv12)?;
-    compute_psnr(&args, &hw_nv12, &ref_nv12, &stats)?;
-    let summary = parse_psnr_stats(&stats)?;
     let report = args
         .output_dir
         .join(format!("vulkan-av1-psnr-{run_id}.md"));
+    if let Err(err) = decode_with_vulkan(&args, &input, &hw_nv12) {
+        write_failure_report(&args, &input, "decode Vulkan AV1 to NV12", &err, &report)?;
+        return Err(err);
+    }
+    if let Err(err) = decode_with_ffmpeg(&args, &input, &ref_nv12) {
+        write_failure_report(&args, &input, "decode FFmpeg AV1 reference", &err, &report)?;
+        return Err(err);
+    }
+    if let Err(err) = compute_psnr(&args, &hw_nv12, &ref_nv12, &stats) {
+        write_failure_report(&args, &input, "compute PSNR", &err, &report)?;
+        return Err(err);
+    }
+    let summary = parse_psnr_stats(&stats)?;
     write_report(&args, &input, &summary, &report)?;
     println!(
         "vulkan_av1_psnr frames={} psnr_y_avg={:.4} psnr_y_min={:.4} threshold={:.4} report={}",
@@ -329,6 +338,27 @@ fn parse_psnr_stats(path: &Path) -> Result<PsnrSummary> {
         min_y,
         avg_y,
     })
+}
+
+fn write_failure_report(
+    args: &Args,
+    input: &Path,
+    stage: &str,
+    err: &anyhow::Error,
+    report: &Path,
+) -> Result<()> {
+    let body = format!(
+        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n",
+        input.display(),
+        args.input_format,
+        args.gop_size,
+        args.width,
+        args.height,
+        stage,
+        err.to_string().replace('`', "'"),
+        args.min_psnr_y
+    );
+    fs::write(report, body).with_context(|| format!("write {}", report.display()))
 }
 
 fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path) -> Result<()> {
