@@ -95,7 +95,8 @@ Tasks:
    decode, then a submit execution probe for a single key frame. Bitstream
    submit skeleton extraction now covers frame-header offset and tile
    offset/size discovery, and key-frame `StdVideoDecodeAV1PictureInfo` skeleton
-   construction is covered; Vulkan command recording remains.
+   plus `vk::VideoDecodeAV1PictureInfoKHR` construction is covered; Vulkan
+   command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

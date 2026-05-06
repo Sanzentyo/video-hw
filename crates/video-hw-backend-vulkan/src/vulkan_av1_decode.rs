@@ -60,6 +60,17 @@ pub(crate) struct Av1DecodePictureInfoSkeleton {
     pub tile_sizes: Vec<u32>,
 }
 
+impl Av1DecodePictureInfoSkeleton {
+    pub(crate) fn vk_picture_info(&self) -> vk::VideoDecodeAV1PictureInfoKHR<'_> {
+        vk::VideoDecodeAV1PictureInfoKHR::default()
+            .std_picture_info(&self.std_picture_info)
+            .reference_name_slot_indices(self.reference_name_slot_indices)
+            .frame_header_offset(self.frame_header_offset)
+            .tile_offsets(&self.tile_offsets)
+            .tile_sizes(&self.tile_sizes)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedAv1SequenceHeader {
     pub seq_profile: u8,
@@ -1692,6 +1703,14 @@ mod tests {
                 .iter()
                 .all(|slot| *slot == -1)
         );
+
+        let vk_picture = picture.vk_picture_info();
+        assert_eq!(vk_picture.frame_header_offset, 12);
+        assert_eq!(vk_picture.tile_count, 1);
+        assert_eq!(vk_picture.reference_name_slot_indices, [-1; 7]);
+        assert!(!vk_picture.p_std_picture_info.is_null());
+        assert!(!vk_picture.p_tile_offsets.is_null());
+        assert!(!vk_picture.p_tile_sizes.is_null());
     }
 
     #[test]

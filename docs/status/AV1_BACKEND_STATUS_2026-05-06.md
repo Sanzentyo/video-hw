@@ -91,6 +91,9 @@ Current implementation progress:
   frame-header + tile-group OBU pairs;
 - AV1 decode picture-info skeleton now builds key-frame `StdVideoDecodeAV1PictureInfo`,
   reference-name slot defaults, and tile metadata from that submit skeleton;
+- the picture-info skeleton can now materialize `vk::VideoDecodeAV1PictureInfoKHR`
+  with stable pointers to std picture info and tile arrays for the upcoming
+  `VideoDecodeInfoKHR` chain;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

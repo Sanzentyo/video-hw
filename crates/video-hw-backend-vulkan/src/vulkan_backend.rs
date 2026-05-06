@@ -683,9 +683,10 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .and_then(|skeleton| build_av1_decode_picture_info_skeleton(&skeleton))
                     .map(|picture| {
                         format!(
-                            "ready(frame_type={:?}, frame_header_offset={}, tile_count={}, tile_bytes={}, reference_slots={})",
+                            "ready(frame_type={:?}, frame_header_offset={}, vk_frame_header_offset={}, tile_count={}, tile_bytes={}, reference_slots={})",
                             picture.std_picture_info.frame_type,
                             picture.frame_header_offset,
+                            picture.vk_picture_info().frame_header_offset,
                             picture.tile_offsets.len(),
                             picture.tile_sizes.iter().copied().sum::<u32>(),
                             picture.reference_name_slot_indices.len()
