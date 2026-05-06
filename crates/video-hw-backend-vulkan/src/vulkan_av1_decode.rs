@@ -909,6 +909,15 @@ struct Av1DecodeCommandRecordConfig<'a> {
     image_view: vk::ImageView,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av1DecodeCommandBufferRecordMode {
+    BarrierOnly,
+    BeginEnd,
+    ResetEnd,
+    FirstDecode,
+    Full,
+}
+
 impl Av1DecodeExtensionFlags {
     fn supports_av1_decode(self) -> bool {
         self.has_video_queue && self.has_video_decode_queue && self.has_video_decode_av1
@@ -2738,11 +2747,20 @@ fn record_and_destroy_av1_decode_command_buffer(
         unsafe {
             device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
         }
+        let record_mode = av1_decode_command_buffer_record_mode_from_env();
+        if record_mode == Av1DecodeCommandBufferRecordMode::BarrierOnly {
+            // SAFETY: Command buffer is recording and only contains pipeline barriers.
+            unsafe { device.end_command_buffer(command_buffer) }
+                .map_err(|err| format!("vkEndCommandBuffer for AV1 decode failed: {err}"))?;
+            return Ok(Av1DecodeCommandRecordSummary::default());
+        }
 
         let video_queue_device = ash::khr::video_queue::Device::new(config.instance, device);
         let video_decode_device =
             ash::khr::video_decode_queue::Device::new(config.instance, device);
-        let record_summary = config.upload_plan.record_decode_command_sequence(
+        let mut emitted_first_decode = false;
+        let mut record_summary = Av1DecodeCommandRecordSummary::default();
+        config.upload_plan.visit_decode_command_sequence(
             config.command,
             config.video_session,
             config.video_session_parameters,
@@ -2758,8 +2776,12 @@ fn record_and_destroy_av1_decode_command_buffer(
                                 info,
                             );
                         }
+                        record_summary.begin_count += 1;
                     }
                     Av1DecodeCommandVisit::ResetCoding(info) => {
+                        if record_mode == Av1DecodeCommandBufferRecordMode::BeginEnd {
+                            return;
+                        }
                         // SAFETY: Command buffer is inside a video coding scope.
                         unsafe {
                             (video_queue_device.fp().cmd_control_video_coding_khr)(
@@ -2767,8 +2789,18 @@ fn record_and_destroy_av1_decode_command_buffer(
                                 info,
                             );
                         }
+                        record_summary.reset_count += 1;
                     }
                     Av1DecodeCommandVisit::DecodeFrame { decode_info, .. } => {
+                        if matches!(
+                            record_mode,
+                            Av1DecodeCommandBufferRecordMode::BeginEnd
+                                | Av1DecodeCommandBufferRecordMode::ResetEnd
+                        ) || (record_mode == Av1DecodeCommandBufferRecordMode::FirstDecode
+                            && emitted_first_decode)
+                        {
+                            return;
+                        }
                         // SAFETY: Command buffer is inside a video coding scope and decode info
                         // chains are scoped to this call.
                         unsafe {
@@ -2777,6 +2809,8 @@ fn record_and_destroy_av1_decode_command_buffer(
                                 decode_info,
                             );
                         }
+                        emitted_first_decode = true;
+                        record_summary.decode_count += 1;
                     }
                     Av1DecodeCommandVisit::EndCoding(info) => {
                         // SAFETY: Command buffer is inside a video coding scope.
@@ -2786,9 +2820,9 @@ fn record_and_destroy_av1_decode_command_buffer(
                                 info,
                             );
                         }
+                        record_summary.end_count += 1;
                     }
                 }
-                Ok(())
             },
         )?;
 
@@ -2803,6 +2837,19 @@ fn record_and_destroy_av1_decode_command_buffer(
         device.destroy_command_pool(command_pool, None);
     }
     result
+}
+
+fn av1_decode_command_buffer_record_mode_from_env() -> Av1DecodeCommandBufferRecordMode {
+    match std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_MODE")
+        .ok()
+        .as_deref()
+    {
+        Some("barrier_only") | Some("barrier") => Av1DecodeCommandBufferRecordMode::BarrierOnly,
+        Some("begin_end") | Some("begin") => Av1DecodeCommandBufferRecordMode::BeginEnd,
+        Some("reset_end") | Some("reset") => Av1DecodeCommandBufferRecordMode::ResetEnd,
+        Some("first_decode") | Some("decode") => Av1DecodeCommandBufferRecordMode::FirstDecode,
+        _ => Av1DecodeCommandBufferRecordMode::Full,
+    }
 }
 
 fn create_av1_decode_session_parameters(
