@@ -274,16 +274,17 @@ Acceptance:
 
 Current verified report:
 
-- `output/benchmark-backends-av1-1778067552.md`
-- `output/benchmark-vulkan-av1-1778067552.md`
-- NVIDIA: video-hw Vulkan AV1 decode 54.792 fps vs FFmpeg Vulkan decode
-  24.966 fps for 8 generated keyframe-only 320x180 frames.
+- `output/benchmark-backends-av1-1778068460.md`
+- `output/benchmark-vulkan-av1-1778068460.md`
+- NVIDIA: video-hw Vulkan AV1 decode 55.105 fps vs FFmpeg Vulkan decode
+  25.293 fps for 8 generated keyframe-only OBU 320x180 frames
+  (`--release true`, warmup 1, repeat 3).
 - `--vulkan-decode-input-format fmp4` now exercises the same integrated Vulkan
   benchmark through fragmented MP4 (`av01`) input. Current report:
-  `output/benchmark-backends-av1-1778068362.md` /
-  `output/benchmark-vulkan-av1-1778068362.md`; NVIDIA video-hw Vulkan AV1 fMP4
-  decode is 5.258 fps vs FFmpeg Vulkan fMP4 decode 25.975 fps for 8 generated
-  keyframe-only 320x180 frames.
+  `output/benchmark-backends-av1-1778068469.md` /
+  `output/benchmark-vulkan-av1-1778068469.md`; NVIDIA video-hw Vulkan AV1 fMP4
+  decode is 55.412 fps vs FFmpeg Vulkan fMP4 decode 25.712 fps for 8 generated
+  keyframe-only 320x180 frames (`--release true`, warmup 1, repeat 3).
 - Intel: FFmpeg Vulkan AV1 decode/encode failures remain explicit report rows.
 
 ## Encode Scope

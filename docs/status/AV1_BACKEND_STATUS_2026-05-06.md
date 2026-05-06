@@ -42,16 +42,16 @@ or better.
   - `output/synthetic-av1-fmp4.mp4`
   - `output/synthetic-intel-av1-fmp4.mp4`
 - Vulkan AV1 integrated benchmark:
-  - `output/benchmark-backends-av1-1778067552.md`
-  - detail: `output/benchmark-vulkan-av1-1778067552.md`
-  - NVIDIA: video-hw Vulkan AV1 decode 0.146s / 54.792 fps vs FFmpeg Vulkan decode 0.320s / 24.966 fps for 8 generated keyframe-only frames at 320x180
-  - NVIDIA FFmpeg `av1_vulkan` encode 0.316s / 25.347 fps; video-hw Vulkan AV1 encode is `unavailable` because current ash bindings do not expose `VK_KHR_video_encode_av1`
+  - `output/benchmark-backends-av1-1778068460.md`
+  - detail: `output/benchmark-vulkan-av1-1778068460.md`
+  - NVIDIA: video-hw Vulkan AV1 decode 0.145s / 55.105 fps vs FFmpeg Vulkan decode 0.316s / 25.293 fps for 8 generated keyframe-only OBU frames at 320x180 (`--release true`, warmup 1, repeat 3)
+  - NVIDIA FFmpeg `av1_vulkan` encode 0.316s / 25.348 fps; video-hw Vulkan AV1 encode is `unavailable` because current ash bindings do not expose `VK_KHR_video_encode_av1`
   - Intel Vulkan: FFmpeg AV1 decode exits with Windows access violation `0xc0000005`; FFmpeg `av1_vulkan` encode reports `Function not implemented`
 - Vulkan AV1 fMP4 integrated benchmark:
-  - `output/benchmark-backends-av1-1778068362.md`
-  - detail: `output/benchmark-vulkan-av1-1778068362.md`
+  - `output/benchmark-backends-av1-1778068469.md`
+  - detail: `output/benchmark-vulkan-av1-1778068469.md`
   - generated fragmented MP4 `av01` decode input is recorded as `decode_input_format: fmp4`
-  - NVIDIA: video-hw Vulkan AV1 fMP4 decode 1.522s / 5.258 fps vs FFmpeg Vulkan fMP4 decode 0.308s / 25.975 fps for 8 generated keyframe-only frames at 320x180
+  - NVIDIA: video-hw Vulkan AV1 fMP4 decode 0.144s / 55.412 fps vs FFmpeg Vulkan fMP4 decode 0.311s / 25.712 fps for 8 generated keyframe-only frames at 320x180 (`--release true`, warmup 1, repeat 3)
 
 ## Vulkan AV1 Status
 
@@ -60,8 +60,8 @@ scope is generated keyframe-only AV1 OBU and fMP4 (`av01`) input on the NVIDIA
 Vulkan Video path. The integrated benchmark now measures that path and records
 unsupported or failing adapter rows explicitly:
 
-- `output/benchmark-vulkan-av1-1778067552.md`
-- `output/benchmark-backends-av1-1778067552.md`
+- `output/benchmark-vulkan-av1-1778068460.md`
+- `output/benchmark-backends-av1-1778068460.md`
 
 Observed FFmpeg behavior on this Windows host:
 
@@ -308,12 +308,12 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
-- `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 0 --repeat 1 --frame-count 8 --width 320 --height 180 --release false --allow-failures true`
-  (`output/benchmark-backends-av1-1778067552.md`,
-  `output/benchmark-vulkan-av1-1778067552.md`)
-- `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-decode-input-format fmp4 --warmup 0 --repeat 1 --frame-count 8 --width 320 --height 180 --release false --allow-failures true`
-  (`output/benchmark-backends-av1-1778068362.md`,
-  `output/benchmark-vulkan-av1-1778068362.md`)
+- `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --frame-count 8 --width 320 --height 180 --release true --allow-failures true`
+  (`output/benchmark-backends-av1-1778068460.md`,
+  `output/benchmark-vulkan-av1-1778068460.md`)
+- `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-decode-input-format fmp4 --warmup 1 --repeat 3 --frame-count 8 --width 320 --height 180 --release true --allow-failures true`
+  (`output/benchmark-backends-av1-1778068469.md`,
+  `output/benchmark-vulkan-av1-1778068469.md`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
