@@ -26,6 +26,7 @@ use ash::vk::native::{
 
 const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
 const AV1_SELECT_INTEGER_MV: u8 = 2;
+const AV1_WARPEDMODEL_PRECISION_IDENTITY: i32 = 1 << 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Av1DecodePrerequisiteProbe {
@@ -87,6 +88,7 @@ pub(crate) struct Av1DecodeSubmitSkeleton {
     pub frame_header_offset: u32,
     pub tile_offsets: Vec<u32>,
     pub tile_sizes: Vec<u32>,
+    pub use_128x128_superblock: bool,
     pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
 }
 
@@ -97,6 +99,7 @@ pub(crate) struct Av1DecodePictureInfoSkeleton {
     pub frame_header_offset: u32,
     pub tile_offsets: Vec<u32>,
     pub tile_sizes: Vec<u32>,
+    pub use_128x128_superblock: bool,
     pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
 }
 
@@ -158,16 +161,19 @@ impl Av1DecodeStdPictureInfoScope {
         base: StdVideoDecodeAV1PictureInfo,
         coded_width: u32,
         coded_height: u32,
+        use_128x128_superblock: bool,
         key_frame_header: Option<&Av1ParsedKeyFrameHeader>,
     ) -> Self {
-        let sb_cols = u16::try_from(coded_width.div_ceil(64).max(1)).unwrap_or(u16::MAX);
-        let sb_rows = u16::try_from(coded_height.div_ceil(64).max(1)).unwrap_or(u16::MAX);
         let mi_cols = u16::try_from(coded_width.div_ceil(4).max(1)).unwrap_or(u16::MAX);
         let mi_rows = u16::try_from(coded_height.div_ceil(4).max(1)).unwrap_or(u16::MAX);
+        let sb_mi_shift = if use_128x128_superblock { 5 } else { 4 };
+        let sb_mi_size = 1_u16 << sb_mi_shift;
+        let sb_cols = mi_cols.div_ceil(sb_mi_size).max(1);
+        let sb_rows = mi_rows.div_ceil(sb_mi_size).max(1);
         let mut mi_col_starts = [0_u16; 64];
         let mut mi_row_starts = [0_u16; 64];
-        mi_col_starts[1] = mi_cols;
-        mi_row_starts[1] = mi_rows;
+        mi_col_starts[1] = sb_cols.saturating_mul(sb_mi_size);
+        mi_row_starts[1] = sb_rows.saturating_mul(sb_mi_size);
         let mut width_in_sbs_minus1 = [0_u16; 64];
         let mut height_in_sbs_minus1 = [0_u16; 64];
         width_in_sbs_minus1[0] = sb_cols.saturating_sub(1);
@@ -236,7 +242,7 @@ impl Av1DecodeStdPictureInfoScope {
             },
             global_motion: StdVideoAV1GlobalMotion {
                 GmType: [0; 8],
-                gm_params: [[0; 6]; 8],
+                gm_params: av1_identity_global_motion_params(),
             },
             mi_col_starts,
             mi_row_starts,
@@ -483,6 +489,7 @@ impl Av1DecodeBitstreamUploadPlan {
             decode.picture_info.std_picture_info,
             decode.coded_width,
             decode.coded_height,
+            decode.picture_info.use_128x128_superblock,
             decode.picture_info.key_frame_header.as_ref(),
         );
         std_picture_scope.attach_pointers();
@@ -1410,13 +1417,22 @@ pub(crate) fn build_av1_decode_submit_skeletons(
     bitstream: &[u8],
 ) -> Result<Vec<Av1DecodeSubmitSkeleton>, String> {
     let records = parse_av1_low_overhead_obus(bitstream)?;
+    let sequence_header = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .map(|record| parse_av1_sequence_header_payload(&bitstream[record.payload_range.clone()]))
+        .transpose()?;
     let mut submits = Vec::new();
     let mut consumed_tile_groups = vec![false; records.len()];
 
     for (index, record) in records.iter().enumerate() {
         match record.obu_type {
             Av1ObuType::Frame => {
-                submits.push(build_av1_frame_obu_submit_skeleton(bitstream, record)?);
+                submits.push(build_av1_frame_obu_submit_skeleton(
+                    bitstream,
+                    record,
+                    sequence_header.as_ref(),
+                )?);
             }
             Av1ObuType::FrameHeader => {
                 let tile_groups: Vec<(usize, &Av1ObuRecord)> = records
@@ -1431,7 +1447,11 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                     for (tile_index, _) in &tile_groups {
                         consumed_tile_groups[*tile_index] = true;
                     }
-                    submits.push(build_av1_tile_group_submit_skeleton(record, &tile_groups)?);
+                    submits.push(build_av1_tile_group_submit_skeleton(
+                        record,
+                        &tile_groups,
+                        sequence_header.as_ref(),
+                    )?);
                 }
             }
             Av1ObuType::TileGroup if !consumed_tile_groups[index] => {
@@ -1667,6 +1687,7 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
         frame_header_offset: submit.frame_header_offset,
         tile_offsets: submit.tile_offsets.clone(),
         tile_sizes: submit.tile_sizes.clone(),
+        use_128x128_superblock: submit.use_128x128_superblock,
         key_frame_header: submit.key_frame_header,
     })
 }
@@ -1818,9 +1839,19 @@ fn key_frame_std_picture_info() -> StdVideoDecodeAV1PictureInfo {
     }
 }
 
+fn av1_identity_global_motion_params() -> [[i32; 6]; 8] {
+    let mut params = [[0; 6]; 8];
+    for ref_params in &mut params {
+        ref_params[2] = AV1_WARPEDMODEL_PRECISION_IDENTITY;
+        ref_params[5] = AV1_WARPEDMODEL_PRECISION_IDENTITY;
+    }
+    params
+}
+
 fn build_av1_frame_obu_submit_skeleton(
     bitstream: &[u8],
     frame_record: &Av1ObuRecord,
+    sequence_header: Option<&ParsedAv1SequenceHeader>,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
@@ -1828,6 +1859,7 @@ fn build_av1_frame_obu_submit_skeleton(
         bitstream
             .get(frame_record.payload_range.clone())
             .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?,
+        sequence_header,
     )
     .ok();
     let tile_payload_offset = key_frame_header
@@ -1855,6 +1887,7 @@ fn build_av1_frame_obu_submit_skeleton(
         frame_header_offset: tile_offset,
         tile_offsets: vec![tile_offset],
         tile_sizes: vec![tile_size],
+        use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
         key_frame_header,
     })
 }
@@ -1862,6 +1895,7 @@ fn build_av1_frame_obu_submit_skeleton(
 fn build_av1_tile_group_submit_skeleton(
     frame_header_record: &Av1ObuRecord,
     tile_group_records: &[(usize, &Av1ObuRecord)],
+    sequence_header: Option<&ParsedAv1SequenceHeader>,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_header_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
@@ -1885,11 +1919,15 @@ fn build_av1_tile_group_submit_skeleton(
         frame_header_offset,
         tile_offsets,
         tile_sizes,
+        use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
         key_frame_header: None,
     })
 }
 
-fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHeader, String> {
+fn parse_av1_key_frame_obu_header(
+    payload: &[u8],
+    _sequence_header: Option<&ParsedAv1SequenceHeader>,
+) -> Result<Av1ParsedKeyFrameHeader, String> {
     let mut bits = BitReader::new(payload);
     let show_existing_frame = bits.read_bool("show_existing_frame")?;
     if show_existing_frame {
@@ -4322,15 +4360,13 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
         let enable_warped_motion = bits.read_bool("enable_warped_motion")?;
         let enable_dual_filter = bits.read_bool("enable_dual_filter")?;
         let enable_order_hint = bits.read_bool("enable_order_hint")?;
-        let (enable_jnt_comp, enable_ref_frame_mvs, order_hint_bits_minus_1) = if enable_order_hint
-        {
+        let (enable_jnt_comp, enable_ref_frame_mvs) = if enable_order_hint {
             (
                 bits.read_bool("enable_jnt_comp")?,
                 bits.read_bool("enable_ref_frame_mvs")?,
-                bits.read_bits_u8(3, "order_hint_bits_minus_1")?,
             )
         } else {
-            (false, false, 0)
+            (false, false)
         };
         let seq_force_screen_content_tools = if bits.read_bool("seq_choose_screen_content_tools")? {
             AV1_SELECT_SCREEN_CONTENT_TOOLS
@@ -4345,6 +4381,11 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
             } else {
                 0
             };
+        let order_hint_bits_minus_1 = if enable_order_hint {
+            bits.read_bits_u8(3, "order_hint_bits_minus_1")?
+        } else {
+            0
+        };
         let enable_superres = bits.read_bool("enable_superres")?;
         let enable_cdef = bits.read_bool("enable_cdef")?;
         let enable_restoration = bits.read_bool("enable_restoration")?;
@@ -4764,6 +4805,47 @@ mod tests {
     }
 
     #[test]
+    fn sequence_header_parser_reads_ffmpeg_libaom_superblock_size() {
+        let payload = [
+            0x00, 0x00, 0x00, 0x04, 0x3c, 0xfe, 0xcc, 0xda, 0xf9, 0x00, 0x40,
+        ];
+        let parsed = parse_av1_sequence_header_payload(&payload)
+            .expect("generated FFmpeg libaom sequence header should parse");
+
+        assert_eq!(parsed.coded_width(), 320);
+        assert_eq!(parsed.coded_height(), 180);
+        assert!(!parsed.use_128x128_superblock);
+        assert_eq!(parsed.order_hint_bits_minus_1, 6);
+    }
+
+    #[test]
+    fn std_picture_scope_uses_sequence_superblock_size_for_tile_layout() {
+        let scope_64 =
+            Av1DecodeStdPictureInfoScope::new(key_frame_std_picture_info(), 320, 180, false, None);
+        assert_eq!(scope_64.width_in_sbs_minus1[0], 4);
+        assert_eq!(scope_64.height_in_sbs_minus1[0], 2);
+        assert_eq!(scope_64.mi_col_starts[1], 80);
+        assert_eq!(scope_64.mi_row_starts[1], 48);
+
+        let scope_128 =
+            Av1DecodeStdPictureInfoScope::new(key_frame_std_picture_info(), 320, 180, true, None);
+        assert_eq!(scope_128.width_in_sbs_minus1[0], 2);
+        assert_eq!(scope_128.height_in_sbs_minus1[0], 1);
+        assert_eq!(scope_128.mi_col_starts[1], 96);
+        assert_eq!(scope_128.mi_row_starts[1], 64);
+    }
+
+    #[test]
+    fn global_motion_defaults_to_identity_params() {
+        let params = av1_identity_global_motion_params();
+        assert!(
+            params
+                .iter()
+                .all(|ref_params| *ref_params == [0, 0, 65_536, 0, 0, 65_536])
+        );
+    }
+
+    #[test]
     fn sequence_header_builder_populates_vulkan_std_header() {
         let payload = av1_reduced_still_sequence_header_payload(640, 360);
         let parsed = parse_av1_sequence_header_payload(&payload)
@@ -4848,10 +4930,15 @@ mod tests {
 
     #[test]
     fn key_frame_obu_tile_payload_offset_skips_libaom_header() {
+        let sequence_payload = [
+            0x00, 0x00, 0x00, 0x04, 0x3c, 0xfe, 0xcc, 0xda, 0xf9, 0x00, 0x40,
+        ];
+        let sequence_header = parse_av1_sequence_header_payload(&sequence_payload)
+            .expect("generated FFmpeg libaom sequence header should parse");
         let payload = [
             0x14, 0x00, 0x24, 0x00, 0x03, 0x8e, 0x69, 0xa2, 0x90, 0xae, 0xb0, 0x28, 0xdb, 0x5c,
         ];
-        let header = parse_av1_key_frame_obu_header(&payload)
+        let header = parse_av1_key_frame_obu_header(&payload, Some(&sequence_header))
             .expect("libaom key-frame header should be parsed");
         assert_eq!(header.tile_payload_offset, 12);
         assert_eq!(header.base_q_idx, 128);
@@ -4954,6 +5041,7 @@ mod tests {
             frame_header_offset: 12,
             tile_offsets: vec![12],
             tile_sizes: vec![5],
+            use_128x128_superblock: false,
             key_frame_header: None,
         };
 
@@ -4991,6 +5079,7 @@ mod tests {
             frame_header_offset: 12,
             tile_offsets: Vec::new(),
             tile_sizes: Vec::new(),
+            use_128x128_superblock: false,
             key_frame_header: None,
         };
 
@@ -5793,6 +5882,7 @@ mod tests {
             frame_header_offset: 4,
             tile_offsets: vec![8],
             tile_sizes: vec![5],
+            use_128x128_superblock: false,
             key_frame_header: None,
         };
 

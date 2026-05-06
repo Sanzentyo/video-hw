@@ -243,17 +243,18 @@ Current implementation progress:
   uses a separate image view with `VIDEO_DECODE_DPB_KHR` usage on the same image,
   matching FFmpeg's separate output/reference view shape. Video session creation
   now uses the capability maximum coded extent, matching FFmpeg's session scope
-  instead of constraining the session to the input frame size. These changes keep
-  the Vulkan command path closer to FFmpeg but leave the PSNR value unchanged.
-  The output is still neutral NV12-like rather than the FFmpeg reference, so the
-  AV1 picture/session modeling is not yet bit-exact enough to claim decode
-  support.
+  instead of constraining the session to the input frame size. The sequence
+  header parser now follows FFmpeg `trace_headers` ordering for
+  `seq_choose_screen_content_tools`/`seq_choose_integer_mv` before
+  `order_hint_bits_minus_1`, and AV1 global-motion defaults now use FFmpeg's
+  identity matrix values (`gm_params[2]` and `[5]` set to `1 << 16`) rather than
+  all-zero params. With these changes the generated-OBU Vulkan AV1 path now
+  matches the FFmpeg software-reference Y plane exactly for the one-frame
+  key-frame case (`psnr_y_min=inf`).
   An opt-in
   `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic now wraps the decode command
-  in a `VK_QUERY_TYPE_RESULT_STATUS_ONLY_KHR` query; on NVIDIA it reports the
-  positive raw status `1000331003` for the generated-OBU readback probe, which
-  means the operations inside the query completed successfully even though the
-  decoded pixels still do not match FFmpeg;
+  in a `VK_QUERY_TYPE_RESULT_STATUS_ONLY_KHR` query; on NVIDIA the current
+  generated-OBU readback probe reports `decode_query_status_raw=Some(1)`;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -267,14 +268,15 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
 - `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
 - latest generated-OBU query/readback probe report:
-  `output/vulkan-av1-record-probe/vulkan-av1-record-probe-1778065963491.md`
+  `output/vulkan-av1-record-probe/vulkan-av1-record-probe-1778066474411.md`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode metadata`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode nv12 --output output/vulkan-av1-record-probe/av1-vulkan-decode.nv12`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode rgb24 --output output/vulkan-av1-record-probe/av1-vulkan-decode.rgb`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778065963494.md`,
-  `psnr_y_min=12.9600`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778066496982.md`,
+  `psnr_y_min=inf`)
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.

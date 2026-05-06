@@ -205,13 +205,15 @@ Tasks:
    pNext shape; setup/reference DPB slots now bind a separate DPB-only image view
    over the same image, matching FFmpeg's output/reference view split. Session
    creation now uses the capability maximum coded extent, as FFmpeg does, rather
-   than the input frame extent. An opt-in
+   than the input frame extent. The sequence-header parser now follows FFmpeg
+   `trace_headers` field ordering around screen-content/integer-mv selection and
+   `order_hint_bits_minus_1`, and global motion defaults now use identity matrix
+   params (`gm_params[2]` and `[5]` equal to `1 << 16`) like FFmpeg. An opt-in
    `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic can also wrap the decode in a
-   result-status query; NVIDIA returns a positive raw status for the generated
-   OBU probe, so the remaining failure is pixel/parity modeling rather than a
-   submitted decode operation failure.
-   The generated-OBU PSNR gate remains at `psnr_y_min=12.9600`, so more
-   FFmpeg/std-struct parity work is required.
+   result-status query; NVIDIA returns `decode_query_status_raw=Some(1)` for the
+   generated OBU probe. The one-frame generated-OBU PSNR gate now passes at
+   `--min-psnr-y 60` with `psnr_y_min=inf`, matching the FFmpeg software
+   reference Y plane exactly for that case.
 5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
    the one-frame explicit Vulkan AV1 path.
 
@@ -221,8 +223,8 @@ Acceptance:
   the expected frame count for generated key-frame-only input.
 - `--output-mode nv12` and `--output-mode rgb24` return non-empty payloads.
 - `scripts/check_vulkan_av1_psnr.rs` records the current FFmpeg-reference
-  decode PSNR. It intentionally fails at production thresholds until AV1
-  frame-header-derived picture info replaces the current defaults.
+  decode PSNR and passes the generated one-frame key-frame gate at
+  `--min-psnr-y 60`.
 
 ### Phase 5: Integrated Benchmark
 
