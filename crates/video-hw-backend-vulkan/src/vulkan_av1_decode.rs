@@ -1744,6 +1744,44 @@ pub(crate) fn decode_av1_bitstream_to_nv12_frames(
         .collect()
 }
 
+pub(crate) fn count_av1_display_frames(bitstream: &[u8]) -> Result<usize, String> {
+    let records = parse_av1_low_overhead_obus(bitstream)?;
+    let sequence_header = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .map(|record| {
+            oxideav_av1::parse_sequence_header(&bitstream[record.payload_range.clone()])
+                .map_err(|err| format!("oxideav AV1 sequence-header parse failed: {err}"))
+        })
+        .transpose()?
+        .ok_or_else(|| "missing AV1 sequence header OBU".to_string())?;
+    let mut dpb = OxideAv1Dpb::new();
+    records
+        .iter()
+        .filter(|record| matches!(record.obu_type, Av1ObuType::Frame | Av1ObuType::FrameHeader))
+        .try_fold(0usize, |count, record| {
+            let payload = bitstream
+                .get(record.payload_range.clone())
+                .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
+            let frame_header = match record.obu_type {
+                Av1ObuType::Frame => {
+                    let (frame_header, _) =
+                        parse_frame_obu_with_dpb(&sequence_header, payload, &dpb)
+                            .map_err(|err| format!("oxideav AV1 frame OBU parse failed: {err}"))?;
+                    frame_header
+                }
+                Av1ObuType::FrameHeader => {
+                    parse_frame_header_with_dpb(&sequence_header, payload, &dpb)
+                        .map_err(|err| format!("oxideav AV1 frame-header parse failed: {err}"))?
+                }
+                _ => unreachable!("filtered to AV1 frame-bearing OBUs"),
+            };
+            let shown = frame_header.show_frame || frame_header.show_existing_frame;
+            update_oxideav_dpb_from_frame_header(&mut dpb, &frame_header);
+            Ok(count + usize::from(shown))
+        })
+}
+
 pub(crate) fn submit_av1_bitstream_without_readback(
     bitstream: &[u8],
 ) -> Result<Av1DecodeBitstreamSessionProbe, String> {

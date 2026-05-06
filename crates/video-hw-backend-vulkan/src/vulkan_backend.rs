@@ -19,9 +19,10 @@ use crate::{
         build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
         build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
         build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
-        decode_av1_bitstream_to_nv12_frames, extract_av1_std_sequence_header,
-        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
-        probe_av1_decode_session_parameters_for_bitstream, submit_av1_bitstream_without_readback,
+        count_av1_display_frames, decode_av1_bitstream_to_nv12_frames,
+        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
+        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
+        submit_av1_bitstream_without_readback,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -372,6 +373,12 @@ impl VulkanDecoderAdapter {
                     av1_decode_blocker_message_with_bitstream(bitstream)
                 ))
             })?;
+            let display_frame_count = count_av1_display_frames(bitstream).map_err(|err| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan AV1 decode could not count display frames: {err}; {}",
+                    av1_decode_blocker_message_with_bitstream(bitstream)
+                ))
+            })?;
             let Some(first_decode) = decodes.first() else {
                 return Ok(Vec::new());
             };
@@ -382,10 +389,8 @@ impl VulkanDecoderAdapter {
                 BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
             })?;
             let pts_step = decode_pts_step(self.config.fps);
-            return decodes
-                .iter()
-                .enumerate()
-                .map(|(index, _decode)| {
+            return (0..display_frame_count)
+                .map(|index| {
                     let pts = self
                         .next_pts_90k
                         .saturating_add(usize_to_i64(index).saturating_mul(pts_step));
