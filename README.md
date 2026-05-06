@@ -93,6 +93,7 @@ Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|
 
 ## AV1 対応
 
+- 詳細な実装/検証状況は `docs/status/AV1_BACKEND_STATUS_2026-05-06.md` を参照してください。
 - `Codec::Av1` は NVIDIA NVENC/NVDEC と Intel oneVPL の codec mapping に対応しています。
 - NVIDIA の AV1 elementary stream は FFmpeg の `obu` demuxer と同じ低オーバーヘッド OBU として扱います。確認例: `ffprobe -f obu output/nv-av1-smoke-repeat.av1`。
 - `video-hw-fmp4` は `av01` sample entry / `av1C` box を生成・読取できます。AV1 fMP4 の sample payload は `EncodedLayout::Av1` として扱い、reader の `to_annexb()` は互換上の名前のまま OBU payload を返します。
