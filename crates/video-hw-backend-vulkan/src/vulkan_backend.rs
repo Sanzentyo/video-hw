@@ -19,7 +19,7 @@ use crate::{
         build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
         build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
         build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
-        decode_av1_bitstream_to_nv12, extract_av1_std_sequence_header,
+        decode_av1_bitstream_to_nv12_frames, extract_av1_std_sequence_header,
         inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
         probe_av1_decode_session_parameters_for_bitstream,
     },
@@ -365,33 +365,48 @@ impl VulkanDecoderAdapter {
                 av1_decode_blocker_message_with_bitstream(bitstream)
             ))
         })?;
-        if decodes.len() != 1 {
-            return Err(BackendError::UnsupportedConfig(format!(
-                "Vulkan AV1 decode currently supports exactly one key-frame decode per bitstream, got {}; {}",
-                decodes.len(),
-                av1_decode_blocker_message_with_bitstream(bitstream)
-            )));
-        }
-        let readback = decode_av1_bitstream_to_nv12(bitstream).map_err(|err| {
+        let readbacks = decode_av1_bitstream_to_nv12_frames(bitstream).map_err(|err| {
             BackendError::UnsupportedConfig(format!(
                 "Vulkan AV1 decode submit/readback failed: {err}; {}",
                 av1_decode_blocker_message_with_bitstream(bitstream)
             ))
         })?;
-        let width = usize::try_from(readback.coded_width).map_err(|_| {
+        if readbacks.len() < decodes.len() {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode readback frame count is too small: got {}, need {}; {}",
+                readbacks.len(),
+                decodes.len(),
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            )));
+        }
+        let Some(first_readback) = readbacks.first() else {
+            return Ok(Vec::new());
+        };
+        let width = usize::try_from(first_readback.coded_width).map_err(|_| {
             BackendError::InvalidInput("decoded AV1 width does not fit in usize".to_string())
         })?;
-        let height = usize::try_from(readback.coded_height).map_err(|_| {
+        let height = usize::try_from(first_readback.coded_height).map_err(|_| {
             BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
         })?;
-        let mut frame = metadata_only_frame(width, height, Some(self.next_pts_90k));
-        frame.decode_info_flags = Some(if readback.readback_non_zero { 1 } else { 0 });
-        if !matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
-            frame.pixel_format = Some(u32::from_le_bytes(*b"NV12"));
-            frame.nv12 = Some(av1_readback_to_nv12_payload(&readback.data, width, height)?);
-            frame.force_keyframe = true;
-        }
-        Ok(vec![frame])
+        let pts_step = decode_pts_step(self.config.fps);
+        readbacks
+            .into_iter()
+            .take(decodes.len())
+            .enumerate()
+            .map(|(index, readback)| {
+                let pts = self
+                    .next_pts_90k
+                    .saturating_add(usize_to_i64(index).saturating_mul(pts_step));
+                let mut frame = metadata_only_frame(width, height, Some(pts));
+                frame.decode_info_flags = Some(if readback.readback_non_zero { 1 } else { 0 });
+                if !matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+                    frame.pixel_format = Some(u32::from_le_bytes(*b"NV12"));
+                    frame.nv12 = Some(av1_readback_to_nv12_payload(&readback.data, width, height)?);
+                    frame.force_keyframe = true;
+                }
+                Ok(frame)
+            })
+            .collect()
     }
 }
 

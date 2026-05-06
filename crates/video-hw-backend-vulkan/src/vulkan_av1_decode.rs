@@ -65,6 +65,8 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub decode_image_barrier_layers: u32,
     pub readback_bytes: u64,
     pub readback_region_count: usize,
+    pub readback_sample_stride: u64,
+    pub readback_sample_count: u32,
     pub readback_mapped_bytes: usize,
     pub readback_non_zero: bool,
     pub readback_sample: Vec<u8>,
@@ -366,6 +368,8 @@ pub(crate) struct Av1DecodeImagePlan {
 #[derive(Debug, Clone)]
 pub(crate) struct Av1DecodeReadbackPlan {
     pub buffer_size: u64,
+    pub sample_stride: u64,
+    pub sample_count: u32,
     pub regions: Vec<vk::BufferImageCopy>,
 }
 
@@ -799,7 +803,12 @@ impl Av1DecodeCommandSkeleton {
         &self,
         format: vk::Format,
     ) -> Result<Av1DecodeReadbackPlan, String> {
-        build_av1_decode_readback_plan(format, self.coded_width, self.coded_height)
+        build_av1_decode_readback_plan(
+            format,
+            self.coded_width,
+            self.coded_height,
+            self.image_array_layers()?,
+        )
     }
 
     pub(crate) fn begin_picture_resources<'a>(
@@ -1323,9 +1332,9 @@ pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
     probe_av1_decode_session_parameters_for_bitstream_with_options(bitstream, options)
 }
 
-pub(crate) fn decode_av1_bitstream_to_nv12(
+pub(crate) fn decode_av1_bitstream_to_nv12_frames(
     bitstream: &[u8],
-) -> Result<Av1DecodeReadbackFrame, String> {
+) -> Result<Vec<Av1DecodeReadbackFrame>, String> {
     let probe = probe_av1_decode_session_parameters_for_bitstream_with_options(
         bitstream,
         Av1DecodeBitstreamSessionProbeOptions {
@@ -1347,12 +1356,31 @@ pub(crate) fn decode_av1_bitstream_to_nv12(
             probe.readback_sample.len()
         ));
     }
-    Ok(Av1DecodeReadbackFrame {
-        coded_width: probe.coded_width,
-        coded_height: probe.coded_height,
-        data: probe.readback_sample,
-        readback_non_zero: probe.readback_non_zero,
-    })
+    let frame_count = usize::try_from(probe.readback_sample_count)
+        .map_err(|_| "Vulkan AV1 readback sample count does not fit in usize".to_string())?;
+    let sample_stride = usize::try_from(probe.readback_sample_stride)
+        .map_err(|_| "Vulkan AV1 readback sample stride does not fit in usize".to_string())?;
+    if frame_count == 0
+        || sample_stride == 0
+        || sample_stride.saturating_mul(frame_count) != probe.readback_mapped_bytes
+    {
+        return Err(format!(
+            "Vulkan AV1 readback payload cannot be split into {frame_count} frames: mapped={}",
+            probe.readback_mapped_bytes
+        ));
+    }
+    probe
+        .readback_sample
+        .chunks_exact(sample_stride)
+        .map(|sample| {
+            Ok(Av1DecodeReadbackFrame {
+                coded_width: probe.coded_width,
+                coded_height: probe.coded_height,
+                data: sample.to_vec(),
+                readback_non_zero: sample.iter().any(|byte| *byte != 0),
+            })
+        })
+        .collect()
 }
 
 fn probe_av1_decode_session_parameters_for_bitstream_with_options(
@@ -2850,6 +2878,8 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     decode_image_barrier_layers,
                     readback_bytes: readback_plan.buffer_size,
                     readback_region_count: readback_plan.regions.len(),
+                    readback_sample_stride: readback_plan.sample_stride,
+                    readback_sample_count: readback_plan.sample_count,
                     readback_mapped_bytes: readback_sample.mapped_bytes,
                     readback_non_zero: readback_sample.non_zero,
                     readback_sample: readback_sample.data,
@@ -3758,7 +3788,7 @@ fn record_and_destroy_av1_decode_command_buffer(
                     base_mip_level: 0,
                     level_count: 1,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count: readback.plan.sample_count,
                 });
             let decode_to_copy_dependency = vk::DependencyInfo::default()
                 .image_memory_barriers(std::slice::from_ref(&decode_to_copy_image_barrier));
@@ -3957,14 +3987,18 @@ fn build_av1_decode_readback_plan(
     format: vk::Format,
     coded_width: u32,
     coded_height: u32,
+    sample_count: u32,
 ) -> Result<Av1DecodeReadbackPlan, String> {
     if coded_width == 0 || coded_height == 0 {
         return Err(format!(
             "invalid coded extent for AV1 decode readback: {coded_width}x{coded_height}"
         ));
     }
+    if sample_count == 0 {
+        return Err("AV1 decode readback requires at least one sample".to_string());
+    }
 
-    let mut regions = Vec::new();
+    let mut frame_regions = Vec::new();
     let mut next_offset = 0_u64;
     let mut push_region = |aspect_mask: vk::ImageAspectFlags,
                            plane_width: u32,
@@ -3978,7 +4012,7 @@ fn build_av1_decode_readback_plan(
             .checked_mul(u64::from(plane_height))
             .ok_or_else(|| "AV1 decode readback plane size overflowed u64".to_string())?;
         let offset = align_av1_decode_readback_offset(next_offset, 4);
-        regions.push(
+        frame_regions.push(
             vk::BufferImageCopy::default()
                 .buffer_offset(offset)
                 .buffer_row_length(plane_width)
@@ -4019,8 +4053,33 @@ fn build_av1_decode_readback_plan(
         }
     }
 
+    let sample_stride = align_av1_decode_readback_offset(next_offset, 4);
+    let mut regions = Vec::with_capacity(
+        frame_regions
+            .len()
+            .saturating_mul(usize::try_from(sample_count).unwrap_or(usize::MAX)),
+    );
+    for sample_index in 0..sample_count {
+        let sample_offset = sample_stride
+            .checked_mul(u64::from(sample_index))
+            .ok_or_else(|| "AV1 decode readback sample offset overflowed u64".to_string())?;
+        for region in &frame_regions {
+            let mut region = *region;
+            region.buffer_offset = sample_offset
+                .checked_add(region.buffer_offset)
+                .ok_or_else(|| "AV1 decode readback region offset overflowed u64".to_string())?;
+            region.image_subresource.base_array_layer = sample_index;
+            regions.push(region);
+        }
+    }
+    let buffer_size = sample_stride
+        .checked_mul(u64::from(sample_count))
+        .ok_or_else(|| "AV1 decode readback buffer size overflowed u64".to_string())?;
+
     Ok(Av1DecodeReadbackPlan {
-        buffer_size: next_offset,
+        buffer_size,
+        sample_stride,
+        sample_count,
         regions,
     })
 }
@@ -5273,8 +5332,10 @@ mod tests {
         let readback_plan = command
             .decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM)
             .expect("NV12 readback plan should be built");
-        assert_eq!(readback_plan.buffer_size, 320 * 180 + 320 * 90);
-        assert_eq!(readback_plan.regions.len(), 2);
+        assert_eq!(readback_plan.sample_count, 2);
+        assert_eq!(readback_plan.sample_stride, 320 * 180 + 320 * 90);
+        assert_eq!(readback_plan.buffer_size, (320 * 180 + 320 * 90) * 2);
+        assert_eq!(readback_plan.regions.len(), 4);
         assert_eq!(
             readback_plan.regions[0].image_subresource.aspect_mask,
             vk::ImageAspectFlags::PLANE_0
@@ -5906,10 +5967,13 @@ mod tests {
 
     #[test]
     fn av1_decode_readback_plan_handles_odd_nv12_dimensions() {
-        let plan = build_av1_decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM, 641, 479)
-            .expect("odd NV12 dimensions should produce a readback plan");
+        let plan =
+            build_av1_decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM, 641, 479, 1)
+                .expect("odd NV12 dimensions should produce a readback plan");
 
         assert_eq!(plan.regions.len(), 2);
+        assert_eq!(plan.sample_count, 1);
+        assert_eq!(plan.sample_stride, plan.buffer_size);
         assert_eq!(plan.regions[0].buffer_offset, 0);
         assert_eq!(plan.regions[0].buffer_row_length, 641);
         assert_eq!(plan.regions[0].buffer_image_height, 479);
@@ -5925,8 +5989,28 @@ mod tests {
     }
 
     #[test]
+    fn av1_decode_readback_plan_copies_each_image_layer() {
+        let plan =
+            build_av1_decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM, 320, 180, 3)
+                .expect("multi-layer NV12 readback should produce a readback plan");
+
+        assert_eq!(plan.sample_count, 3);
+        assert_eq!(plan.sample_stride, 320 * 180 + 320 * 90);
+        assert_eq!(plan.buffer_size, plan.sample_stride * 3);
+        assert_eq!(plan.regions.len(), 6);
+        assert_eq!(plan.regions[0].image_subresource.base_array_layer, 0);
+        assert_eq!(plan.regions[1].image_subresource.base_array_layer, 0);
+        assert_eq!(plan.regions[2].image_subresource.base_array_layer, 1);
+        assert_eq!(plan.regions[3].image_subresource.base_array_layer, 1);
+        assert_eq!(plan.regions[4].image_subresource.base_array_layer, 2);
+        assert_eq!(plan.regions[5].image_subresource.base_array_layer, 2);
+        assert_eq!(plan.regions[2].buffer_offset, plan.sample_stride);
+        assert_eq!(plan.regions[4].buffer_offset, plan.sample_stride * 2);
+    }
+
+    #[test]
     fn av1_decode_readback_plan_rejects_unsupported_format() {
-        let err = build_av1_decode_readback_plan(vk::Format::D32_SFLOAT, 320, 180)
+        let err = build_av1_decode_readback_plan(vk::Format::D32_SFLOAT, 320, 180, 1)
             .expect_err("unsupported readback format should be rejected");
         assert!(err.contains("not implemented"));
     }
