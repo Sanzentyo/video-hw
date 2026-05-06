@@ -1423,6 +1423,91 @@ impl<'a> BitReader<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn av1_chunk_preserves_obu_payload_and_caches_sequence_header() {
+        let sequence_header = av1_obu(1, &[0x00]);
+        let frame = av1_obu(6, &[0x80]);
+        let mut chunk = av1_obu(2, &[]);
+        chunk.extend_from_slice(&sequence_header);
+        chunk.extend_from_slice(&frame);
+
+        let mut cached_sequence_header = None;
+        let mut cached_config = None;
+        let sample =
+            av1_chunk_to_av1_sample(&chunk, &mut cached_sequence_header, &mut cached_config)
+                .expect("AV1 sample conversion")
+                .expect("sample payload");
+
+        assert_eq!(sample, chunk);
+        assert_eq!(
+            cached_sequence_header.as_deref(),
+            Some(sequence_header.as_slice())
+        );
+        assert!(cached_config.is_some());
+
+        let second_frame = av1_obu(6, &[0x81]);
+        let second_sample = av1_chunk_to_av1_sample(
+            &second_frame,
+            &mut cached_sequence_header,
+            &mut cached_config,
+        )
+        .expect("second AV1 sample conversion")
+        .expect("second sample payload");
+        assert_eq!(second_sample, second_frame);
+        assert_eq!(
+            cached_sequence_header.as_deref(),
+            Some(sequence_header.as_slice())
+        );
+    }
+
+    #[test]
+    fn av1_sample_entry_uses_sequence_header_as_av1c_config_obus() {
+        let sequence_header = av1_obu(1, &[0x00]);
+        let entry = create_av1_sample_entry(
+            320,
+            180,
+            &sequence_header,
+            Av1ConfigSummary {
+                seq_profile: 1,
+                seq_level_idx_0: 8,
+                seq_tier_0: 1,
+                high_bitdepth: 1,
+                twelve_bit: 0,
+                monochrome: 0,
+                chroma_subsampling_x: 1,
+                chroma_subsampling_y: 0,
+                chroma_sample_position: 2,
+            },
+        );
+
+        let SampleEntry::Av01(av01) = entry else {
+            panic!("expected av01 sample entry");
+        };
+        assert_eq!(av01.visual.width, 320);
+        assert_eq!(av01.visual.height, 180);
+        assert_eq!(av01.av1c_box.config_obus, sequence_header);
+        assert_eq!(av01.av1c_box.seq_profile.get(), 1);
+        assert_eq!(av01.av1c_box.seq_level_idx_0.get(), 8);
+        assert_eq!(av01.av1c_box.seq_tier_0.get(), 1);
+        assert_eq!(av01.av1c_box.high_bitdepth.get(), 1);
+        assert_eq!(av01.av1c_box.chroma_subsampling_y.get(), 0);
+        assert_eq!(av01.av1c_box.chroma_sample_position.get(), 2);
+    }
+
+    fn av1_obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 128);
+        let mut out = Vec::with_capacity(payload.len() + 2);
+        out.push((obu_type << 3) | 0x02);
+        out.push(payload.len() as u8);
+        out.extend_from_slice(payload);
+        out
+    }
+}
+
 fn patch_fmp4_init_segment_timing(
     init_segment: &[u8],
     creation_timestamp: Duration,
