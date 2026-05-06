@@ -21,7 +21,7 @@ use crate::{
         build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
         decode_av1_bitstream_to_nv12_frames, extract_av1_std_sequence_header,
         inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
-        probe_av1_decode_session_parameters_for_bitstream,
+        probe_av1_decode_session_parameters_for_bitstream, submit_av1_bitstream_without_readback,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -365,6 +365,36 @@ impl VulkanDecoderAdapter {
                 av1_decode_blocker_message_with_bitstream(bitstream)
             ))
         })?;
+        if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+            submit_av1_bitstream_without_readback(bitstream).map_err(|err| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan AV1 decode submit failed: {err}; {}",
+                    av1_decode_blocker_message_with_bitstream(bitstream)
+                ))
+            })?;
+            let Some(first_decode) = decodes.first() else {
+                return Ok(Vec::new());
+            };
+            let width = usize::try_from(first_decode.coded_width).map_err(|_| {
+                BackendError::InvalidInput("decoded AV1 width does not fit in usize".to_string())
+            })?;
+            let height = usize::try_from(first_decode.coded_height).map_err(|_| {
+                BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
+            })?;
+            let pts_step = decode_pts_step(self.config.fps);
+            return decodes
+                .iter()
+                .enumerate()
+                .map(|(index, _decode)| {
+                    let pts = self
+                        .next_pts_90k
+                        .saturating_add(usize_to_i64(index).saturating_mul(pts_step));
+                    let mut frame = metadata_only_frame(width, height, Some(pts));
+                    frame.decode_info_flags = Some(0);
+                    Ok(frame)
+                })
+                .collect();
+        }
         let readbacks = decode_av1_bitstream_to_nv12_frames(bitstream).map_err(|err| {
             BackendError::UnsupportedConfig(format!(
                 "Vulkan AV1 decode submit/readback failed: {err}; {}",

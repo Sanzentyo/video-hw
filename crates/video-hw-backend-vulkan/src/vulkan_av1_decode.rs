@@ -1744,6 +1744,19 @@ pub(crate) fn decode_av1_bitstream_to_nv12_frames(
         .collect()
 }
 
+pub(crate) fn submit_av1_bitstream_without_readback(
+    bitstream: &[u8],
+) -> Result<Av1DecodeBitstreamSessionProbe, String> {
+    probe_av1_decode_session_parameters_for_bitstream_with_options(
+        bitstream,
+        Av1DecodeBitstreamSessionProbeOptions {
+            record_command_buffer: true,
+            submit_command_buffer: true,
+            readback: false,
+        },
+    )
+}
+
 fn probe_av1_decode_session_parameters_for_bitstream_with_options(
     bitstream: &[u8],
     options: Av1DecodeBitstreamSessionProbeOptions,

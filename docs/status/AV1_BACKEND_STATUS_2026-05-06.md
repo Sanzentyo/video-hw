@@ -461,12 +461,14 @@ Latest Vulkan AV1 scaffold verification:
   `0`, preserving the passing generated-GOP30 scope. A new bounded-DPB unit test
   (`reference_name_slot_replay_keeps_slots_within_dpb_capacity`) verifies that
   reference-name replay no longer records unbounded frame indexes as DPB slots.
-  Stress report `output/benchmark-backends-av1-1778077279.md` /
-  `output/benchmark-vulkan-av1-1778077279.md` uses
-  `--frames 16 --gop-size 30 --vulkan-av1-lag-in-frames 25 --verify`; FFmpeg
-  Vulkan decode on NVIDIA passes, but video-hw Vulkan AV1 fails before PSNR
-  with `readback frame count is too small: got 16, need 17`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077278007.md`). The generated
+  Stress report `output/benchmark-backends-av1-1778077534.md` /
+  `output/benchmark-vulkan-av1-1778077534.md` uses
+  `--frames 16 --gop-size 30 --vulkan-av1-lag-in-frames 25 --verify`. NVIDIA
+  video-hw metadata decode now separates command submit from NV12 readback and
+  passes at 0.417s, while FFmpeg Vulkan decode passes at 0.312s. The PSNR row
+  still fails before comparison with
+  `readback frame count is too small: got 16, need 17`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077532963.md`). The generated
   stream has 16 temporal units, 22 frame headers, 16 inter frames, and 5
   show-existing frames; the command skeleton reaches 17 decode commands with
   bounded slots `0/1/2/3/...`. The remaining gap is the current single coding
