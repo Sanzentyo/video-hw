@@ -152,7 +152,8 @@ Current implementation progress:
   bundles tying decode-info index, DPB setup slot, destination array layer, and
   upload byte range together; blocker diagnostics now also materialize the first
   frame's `VideoDecodeInfoKHR`/AV1 picture-info/setup-slot chain from the
-  aligned plan;
+  aligned plan and can walk all planned frames in command order with
+  callback-scoped decode-info chains;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

@@ -122,8 +122,8 @@ Tasks:
    plan can use capability-derived values instead of a fixed constant. The
    aligned upload plan can now validate each command frame's source range
    against the compact buffer, produce per-frame submit bundles, and materialize
-   a callback-scoped `VideoDecodeInfoKHR` chain before real command recording
-   consumes it.
+   callback-scoped `VideoDecodeInfoKHR` chains for all frames in command order
+   before real command recording consumes them.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

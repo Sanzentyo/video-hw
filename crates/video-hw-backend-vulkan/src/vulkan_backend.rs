@@ -816,12 +816,22 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         },
                                     )
                                     .unwrap_or(false);
+                                let decode_info_loop_count = upload_plan
+                                    .with_frame_decode_infos(
+                                        &aligned_command,
+                                        vk::Buffer::null(),
+                                        vk::ImageView::null(),
+                                        |_decode_info, bundle| bundle.frame_index,
+                                    )
+                                    .map(|indices| indices.len())
+                                    .unwrap_or_default();
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
                                     submit_bundles.len(),
                                     first_decode_info_ready,
+                                    decode_info_loop_count,
                                     offset_alignment,
                                     size_alignment,
                                     alignment_source,
@@ -1555,6 +1565,7 @@ mod tests {
         assert!(message.contains("coded=320x180"));
         assert!(message.contains("aligned_upload=ready"));
         assert!(message.contains("first_decode_info=true"));
+        assert!(message.contains("decode_info_loop=1"));
     }
 
     #[test]

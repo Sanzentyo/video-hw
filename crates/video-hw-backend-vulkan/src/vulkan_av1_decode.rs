@@ -239,6 +239,26 @@ impl Av1DecodeBitstreamUploadPlan {
 
         Ok(f(&vk_decode_info, &bundle))
     }
+
+    pub(crate) fn with_frame_decode_infos<R>(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+        src_buffer: vk::Buffer,
+        image_view: vk::ImageView,
+        mut f: impl FnMut(&vk::VideoDecodeInfoKHR<'_>, &Av1DecodeFrameSubmitBundle) -> R,
+    ) -> Result<Vec<R>, String> {
+        let mut results = Vec::with_capacity(command.frames.len());
+        for frame in &command.frames {
+            results.push(self.with_frame_decode_info(
+                command,
+                frame.frame_index,
+                src_buffer,
+                image_view,
+                |decode_info, bundle| f(decode_info, bundle),
+            )?);
+        }
+        Ok(results)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2995,6 +3015,23 @@ mod tests {
             )
             .expect("frame decode info should be materialized inside the callback");
         assert_eq!(summary, (1, 16, 8, 1, true, true));
+
+        let loop_summaries = plan
+            .with_frame_decode_infos(
+                &command,
+                vk::Buffer::null(),
+                vk::ImageView::null(),
+                |decode_info, bundle| {
+                    (
+                        bundle.frame_index,
+                        bundle.setup_slot_index,
+                        decode_info.src_buffer_offset,
+                        decode_info.dst_picture_resource.base_array_layer,
+                    )
+                },
+            )
+            .expect("all frame decode infos should materialize in command order");
+        assert_eq!(loop_summaries, vec![(0, 0, 0, 0), (1, 1, 16, 1)]);
     }
 
     #[test]
