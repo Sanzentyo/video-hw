@@ -86,8 +86,12 @@ Current implementation progress:
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;
+- AV1 decode submit skeleton extraction now identifies the first frame payload,
+  frame-header offset, tile offsets, and tile sizes for frame OBUs and
+  frame-header + tile-group OBU pairs;
 - Vulkan AV1 capability is still false because real-bitstream session
-  decode submit, readback, PSNR, and benchmark gates are not implemented;
+  `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
+  implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 

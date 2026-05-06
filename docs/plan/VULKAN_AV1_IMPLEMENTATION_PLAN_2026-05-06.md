@@ -92,7 +92,9 @@ Tasks:
    AV1 without a valid Vulkan contract.
 3. Allocate output and DPB images from the formats accepted by the AV1 profile.
 4. Build a skeleton submit probe that records begin/control/end without frame
-   decode, then a submit execution probe for a single key frame.
+   decode, then a submit execution probe for a single key frame. Bitstream
+   submit skeleton extraction now covers frame-header offset and tile
+   offset/size discovery; Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

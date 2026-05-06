@@ -41,6 +41,14 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeSubmitSkeleton {
+    pub temporal_unit_index: usize,
+    pub frame_header_offset: u32,
+    pub tile_offsets: Vec<u32>,
+    pub tile_sizes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedAv1SequenceHeader {
     pub seq_profile: u8,
     pub still_picture: bool,
@@ -220,6 +228,34 @@ pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
     result
 }
 
+pub(crate) fn build_av1_decode_submit_skeleton(
+    bitstream: &[u8],
+) -> Result<Av1DecodeSubmitSkeleton, String> {
+    let records = parse_av1_low_overhead_obus(bitstream)?;
+    let first_frame_record = records
+        .iter()
+        .find(|record| matches!(record.obu_type, Av1ObuType::Frame | Av1ObuType::TileGroup))
+        .ok_or_else(|| "missing AV1 frame or tile-group OBU for decode submit".to_string())?;
+
+    match first_frame_record.obu_type {
+        Av1ObuType::Frame => build_av1_frame_obu_submit_skeleton(first_frame_record),
+        Av1ObuType::TileGroup => {
+            let frame_header = records.iter().rev().find(|record| {
+                record.temporal_unit_index == first_frame_record.temporal_unit_index
+                    && record.obu_type == Av1ObuType::FrameHeader
+                    && record.obu_range.start < first_frame_record.obu_range.start
+            });
+            let Some(frame_header) = frame_header else {
+                return Err(
+                    "AV1 tile-group OBU is missing a preceding frame-header OBU".to_string()
+                );
+            };
+            build_av1_tile_group_submit_skeleton(frame_header, first_frame_record)
+        }
+        _ => unreachable!("first frame record is filtered to frame payload OBUs"),
+    }
+}
+
 impl ParsedAv1SequenceHeader {
     fn coded_width(&self) -> u32 {
         self.max_frame_width_minus_1 + 1
@@ -228,6 +264,46 @@ impl ParsedAv1SequenceHeader {
     fn coded_height(&self) -> u32 {
         self.max_frame_height_minus_1 + 1
     }
+}
+
+fn build_av1_frame_obu_submit_skeleton(
+    frame_record: &Av1ObuRecord,
+) -> Result<Av1DecodeSubmitSkeleton, String> {
+    let frame_header_offset = u32::try_from(frame_record.payload_range.start)
+        .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
+    let tile_offset = frame_header_offset;
+    let tile_size = u32::try_from(frame_record.payload_range.len())
+        .map_err(|_| "AV1 frame OBU payload size exceeds u32 range".to_string())?;
+    if tile_size == 0 {
+        return Err("AV1 frame OBU payload is empty".to_string());
+    }
+    Ok(Av1DecodeSubmitSkeleton {
+        temporal_unit_index: frame_record.temporal_unit_index,
+        frame_header_offset,
+        tile_offsets: vec![tile_offset],
+        tile_sizes: vec![tile_size],
+    })
+}
+
+fn build_av1_tile_group_submit_skeleton(
+    frame_header_record: &Av1ObuRecord,
+    tile_group_record: &Av1ObuRecord,
+) -> Result<Av1DecodeSubmitSkeleton, String> {
+    let frame_header_offset = u32::try_from(frame_header_record.payload_range.start)
+        .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
+    let tile_offset = u32::try_from(tile_group_record.payload_range.start)
+        .map_err(|_| "AV1 tile offset exceeds u32 range".to_string())?;
+    let tile_size = u32::try_from(tile_group_record.payload_range.len())
+        .map_err(|_| "AV1 tile group payload size exceeds u32 range".to_string())?;
+    if tile_size == 0 {
+        return Err("AV1 tile-group OBU payload is empty".to_string());
+    }
+    Ok(Av1DecodeSubmitSkeleton {
+        temporal_unit_index: tile_group_record.temporal_unit_index,
+        frame_header_offset,
+        tile_offsets: vec![tile_offset],
+        tile_sizes: vec![tile_size],
+    })
 }
 
 fn build_av1_std_sequence_header(
@@ -1462,6 +1538,58 @@ mod tests {
         let err = probe_av1_decode_session_parameters_for_bitstream(&bitstream)
             .expect_err("missing AV1 sequence header should be rejected before Vulkan probing");
         assert!(err.contains("missing AV1 sequence header"));
+    }
+
+    #[test]
+    fn decode_submit_skeleton_maps_frame_obu_payload() {
+        let mut bitstream = make_obu(2, &[]);
+        bitstream.extend_from_slice(&make_obu(
+            1,
+            &av1_reduced_still_sequence_header_payload(320, 180),
+        ));
+        let frame_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(6, &[0xaa, 0xbb, 0xcc]));
+
+        let skeleton = build_av1_decode_submit_skeleton(&bitstream)
+            .expect("frame OBU should produce a submit skeleton");
+
+        assert_eq!(skeleton.temporal_unit_index, 0);
+        assert_eq!(skeleton.frame_header_offset as usize, frame_obu_start + 2);
+        assert_eq!(skeleton.tile_offsets, vec![skeleton.frame_header_offset]);
+        assert_eq!(skeleton.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_submit_skeleton_maps_frame_header_and_tile_group_obus() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let frame_header_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(3, &[0x10, 0x11]));
+        let tile_group_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(4, &[0x20, 0x21, 0x22]));
+
+        let skeleton = build_av1_decode_submit_skeleton(&bitstream)
+            .expect("frame-header + tile-group OBUs should produce a submit skeleton");
+
+        assert_eq!(skeleton.temporal_unit_index, 0);
+        assert_eq!(
+            skeleton.frame_header_offset as usize,
+            frame_header_obu_start + 2
+        );
+        assert_eq!(
+            skeleton.tile_offsets,
+            vec![(tile_group_obu_start + 2) as u32]
+        );
+        assert_eq!(skeleton.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_submit_skeleton_rejects_tile_group_without_frame_header() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(4, &[0x20, 0x21, 0x22]));
+
+        let err = build_av1_decode_submit_skeleton(&bitstream)
+            .expect_err("tile group without frame header should be rejected");
+        assert!(err.contains("missing a preceding frame-header"));
     }
 
     #[test]
