@@ -11,6 +11,7 @@
 - `spec/TEST_SPEC_INVENTORY.md`（現存テスト仕様の棚卸し）
 - `spec/FEATURE_GATING_AND_DEAD_CODE_POLICY.md`（feature有効範囲とdead code運用）
 - `status/STATUS.md`
+- `status/AV1_BACKEND_STATUS_2026-05-06.md`（AV1 backend / fMP4 / FFmpeg parity の完了監査）
 - `status/BENCHMARK_2026-02-18.md`
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
