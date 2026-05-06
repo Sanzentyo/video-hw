@@ -214,15 +214,19 @@ Current implementation progress:
   decode path now reuses that submit/readback path for one-frame key-frame OBU
   inputs, so `decode_to_yuv --backend vulkan --codec av1` returns one frame for
   `metadata`, writes 86,400 bytes for `nv12`, and writes 172,800 bytes for
-  `rgb24` at 320x180; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
+  `rgb24` at 320x180; the Frame OBU path now parses the generated key-frame
+  header far enough to split frame-header bytes from tile payload bytes and to
+  feed observed base quantizer, loop-filter, CDEF, tx-mode, and sequence-header
+  feature flags into the std AV1 structs; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
 - Vulkan AV1 capability is still false because FFmpeg-reference PSNR is not
   passing yet: `scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
   records the current one-frame generated-OBU result as `psnr_y_min=5.6200`,
-  which confirms the output path is live but the AV1 picture-info/default
-  modeling is not yet bit-exact enough to claim decode support;
+  unchanged after the first key-frame header parser pass, which confirms the
+  output path is live but the AV1 picture/session modeling is not yet bit-exact
+  enough to claim decode support;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -260,9 +264,9 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Replace the key-frame/single-tile AV1 picture-info defaults with values
-   parsed from the real AV1 frame header until the generated-OBU PSNR gate
-   reaches the same threshold as other decode backends.
+1. Continue comparing FFmpeg's populated `StdVideoDecodeAV1PictureInfo`/
+   `StdVideoAV1SequenceHeader` fields against video-hw's generated structs; the
+   first key-frame parser pass did not improve PSNR.
 2. Keep the one-frame `decode_to_yuv` path passing while adding multi-frame
    key-frame-only coverage.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for

@@ -12,6 +12,7 @@ use ash::vk::native::{
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1Quantization,
     StdVideoAV1QuantizationFlags, StdVideoAV1Segmentation, StdVideoAV1SequenceHeader,
     StdVideoAV1SequenceHeaderFlags, StdVideoAV1TileInfo, StdVideoAV1TileInfoFlags,
+    StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST,
     StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT, StdVideoDecodeAV1PictureInfo,
     StdVideoDecodeAV1PictureInfoFlags, StdVideoDecodeAV1ReferenceInfo,
     StdVideoDecodeAV1ReferenceInfoFlags,
@@ -79,6 +80,7 @@ pub(crate) struct Av1DecodeSubmitSkeleton {
     pub frame_header_offset: u32,
     pub tile_offsets: Vec<u32>,
     pub tile_sizes: Vec<u32>,
+    pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +90,23 @@ pub(crate) struct Av1DecodePictureInfoSkeleton {
     pub frame_header_offset: u32,
     pub tile_offsets: Vec<u32>,
     pub tile_sizes: Vec<u32>,
+    pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av1ParsedKeyFrameHeader {
+    pub tile_payload_offset: usize,
+    pub base_q_idx: u8,
+    pub loop_filter_level: [u8; 4],
+    pub loop_filter_sharpness: u8,
+    pub loop_filter_delta_enabled: bool,
+    pub cdef_damping_minus_3: u8,
+    pub cdef_bits: u8,
+    pub cdef_y_pri_strength: [u8; 8],
+    pub cdef_y_sec_strength: [u8; 8],
+    pub cdef_uv_pri_strength: [u8; 8],
+    pub cdef_uv_sec_strength: [u8; 8],
+    pub tx_mode: u32,
 }
 
 impl Av1DecodePictureInfoSkeleton {
@@ -117,7 +136,12 @@ struct Av1DecodeStdPictureInfoScope {
 }
 
 impl Av1DecodeStdPictureInfoScope {
-    fn new(base: StdVideoDecodeAV1PictureInfo, coded_width: u32, coded_height: u32) -> Self {
+    fn new(
+        base: StdVideoDecodeAV1PictureInfo,
+        coded_width: u32,
+        coded_height: u32,
+        key_frame_header: Option<&Av1ParsedKeyFrameHeader>,
+    ) -> Self {
         let sb_cols = u16::try_from(coded_width.div_ceil(64).max(1)).unwrap_or(u16::MAX);
         let sb_rows = u16::try_from(coded_height.div_ceil(64).max(1)).unwrap_or(u16::MAX);
         let mi_cols = u16::try_from(coded_width.div_ceil(4).max(1)).unwrap_or(u16::MAX);
@@ -131,7 +155,7 @@ impl Av1DecodeStdPictureInfoScope {
         width_in_sbs_minus1[0] = sb_cols.saturating_sub(1);
         height_in_sbs_minus1[0] = sb_rows.saturating_sub(1);
 
-        Self {
+        let mut scope = Self {
             std_picture_info: base,
             tile_info: StdVideoAV1TileInfo {
                 flags: StdVideoAV1TileInfoFlags {
@@ -200,7 +224,25 @@ impl Av1DecodeStdPictureInfoScope {
             mi_row_starts,
             width_in_sbs_minus1,
             height_in_sbs_minus1,
+        };
+        if let Some(header) = key_frame_header {
+            scope.quantization.base_q_idx = header.base_q_idx;
+            scope.loop_filter.flags._bitfield_1 = StdVideoAV1LoopFilterFlags::new_bitfield_1(
+                header.loop_filter_delta_enabled as u32,
+                0,
+                0,
+            );
+            scope.loop_filter.loop_filter_level = header.loop_filter_level;
+            scope.loop_filter.loop_filter_sharpness = header.loop_filter_sharpness;
+            scope.cdef.cdef_damping_minus_3 = header.cdef_damping_minus_3;
+            scope.cdef.cdef_bits = header.cdef_bits;
+            scope.cdef.cdef_y_pri_strength = header.cdef_y_pri_strength;
+            scope.cdef.cdef_y_sec_strength = header.cdef_y_sec_strength;
+            scope.cdef.cdef_uv_pri_strength = header.cdef_uv_pri_strength;
+            scope.cdef.cdef_uv_sec_strength = header.cdef_uv_sec_strength;
+            scope.std_picture_info.TxMode = header.tx_mode;
         }
+        scope
     }
 
     fn attach_pointers(&mut self) {
@@ -386,6 +428,7 @@ impl Av1DecodeBitstreamUploadPlan {
             decode.picture_info.std_picture_info,
             decode.coded_width,
             decode.coded_height,
+            decode.picture_info.key_frame_header.as_ref(),
         );
         std_picture_scope.attach_pointers();
         let mut av1_picture_info = vk::VideoDecodeAV1PictureInfoKHR::default()
@@ -961,6 +1004,23 @@ pub(crate) struct ParsedAv1SequenceHeader {
     pub use_128x128_superblock: bool,
     pub enable_filter_intra: bool,
     pub enable_intra_edge_filter: bool,
+    pub enable_interintra_compound: bool,
+    pub enable_masked_compound: bool,
+    pub enable_warped_motion: bool,
+    pub enable_dual_filter: bool,
+    pub enable_order_hint: bool,
+    pub enable_jnt_comp: bool,
+    pub enable_ref_frame_mvs: bool,
+    pub frame_id_numbers_present_flag: bool,
+    pub enable_superres: bool,
+    pub enable_cdef: bool,
+    pub enable_restoration: bool,
+    pub film_grain_params_present: bool,
+    pub timing_info_present_flag: bool,
+    pub initial_display_delay_present_flag: bool,
+    pub order_hint_bits_minus_1: u8,
+    pub seq_force_screen_content_tools: u8,
+    pub seq_force_integer_mv: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1287,7 +1347,9 @@ pub(crate) fn build_av1_decode_submit_skeletons(
 
     for (index, record) in records.iter().enumerate() {
         match record.obu_type {
-            Av1ObuType::Frame => submits.push(build_av1_frame_obu_submit_skeleton(record)?),
+            Av1ObuType::Frame => {
+                submits.push(build_av1_frame_obu_submit_skeleton(bitstream, record)?);
+            }
             Av1ObuType::FrameHeader => {
                 let tile_groups: Vec<(usize, &Av1ObuRecord)> = records
                     .iter()
@@ -1536,6 +1598,7 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
         frame_header_offset: submit.frame_header_offset,
         tile_offsets: submit.tile_offsets.clone(),
         tile_sizes: submit.tile_sizes.clone(),
+        key_frame_header: submit.key_frame_header,
     })
 }
 
@@ -1687,13 +1750,34 @@ fn key_frame_std_picture_info() -> StdVideoDecodeAV1PictureInfo {
 }
 
 fn build_av1_frame_obu_submit_skeleton(
+    bitstream: &[u8],
     frame_record: &Av1ObuRecord,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
-    let tile_offset = frame_header_offset;
-    let tile_size = u32::try_from(frame_record.payload_range.len())
-        .map_err(|_| "AV1 frame OBU payload size exceeds u32 range".to_string())?;
+    let key_frame_header = parse_av1_key_frame_obu_header(
+        bitstream
+            .get(frame_record.payload_range.clone())
+            .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?,
+    )
+    .ok();
+    let tile_payload_offset = key_frame_header
+        .map(|header| header.tile_payload_offset)
+        .unwrap_or(0);
+    let tile_offset = frame_header_offset
+        .checked_add(
+            u32::try_from(tile_payload_offset)
+                .map_err(|_| "AV1 frame OBU tile payload offset exceeds u32 range".to_string())?,
+        )
+        .ok_or_else(|| "AV1 frame OBU tile payload offset overflows u32".to_string())?;
+    let tile_size = u32::try_from(
+        frame_record
+            .payload_range
+            .len()
+            .checked_sub(tile_payload_offset)
+            .ok_or_else(|| "AV1 frame OBU tile payload offset exceeds payload size".to_string())?,
+    )
+    .map_err(|_| "AV1 frame OBU payload size exceeds u32 range".to_string())?;
     if tile_size == 0 {
         return Err("AV1 frame OBU payload is empty".to_string());
     }
@@ -1702,6 +1786,7 @@ fn build_av1_frame_obu_submit_skeleton(
         frame_header_offset,
         tile_offsets: vec![tile_offset],
         tile_sizes: vec![tile_size],
+        key_frame_header,
     })
 }
 
@@ -1731,7 +1816,127 @@ fn build_av1_tile_group_submit_skeleton(
         frame_header_offset,
         tile_offsets,
         tile_sizes,
+        key_frame_header: None,
     })
+}
+
+fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHeader, String> {
+    let mut bits = BitReader::new(payload);
+    let show_existing_frame = bits.read_bool("show_existing_frame")?;
+    if show_existing_frame {
+        return Err("show_existing_frame has no tile payload".to_string());
+    }
+    let frame_type = bits.read_bits_u8(2, "frame_type")?;
+    if frame_type != 0 {
+        return Err(format!(
+            "only AV1 key-frame OBU tile offset parsing is implemented, got frame_type={frame_type}"
+        ));
+    }
+    let show_frame = bits.read_bool("show_frame")?;
+    if !show_frame {
+        let _showable_frame = bits.read_bool("showable_frame")?;
+    }
+    let _disable_cdf_update = bits.read_bool("disable_cdf_update")?;
+    let _allow_screen_content_tools = bits.read_bool("allow_screen_content_tools")?;
+    let _force_integer_mv = bits.read_bool("force_integer_mv")?;
+    let _frame_size_override_flag = bits.read_bool("frame_size_override_flag")?;
+    let _order_hint = bits.read_bits_u8(7, "order_hint")?;
+    let render_and_frame_size_different = bits.read_bool("render_and_frame_size_different")?;
+    if render_and_frame_size_different {
+        return Err(
+            "render_and_frame_size_different AV1 key-frame parsing is not implemented".to_string(),
+        );
+    }
+    let _allow_intrabc = bits.read_bool("allow_intrabc")?;
+    let _disable_frame_end_update_cdf = bits.read_bool("disable_frame_end_update_cdf")?;
+    let uniform_tile_spacing_flag = bits.read_bool("uniform_tile_spacing_flag")?;
+    if !uniform_tile_spacing_flag {
+        return Err("non-uniform AV1 tile spacing parsing is not implemented".to_string());
+    }
+    while bits.read_bool("tile_cols_log2")? {}
+    while bits.read_bool("tile_rows_log2")? {}
+
+    let base_q_idx = bits.read_bits_u8(8, "base_q_idx")?;
+    skip_av1_delta_q(&mut bits, "delta_q_y_dc")?;
+    skip_av1_delta_q(&mut bits, "delta_q_u_dc")?;
+    skip_av1_delta_q(&mut bits, "delta_q_u_ac")?;
+    let using_qmatrix = bits.read_bool("using_qmatrix")?;
+    if using_qmatrix {
+        return Err("AV1 qmatrix parsing is not implemented".to_string());
+    }
+
+    let segmentation_enabled = bits.read_bool("segmentation_enabled")?;
+    if segmentation_enabled {
+        return Err("AV1 segmentation parsing is not implemented".to_string());
+    }
+    let delta_q_present = bits.read_bool("delta_q_present")?;
+    if delta_q_present {
+        let _delta_q_res = bits.read_bits_u8(2, "delta_q_res")?;
+    }
+
+    let loop_filter_level = [
+        bits.read_bits_u8(6, "loop_filter_level[0]")?,
+        bits.read_bits_u8(6, "loop_filter_level[1]")?,
+        bits.read_bits_u8(6, "loop_filter_level[2]")?,
+        bits.read_bits_u8(6, "loop_filter_level[3]")?,
+    ];
+    let mut loop_filter_sharpness = 0;
+    let mut loop_filter_delta_enabled = false;
+    if loop_filter_level.iter().any(|&level| level != 0) {
+        loop_filter_sharpness = bits.read_bits_u8(3, "loop_filter_sharpness")?;
+        loop_filter_delta_enabled = bits.read_bool("loop_filter_delta_enabled")?;
+        if loop_filter_delta_enabled {
+            let loop_filter_delta_update = bits.read_bool("loop_filter_delta_update")?;
+            if loop_filter_delta_update {
+                return Err("AV1 loop-filter delta update parsing is not implemented".to_string());
+            }
+        }
+    }
+
+    let cdef_damping_minus_3 = bits.read_bits_u8(2, "cdef_damping_minus_3")?;
+    let cdef_bits = bits.read_bits_u8(2, "cdef_bits")?;
+    let mut cdef_y_pri_strength = [0_u8; 8];
+    let mut cdef_y_sec_strength = [0_u8; 8];
+    let mut cdef_uv_pri_strength = [0_u8; 8];
+    let mut cdef_uv_sec_strength = [0_u8; 8];
+    for index in 0..(1_u8 << cdef_bits) {
+        let index = usize::from(index);
+        cdef_y_pri_strength[index] = bits.read_bits_u8(4, "cdef_y_pri_strength")?;
+        cdef_y_sec_strength[index] = bits.read_bits_u8(2, "cdef_y_sec_strength")?;
+        cdef_uv_pri_strength[index] = bits.read_bits_u8(4, "cdef_uv_pri_strength")?;
+        cdef_uv_sec_strength[index] = bits.read_bits_u8(2, "cdef_uv_sec_strength")?;
+    }
+
+    let tx_mode_select = bits.read_bool("tx_mode_select")?;
+    let tx_mode = if tx_mode_select {
+        StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT
+    } else {
+        StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST
+    };
+    let _reduced_tx_set = bits.read_bool("reduced_tx_set")?;
+    bits.align_to_next_byte_with_zero_bits("frame_header_obu_byte_alignment")?;
+    Ok(Av1ParsedKeyFrameHeader {
+        tile_payload_offset: bits.byte_offset(),
+        base_q_idx,
+        loop_filter_level,
+        loop_filter_sharpness,
+        loop_filter_delta_enabled,
+        cdef_damping_minus_3,
+        cdef_bits,
+        cdef_y_pri_strength,
+        cdef_y_sec_strength,
+        cdef_uv_pri_strength,
+        cdef_uv_sec_strength,
+        tx_mode,
+    })
+}
+
+fn skip_av1_delta_q(bits: &mut BitReader<'_>, field_name: &str) -> Result<(), String> {
+    let delta_coded = bits.read_bool(field_name)?;
+    if delta_coded {
+        let _delta_q = bits.read_bits_u8(7, field_name)?;
+    }
+    Ok(())
 }
 
 fn build_av1_std_sequence_header(
@@ -1757,20 +1962,20 @@ fn build_av1_std_sequence_header(
                 parsed.use_128x128_superblock as u32,
                 parsed.enable_filter_intra as u32,
                 parsed.enable_intra_edge_filter as u32,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
+                parsed.enable_interintra_compound as u32,
+                parsed.enable_masked_compound as u32,
+                parsed.enable_warped_motion as u32,
+                parsed.enable_dual_filter as u32,
+                parsed.enable_order_hint as u32,
+                parsed.enable_jnt_comp as u32,
+                parsed.enable_ref_frame_mvs as u32,
+                parsed.frame_id_numbers_present_flag as u32,
+                parsed.enable_superres as u32,
+                parsed.enable_cdef as u32,
+                parsed.enable_restoration as u32,
+                parsed.film_grain_params_present as u32,
+                parsed.timing_info_present_flag as u32,
+                parsed.initial_display_delay_present_flag as u32,
                 0,
             ),
         },
@@ -1781,9 +1986,9 @@ fn build_av1_std_sequence_header(
         max_frame_height_minus_1,
         delta_frame_id_length_minus_2: 0,
         additional_frame_id_length_minus_1: 0,
-        order_hint_bits_minus_1: 0,
-        seq_force_integer_mv: AV1_SELECT_INTEGER_MV,
-        seq_force_screen_content_tools: AV1_SELECT_SCREEN_CONTENT_TOOLS,
+        order_hint_bits_minus_1: parsed.order_hint_bits_minus_1,
+        seq_force_integer_mv: parsed.seq_force_integer_mv,
+        seq_force_screen_content_tools: parsed.seq_force_screen_content_tools,
         reserved1: [0; 5],
         pColorConfig: std::ptr::null(),
         pTimingInfo: std::ptr::null(),
@@ -3539,6 +3744,23 @@ fn build_probe_av1_std_sequence_header(
         use_128x128_superblock: false,
         enable_filter_intra: false,
         enable_intra_edge_filter: false,
+        enable_interintra_compound: false,
+        enable_masked_compound: false,
+        enable_warped_motion: false,
+        enable_dual_filter: false,
+        enable_order_hint: false,
+        enable_jnt_comp: false,
+        enable_ref_frame_mvs: false,
+        frame_id_numbers_present_flag: false,
+        enable_superres: false,
+        enable_cdef: false,
+        enable_restoration: false,
+        film_grain_params_present: false,
+        timing_info_present_flag: false,
+        initial_display_delay_present_flag: false,
+        order_hint_bits_minus_1: 0,
+        seq_force_screen_content_tools: AV1_SELECT_SCREEN_CONTENT_TOOLS,
+        seq_force_integer_mv: AV1_SELECT_INTEGER_MV,
     })
 }
 
@@ -3659,10 +3881,14 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
     let still_picture = bits.read_bool("still_picture")?;
     let reduced_still_picture_header = bits.read_bool("reduced_still_picture_header")?;
 
+    let mut timing_info_present_flag = false;
+    let mut initial_display_delay_present_flag = false;
     if reduced_still_picture_header {
         let _seq_level_idx_0 = bits.read_bits_u8(5, "seq_level_idx_0")?;
     } else {
-        skip_av1_operating_points(&mut bits)?;
+        let flags = skip_av1_operating_points(&mut bits)?;
+        timing_info_present_flag = flags.timing_info_present_flag;
+        initial_display_delay_present_flag = flags.initial_display_delay_present_flag;
     }
 
     let frame_width_bits_minus_1 = bits.read_bits_u8(4, "frame_width_bits_minus_1")?;
@@ -3676,8 +3902,9 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
         "max_frame_height_minus_1",
     )?;
 
+    let mut frame_id_numbers_present_flag = false;
     if !reduced_still_picture_header {
-        let frame_id_numbers_present_flag = bits.read_bool("frame_id_numbers_present_flag")?;
+        frame_id_numbers_present_flag = bits.read_bool("frame_id_numbers_present_flag")?;
         if frame_id_numbers_present_flag {
             let _delta_frame_id_length_minus_2 =
                 bits.read_bits_u8(4, "delta_frame_id_length_minus_2")?;
@@ -3689,6 +3916,89 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
     let use_128x128_superblock = bits.read_bool("use_128x128_superblock")?;
     let enable_filter_intra = bits.read_bool("enable_filter_intra")?;
     let enable_intra_edge_filter = bits.read_bool("enable_intra_edge_filter")?;
+    let (
+        enable_interintra_compound,
+        enable_masked_compound,
+        enable_warped_motion,
+        enable_dual_filter,
+        enable_order_hint,
+        enable_jnt_comp,
+        enable_ref_frame_mvs,
+        order_hint_bits_minus_1,
+        seq_force_screen_content_tools,
+        seq_force_integer_mv,
+        enable_superres,
+        enable_cdef,
+        enable_restoration,
+    ) = if reduced_still_picture_header {
+        (
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            0,
+            AV1_SELECT_SCREEN_CONTENT_TOOLS,
+            AV1_SELECT_INTEGER_MV,
+            false,
+            false,
+            false,
+        )
+    } else {
+        let enable_interintra_compound = bits.read_bool("enable_interintra_compound")?;
+        let enable_masked_compound = bits.read_bool("enable_masked_compound")?;
+        let enable_warped_motion = bits.read_bool("enable_warped_motion")?;
+        let enable_dual_filter = bits.read_bool("enable_dual_filter")?;
+        let enable_order_hint = bits.read_bool("enable_order_hint")?;
+        let (enable_jnt_comp, enable_ref_frame_mvs, order_hint_bits_minus_1) = if enable_order_hint
+        {
+            (
+                bits.read_bool("enable_jnt_comp")?,
+                bits.read_bool("enable_ref_frame_mvs")?,
+                bits.read_bits_u8(3, "order_hint_bits_minus_1")?,
+            )
+        } else {
+            (false, false, 0)
+        };
+        let seq_force_screen_content_tools = if bits.read_bool("seq_choose_screen_content_tools")? {
+            AV1_SELECT_SCREEN_CONTENT_TOOLS
+        } else {
+            bits.read_bits_u8(1, "seq_force_screen_content_tools")?
+        };
+        let seq_force_integer_mv =
+            if seq_force_screen_content_tools > 0 && bits.read_bool("seq_choose_integer_mv")? {
+                AV1_SELECT_INTEGER_MV
+            } else if seq_force_screen_content_tools > 0 {
+                bits.read_bits_u8(1, "seq_force_integer_mv")?
+            } else {
+                0
+            };
+        let enable_superres = bits.read_bool("enable_superres")?;
+        let enable_cdef = bits.read_bool("enable_cdef")?;
+        let enable_restoration = bits.read_bool("enable_restoration")?;
+        (
+            enable_interintra_compound,
+            enable_masked_compound,
+            enable_warped_motion,
+            enable_dual_filter,
+            enable_order_hint,
+            enable_jnt_comp,
+            enable_ref_frame_mvs,
+            order_hint_bits_minus_1,
+            seq_force_screen_content_tools,
+            seq_force_integer_mv,
+            enable_superres,
+            enable_cdef,
+            enable_restoration,
+        )
+    };
+    let film_grain_params_present = if !reduced_still_picture_header {
+        skip_av1_color_config_and_read_film_grain_flag(&mut bits, seq_profile)?
+    } else {
+        false
+    };
 
     Ok(ParsedAv1SequenceHeader {
         seq_profile,
@@ -3701,10 +4011,33 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
         use_128x128_superblock,
         enable_filter_intra,
         enable_intra_edge_filter,
+        enable_interintra_compound,
+        enable_masked_compound,
+        enable_warped_motion,
+        enable_dual_filter,
+        enable_order_hint,
+        enable_jnt_comp,
+        enable_ref_frame_mvs,
+        frame_id_numbers_present_flag,
+        enable_superres,
+        enable_cdef,
+        enable_restoration,
+        film_grain_params_present,
+        timing_info_present_flag,
+        initial_display_delay_present_flag,
+        order_hint_bits_minus_1,
+        seq_force_screen_content_tools,
+        seq_force_integer_mv,
     })
 }
 
-fn skip_av1_operating_points(bits: &mut BitReader<'_>) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av1OperatingPointFlags {
+    timing_info_present_flag: bool,
+    initial_display_delay_present_flag: bool,
+}
+
+fn skip_av1_operating_points(bits: &mut BitReader<'_>) -> Result<Av1OperatingPointFlags, String> {
     let timing_info_present_flag = bits.read_bool("timing_info_present_flag")?;
     if timing_info_present_flag {
         let _num_units_in_display_tick = bits.read_bits_u32(32, "num_units_in_display_tick")?;
@@ -3745,7 +4078,39 @@ fn skip_av1_operating_points(bits: &mut BitReader<'_>) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(Av1OperatingPointFlags {
+        timing_info_present_flag,
+        initial_display_delay_present_flag,
+    })
+}
+
+fn skip_av1_color_config_and_read_film_grain_flag(
+    bits: &mut BitReader<'_>,
+    seq_profile: u8,
+) -> Result<bool, String> {
+    let high_bitdepth = bits.read_bool("high_bitdepth")?;
+    if seq_profile == 2 && high_bitdepth {
+        let _twelve_bit = bits.read_bool("twelve_bit")?;
+    }
+    let mono_chrome = if seq_profile == 1 {
+        false
+    } else {
+        bits.read_bool("mono_chrome")?
+    };
+    let color_description_present_flag = bits.read_bool("color_description_present_flag")?;
+    if color_description_present_flag {
+        let _color_primaries = bits.read_bits_u8(8, "color_primaries")?;
+        let _transfer_characteristics = bits.read_bits_u8(8, "transfer_characteristics")?;
+        let _matrix_coefficients = bits.read_bits_u8(8, "matrix_coefficients")?;
+    }
+    let _color_range = bits.read_bool("color_range")?;
+    if !mono_chrome {
+        if seq_profile == 0 {
+            let _chroma_sample_position = bits.read_bits_u8(2, "chroma_sample_position")?;
+        }
+        let _separate_uv_delta_q = bits.read_bool("separate_uv_delta_q")?;
+    }
+    bits.read_bool("film_grain_params_present")
 }
 
 fn read_av1_leb128(bytes: &[u8]) -> Result<(usize, usize), String> {
@@ -3848,6 +4213,19 @@ impl<'a> BitReader<'a> {
             self.read_bits(leading_zeroes, field_name)?
         };
         Ok((1u64 << leading_zeroes) - 1 + suffix)
+    }
+
+    fn byte_offset(&self) -> usize {
+        self.bit_offset.div_ceil(8)
+    }
+
+    fn align_to_next_byte_with_zero_bits(&mut self, field_name: &str) -> Result<(), String> {
+        while !self.bit_offset.is_multiple_of(8) {
+            if self.read_bool(field_name)? {
+                return Err(format!("{field_name} expected zero alignment bit"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4098,6 +4476,19 @@ mod tests {
     }
 
     #[test]
+    fn key_frame_obu_tile_payload_offset_skips_libaom_header() {
+        let payload = [
+            0x14, 0x00, 0x24, 0x00, 0x03, 0x8e, 0x69, 0xa2, 0x90, 0xae, 0xb0, 0x28, 0xdb, 0x5c,
+        ];
+        let header = parse_av1_key_frame_obu_header(&payload)
+            .expect("libaom key-frame header should be parsed");
+        assert_eq!(header.tile_payload_offset, 12);
+        assert_eq!(header.base_q_idx, 128);
+        assert_eq!(header.loop_filter_level, [7, 7, 13, 13]);
+        assert_eq!(header.cdef_bits, 1);
+    }
+
+    #[test]
     fn decode_submit_skeleton_maps_frame_header_and_tile_group_obus() {
         let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
         let frame_header_obu_start = bitstream.len();
@@ -4192,6 +4583,7 @@ mod tests {
             frame_header_offset: 12,
             tile_offsets: vec![12],
             tile_sizes: vec![5],
+            key_frame_header: None,
         };
 
         let picture = build_av1_decode_picture_info_skeleton(&submit)
@@ -4228,6 +4620,7 @@ mod tests {
             frame_header_offset: 12,
             tile_offsets: Vec::new(),
             tile_sizes: Vec::new(),
+            key_frame_header: None,
         };
 
         let err = build_av1_decode_picture_info_skeleton(&submit)
@@ -5000,6 +5393,7 @@ mod tests {
             frame_header_offset: 4,
             tile_offsets: vec![8],
             tile_sizes: vec![5],
+            key_frame_header: None,
         };
 
         let err = av1_decode_source_range(12, &picture)
