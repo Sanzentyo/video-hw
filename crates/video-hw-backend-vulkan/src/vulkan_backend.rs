@@ -705,11 +705,12 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             &dst_picture_resource,
                             &mut setup_dpb_info,
                         );
-                        let vk_decode_info = decode.vk_decode_info(
+                        let vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
                             vk::Buffer::null(),
                             dst_picture_resource,
+                            &setup_reference_slot,
                             &mut av1_picture_info,
-                        ).setup_reference_slot(&setup_reference_slot);
+                        );
                         format!(
                             "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, dst_extent={}x{}, setup_slot={}, setup_slot_chained={}, frame_header_offset={}, tile_count={})",
                             decode.src_buffer_offset,

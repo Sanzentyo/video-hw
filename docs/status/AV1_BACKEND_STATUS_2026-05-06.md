@@ -120,6 +120,9 @@ Current implementation progress:
 - key-frame command skeleton extraction now assigns ordered frames to rotating
   setup DPB slots so command recording can use deterministic slot indices
   before full inter-frame reference management is implemented;
+- decode-info construction now has a helper that attaches the setup reference
+  slot together with the AV1 picture-info chain, matching the shape needed by a
+  future `vkCmdDecodeVideoKHR` call;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

@@ -138,6 +138,17 @@ impl Av1DecodeInfoSkeleton {
             .push_next(av1_picture_info)
     }
 
+    pub(crate) fn vk_decode_info_with_setup_reference_slot<'a>(
+        &'a self,
+        src_buffer: vk::Buffer,
+        dst_picture_resource: vk::VideoPictureResourceInfoKHR<'a>,
+        setup_reference_slot: &'a vk::VideoReferenceSlotInfoKHR<'a>,
+        av1_picture_info: &'a mut vk::VideoDecodeAV1PictureInfoKHR<'a>,
+    ) -> vk::VideoDecodeInfoKHR<'a> {
+        self.vk_decode_info(src_buffer, dst_picture_resource, av1_picture_info)
+            .setup_reference_slot(setup_reference_slot)
+    }
+
     pub(crate) fn vk_setup_dpb_slot_info(&self) -> vk::VideoDecodeAV1DpbSlotInfoKHR<'_> {
         vk::VideoDecodeAV1DpbSlotInfoKHR::default().std_reference_info(&self.setup_reference_info)
     }
@@ -2259,13 +2270,12 @@ mod tests {
         let setup_reference_slot =
             decode.vk_setup_reference_slot(2, &dst_picture_resource, &mut setup_dpb_info);
 
-        let vk_decode = decode
-            .vk_decode_info(
-                vk::Buffer::null(),
-                dst_picture_resource,
-                &mut av1_picture_info,
-            )
-            .setup_reference_slot(&setup_reference_slot);
+        let vk_decode = decode.vk_decode_info_with_setup_reference_slot(
+            vk::Buffer::null(),
+            dst_picture_resource,
+            &setup_reference_slot,
+            &mut av1_picture_info,
+        );
 
         assert_eq!(vk_decode.src_buffer, vk::Buffer::null());
         assert_eq!(vk_decode.src_buffer_offset as usize, frame_obu_start + 2);
