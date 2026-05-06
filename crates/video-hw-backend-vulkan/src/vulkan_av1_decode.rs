@@ -460,7 +460,7 @@ impl Av1DecodeBitstreamUploadPlan {
         command: &Av1DecodeCommandSkeleton,
         frame_index: usize,
         src_buffer: vk::Buffer,
-        image_view: vk::ImageView,
+        picture_views: Av1DecodePictureViews,
         f: impl FnOnce(&vk::VideoDecodeInfoKHR<'_>, &Av1DecodeFrameSubmitBundle) -> R,
     ) -> Result<R, String> {
         let bundle = self
@@ -476,7 +476,9 @@ impl Av1DecodeBitstreamUploadPlan {
         })?;
 
         let dst_picture_resource =
-            decode.dst_picture_resource(image_view, bundle.dst_base_array_layer);
+            decode.dst_picture_resource(picture_views.dst, bundle.dst_base_array_layer);
+        let setup_picture_resource =
+            decode.dst_picture_resource(picture_views.reference, bundle.dst_base_array_layer);
         let mut std_picture_scope = Av1DecodeStdPictureInfoScope::new(
             decode.picture_info.std_picture_info,
             decode.coded_width,
@@ -493,7 +495,7 @@ impl Av1DecodeBitstreamUploadPlan {
         let mut setup_dpb_info = decode.vk_setup_dpb_slot_info();
         let setup_reference_slot = decode.vk_setup_reference_slot(
             bundle.setup_slot_index,
-            &dst_picture_resource,
+            &setup_picture_resource,
             &mut setup_dpb_info,
         );
         let vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
@@ -510,7 +512,7 @@ impl Av1DecodeBitstreamUploadPlan {
         &self,
         command: &Av1DecodeCommandSkeleton,
         src_buffer: vk::Buffer,
-        image_view: vk::ImageView,
+        picture_views: Av1DecodePictureViews,
         mut f: impl FnMut(&vk::VideoDecodeInfoKHR<'_>, &Av1DecodeFrameSubmitBundle) -> R,
     ) -> Result<Vec<R>, String> {
         let mut results = Vec::with_capacity(command.frames.len());
@@ -519,7 +521,7 @@ impl Av1DecodeBitstreamUploadPlan {
                 command,
                 frame.frame_index,
                 src_buffer,
-                image_view,
+                picture_views,
                 |decode_info, bundle| f(decode_info, bundle),
             )?);
         }
@@ -532,10 +534,10 @@ impl Av1DecodeBitstreamUploadPlan {
         video_session: vk::VideoSessionKHR,
         video_session_parameters: vk::VideoSessionParametersKHR,
         src_buffer: vk::Buffer,
-        image_view: vk::ImageView,
+        picture_views: Av1DecodePictureViews,
         mut visit: impl FnMut(Av1DecodeCommandVisit<'_>),
     ) -> Result<(), String> {
-        let begin_resources = command.begin_picture_resources(image_view);
+        let begin_resources = command.begin_picture_resources(picture_views.reference);
         let begin_reference_infos = command.begin_std_reference_infos();
         let mut begin_dpb_infos = command.begin_dpb_slot_infos(&begin_reference_infos)?;
         let begin_reference_slots =
@@ -555,7 +557,7 @@ impl Av1DecodeBitstreamUploadPlan {
                 command,
                 frame.frame_index,
                 src_buffer,
-                image_view,
+                picture_views,
                 |decode_info, bundle| {
                     visit(Av1DecodeCommandVisit::DecodeFrame {
                         decode_info,
@@ -577,7 +579,7 @@ impl Av1DecodeBitstreamUploadPlan {
         video_session: vk::VideoSessionKHR,
         video_session_parameters: vk::VideoSessionParametersKHR,
         src_buffer: vk::Buffer,
-        image_view: vk::ImageView,
+        picture_views: Av1DecodePictureViews,
         mut recorder: impl FnMut(Av1DecodeCommandVisit<'_>) -> Result<(), String>,
     ) -> Result<Av1DecodeCommandRecordSummary, String> {
         let mut summary = Av1DecodeCommandRecordSummary::default();
@@ -586,7 +588,7 @@ impl Av1DecodeBitstreamUploadPlan {
             video_session,
             video_session_parameters,
             src_buffer,
-            image_view,
+            picture_views,
             |visit| {
                 match &visit {
                     Av1DecodeCommandVisit::BeginCoding(_) => summary.begin_count += 1,
@@ -1159,7 +1161,14 @@ struct Av1DecodeSourceBufferResource {
 struct Av1DecodeImageResource {
     image: vk::Image,
     memory: vk::DeviceMemory,
-    view: vk::ImageView,
+    dst_view: vk::ImageView,
+    reference_view: vk::ImageView,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Av1DecodePictureViews {
+    pub(crate) dst: vk::ImageView,
+    pub(crate) reference: vk::ImageView,
 }
 
 struct Av1DecodeReadbackBufferResource {
@@ -1200,7 +1209,8 @@ struct Av1DecodeCommandRecordConfig<'a> {
     video_session_parameters: vk::VideoSessionParametersKHR,
     source_buffer: vk::Buffer,
     decode_image: vk::Image,
-    image_view: vk::ImageView,
+    dst_image_view: vk::ImageView,
+    reference_image_view: vk::ImageView,
     readback: Option<Av1DecodeCommandReadbackConfig<'a>>,
 }
 
@@ -2705,7 +2715,8 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     video_session_parameters: session.parameters,
                     source_buffer: source_buffer.buffer,
                     decode_image: image.image,
-                    image_view: image.view,
+                    dst_image_view: image.dst_view,
+                    reference_image_view: image.reference_view,
                     readback: readback_buffer.as_ref().map(|buffer| {
                         Av1DecodeCommandReadbackConfig {
                             buffer: buffer.buffer,
@@ -2719,7 +2730,10 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session.session,
                     session.parameters,
                     source_buffer.buffer,
-                    image.view,
+                    Av1DecodePictureViews {
+                        dst: image.dst_view,
+                        reference: image.reference_view,
+                    },
                     |_| Ok(()),
                 )
             };
@@ -3401,7 +3415,7 @@ fn create_av1_decode_image(
     let image = unsafe { device.create_image(&image_create_info, None) }
         .map_err(|err| format!("vkCreateImage for AV1 decode image failed: {err}"))?;
 
-    let result = (|| -> Result<(vk::DeviceMemory, vk::ImageView), String> {
+    let result = (|| -> Result<(vk::DeviceMemory, vk::ImageView, vk::ImageView), String> {
         // SAFETY: `image` was created by this device.
         let requirements = unsafe { device.get_image_memory_requirements(image) };
         // SAFETY: `physical_device` belongs to `instance`; this only reads memory metadata.
@@ -3438,18 +3452,19 @@ fn create_av1_decode_image(
                 "vkBindImageMemory for AV1 decode image failed: {err}"
             ));
         }
-        let mut view_usage_create_info = vk::ImageViewUsageCreateInfo::default().usage(
+        let view_type = if plan.array_layers == 1 {
+            vk::ImageViewType::TYPE_2D
+        } else {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        };
+        let mut dst_view_usage_create_info = vk::ImageViewUsageCreateInfo::default().usage(
             vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
         );
-        let view_create_info = vk::ImageViewCreateInfo::default()
+        let dst_view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(if plan.array_layers == 1 {
-                vk::ImageViewType::TYPE_2D
-            } else {
-                vk::ImageViewType::TYPE_2D_ARRAY
-            })
+            .view_type(view_type)
             .format(plan.format)
-            .push_next(&mut view_usage_create_info)
+            .push_next(&mut dst_view_usage_create_info)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
@@ -3458,19 +3473,45 @@ fn create_av1_decode_image(
                 layer_count: plan.array_layers,
             });
         // SAFETY: Image view create info references a valid image and subresource range.
-        let view = unsafe { device.create_image_view(&view_create_info, None) }.map_err(|err| {
-            // SAFETY: `memory` was allocated and bound above and is no longer used after failure.
-            unsafe { device.free_memory(memory, None) };
-            format!("vkCreateImageView for AV1 decode image failed: {err}")
-        })?;
-        Ok((memory, view))
+        let dst_view =
+            unsafe { device.create_image_view(&dst_view_create_info, None) }.map_err(|err| {
+                // SAFETY: `memory` was allocated and bound above and is no longer used after failure.
+                unsafe { device.free_memory(memory, None) };
+                format!("vkCreateImageView for AV1 decode image failed: {err}")
+            })?;
+        let mut reference_view_usage_create_info = vk::ImageViewUsageCreateInfo::default()
+            .usage(vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR);
+        let reference_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(view_type)
+            .format(plan.format)
+            .push_next(&mut reference_view_usage_create_info)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: plan.array_layers,
+            });
+        // SAFETY: Image view create info references a valid image and subresource range.
+        let reference_view = unsafe { device.create_image_view(&reference_view_create_info, None) }
+            .map_err(|err| {
+                // SAFETY: `dst_view` and `memory` were created above and are no longer used after failure.
+                unsafe {
+                    device.destroy_image_view(dst_view, None);
+                    device.free_memory(memory, None);
+                }
+                format!("vkCreateImageView for AV1 decode reference image failed: {err}")
+            })?;
+        Ok((memory, dst_view, reference_view))
     })();
 
     match result {
-        Ok((memory, view)) => Ok(Av1DecodeImageResource {
+        Ok((memory, dst_view, reference_view)) => Ok(Av1DecodeImageResource {
             image,
             memory,
-            view,
+            dst_view,
+            reference_view,
         }),
         Err(err) => {
             // SAFETY: The image was created above and is no longer used.
@@ -3485,7 +3526,8 @@ fn create_av1_decode_image(
 fn destroy_av1_decode_image(device: &ash::Device, resource: Av1DecodeImageResource) {
     // SAFETY: The resource was created by this device and is no longer used.
     unsafe {
-        device.destroy_image_view(resource.view, None);
+        device.destroy_image_view(resource.reference_view, None);
+        device.destroy_image_view(resource.dst_view, None);
         device.destroy_image(resource.image, None);
         device.free_memory(resource.memory, None);
     }
@@ -3573,7 +3615,10 @@ fn record_and_destroy_av1_decode_command_buffer(
             config.video_session,
             config.video_session_parameters,
             config.source_buffer,
-            config.image_view,
+            Av1DecodePictureViews {
+                dst: config.dst_image_view,
+                reference: config.reference_image_view,
+            },
             |visit| {
                 match visit {
                     Av1DecodeCommandVisit::BeginCoding(info) => {
@@ -4557,6 +4602,7 @@ impl<'a> BitReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ash::vk::Handle;
 
     #[test]
     fn extension_flags_require_all_av1_decode_extensions() {
@@ -5379,12 +5425,17 @@ mod tests {
             ]
         );
 
+        let dst_view = vk::ImageView::from_raw(0xD57);
+        let reference_view = vk::ImageView::from_raw(0xD9B);
         let summary = plan
             .with_frame_decode_info(
                 &command,
                 1,
                 vk::Buffer::null(),
-                vk::ImageView::null(),
+                Av1DecodePictureViews {
+                    dst: dst_view,
+                    reference: reference_view,
+                },
                 |decode_info, bundle| {
                     let av1_info = decode_info
                         .p_next
@@ -5406,6 +5457,17 @@ mod tests {
                         decode_info.src_buffer_offset,
                         decode_info.src_buffer_range,
                         decode_info.dst_picture_resource.base_array_layer,
+                        decode_info.dst_picture_resource.image_view_binding,
+                        if decode_info.p_setup_reference_slot.is_null() {
+                            vk::ImageView::null()
+                        } else {
+                            // SAFETY: `with_frame_decode_info` keeps the setup reference slot and
+                            // its picture resource alive for this callback.
+                            unsafe {
+                                (*(*decode_info.p_setup_reference_slot).p_picture_resource)
+                                    .image_view_binding
+                            }
+                        },
                         !decode_info.p_next.is_null(),
                         !decode_info.p_setup_reference_slot.is_null(),
                         std_pointer_ready,
@@ -5420,6 +5482,8 @@ mod tests {
                 16,
                 8,
                 1,
+                dst_view,
+                reference_view,
                 true,
                 true,
                 [true, true, true, true, true, true, true]
@@ -5430,7 +5494,10 @@ mod tests {
             .with_frame_decode_infos(
                 &command,
                 vk::Buffer::null(),
-                vk::ImageView::null(),
+                Av1DecodePictureViews {
+                    dst: vk::ImageView::null(),
+                    reference: vk::ImageView::null(),
+                },
                 |decode_info, bundle| {
                     (
                         bundle.frame_index,
@@ -5449,7 +5516,10 @@ mod tests {
             vk::VideoSessionKHR::null(),
             vk::VideoSessionParametersKHR::null(),
             vk::Buffer::null(),
-            vk::ImageView::null(),
+            Av1DecodePictureViews {
+                dst: vk::ImageView::null(),
+                reference: vk::ImageView::null(),
+            },
             |visit| match visit {
                 Av1DecodeCommandVisit::BeginCoding(info) => {
                     visits.push(format!("begin:{}", info.reference_slot_count));
@@ -5495,7 +5565,10 @@ mod tests {
                 vk::VideoSessionKHR::null(),
                 vk::VideoSessionParametersKHR::null(),
                 vk::Buffer::null(),
-                vk::ImageView::null(),
+                Av1DecodePictureViews {
+                    dst: vk::ImageView::null(),
+                    reference: vk::ImageView::null(),
+                },
                 |visit| {
                     recorded.push(match visit {
                         Av1DecodeCommandVisit::BeginCoding(_) => "begin",

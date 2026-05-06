@@ -15,7 +15,7 @@ use crate::{
     Nv12FramePayload, VideoDecoder, VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions,
     argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
-        Av1DecodeCommandVisit, Av1DecodePrerequisiteProbe,
+        Av1DecodeCommandVisit, Av1DecodePictureViews, Av1DecodePrerequisiteProbe,
         build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
         build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
         build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
@@ -875,7 +875,10 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         &aligned_command,
                                         0,
                                         vk::Buffer::null(),
-                                        vk::ImageView::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
                                         |decode_info, _bundle| {
                                             !decode_info.p_next.is_null()
                                                 && !decode_info.p_setup_reference_slot.is_null()
@@ -886,7 +889,10 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                     .with_frame_decode_infos(
                                         &aligned_command,
                                         vk::Buffer::null(),
-                                        vk::ImageView::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
                                         |_decode_info, bundle| bundle.frame_index,
                                     )
                                     .map(|indices| indices.len())
@@ -903,7 +909,10 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         vk::VideoSessionKHR::null(),
                                         vk::VideoSessionParametersKHR::null(),
                                         vk::Buffer::null(),
-                                        vk::ImageView::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
                                         |visit| {
                                             sequence_visits += 1;
                                             match visit {
@@ -939,7 +948,10 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         vk::VideoSessionKHR::null(),
                                         vk::VideoSessionParametersKHR::null(),
                                         vk::Buffer::null(),
-                                        vk::ImageView::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
                                         |_visit| Ok(()),
                                     )
                                     .ok();
