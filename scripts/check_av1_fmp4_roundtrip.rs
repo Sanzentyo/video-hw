@@ -44,6 +44,8 @@ struct Args {
     ffprobe: PathBuf,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: PathBuf,
+    #[arg(long, default_value_t = 40.0)]
+    min_decode_psnr_y: f64,
 }
 
 #[derive(Debug)]
@@ -53,6 +55,7 @@ struct CaseResult {
     bytes: u64,
     reader_samples: usize,
     metadata_frames: usize,
+    decode_psnr: PsnrSummary,
     ffprobe_codec: String,
     ffprobe_tag: String,
     ffprobe_duration: String,
@@ -88,11 +91,12 @@ fn main() -> Result<()> {
     println!("report: {}", report.display());
     for result in &results {
         println!(
-            "{} output={} samples={} metadata_frames={} codec={} tag={} duration={}",
+            "{} output={} samples={} metadata_frames={} decode_psnr_min={:.4} codec={} tag={} duration={}",
             result.backend,
             result.output.display(),
             result.reader_samples,
             result.metadata_frames,
+            result.decode_psnr.psnr_y_min,
             result.ffprobe_codec,
             result.ffprobe_tag,
             result.ffprobe_duration
@@ -110,6 +114,7 @@ fn run_case(args: &Args, backend: &str, run_id: u64) -> Result<CaseResult> {
     let probe = ffprobe_av1_mp4(args, &output)?;
     ffmpeg_decode(args, &output)?;
     let metadata_frames = decode_to_yuv_metadata(args, backend, &output)?;
+    let decode_psnr = decode_rgb_and_compare(args, backend, &output, run_id)?;
     if reader_samples != args.frames as usize {
         bail!(
             "{backend} reader sample count mismatch: got {reader_samples}, expected {}",
@@ -129,6 +134,13 @@ fn run_case(args: &Args, backend: &str, run_id: u64) -> Result<CaseResult> {
             probe.tag
         );
     }
+    if decode_psnr.psnr_y_min < args.min_decode_psnr_y {
+        bail!(
+            "{backend} fMP4 decode PSNR below threshold: min={:.4}, threshold={:.4}",
+            decode_psnr.psnr_y_min,
+            args.min_decode_psnr_y
+        );
+    }
     Ok(CaseResult {
         backend: backend.to_string(),
         bytes: fs::metadata(&output)
@@ -137,6 +149,7 @@ fn run_case(args: &Args, backend: &str, run_id: u64) -> Result<CaseResult> {
         output,
         reader_samples,
         metadata_frames,
+        decode_psnr,
         ffprobe_codec: probe.codec,
         ffprobe_tag: probe.tag,
         ffprobe_duration: probe.duration,
@@ -224,6 +237,132 @@ fn decode_to_yuv_metadata(args: &Args, backend: &str, input: &Path) -> Result<us
         .with_context(|| format!("decode_to_yuv did not report frames for {backend}"))?
         .parse()
         .with_context(|| format!("parse decode_to_yuv frame count for {backend}"))
+}
+
+fn decode_rgb_and_compare(
+    args: &Args,
+    backend: &str,
+    input: &Path,
+    run_id: u64,
+) -> Result<PsnrSummary> {
+    let hw_rgb = args
+        .output_dir
+        .join(format!("decode-{backend}-av1-fmp4-{run_id}.rgb"));
+    let ffmpeg_rgb = args
+        .output_dir
+        .join(format!("ffmpeg-{backend}-av1-fmp4-{run_id}.rgb"));
+    let stats = args
+        .output_dir
+        .join(format!("psnr-decode-{backend}-{run_id}.txt"));
+
+    let mut command = cargo_example_command(args, "video-hw", backend, "decode_to_yuv")?;
+    command.args([
+        "--backend",
+        backend,
+        "--codec",
+        "av1",
+        "--input",
+        &path_str(input)?,
+        "--input-format",
+        "mp4",
+        "--output-mode",
+        "rgb24",
+        "--output",
+        &path_str(&hw_rgb)?,
+    ]);
+    if args.require_hardware {
+        command.arg("--require-hardware");
+    }
+    run(
+        &mut command,
+        &format!("decode_to_yuv rgb24 {backend} AV1 fMP4"),
+    )?;
+    run(
+        Command::new(&args.ffmpeg).args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-i",
+            &path_str(input)?,
+            "-frames:v",
+            &args.frames.to_string(),
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            &path_str(&ffmpeg_rgb)?,
+        ]),
+        "FFmpeg RGB24 reference decode",
+    )?;
+    compute_rgb_psnr(args, &hw_rgb, &ffmpeg_rgb, &stats)?;
+    parse_psnr_stats(&stats)
+}
+
+fn compute_rgb_psnr(args: &Args, hw_rgb: &Path, ffmpeg_rgb: &Path, stats: &Path) -> Result<()> {
+    let size = format!("{}x{}", args.width, args.height);
+    let stats_path = path_str(stats)?.replace('\\', "/");
+    run(
+        Command::new(&args.ffmpeg).args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-s:v",
+            &size,
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-i",
+            &path_str(hw_rgb)?,
+            "-s:v",
+            &size,
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-i",
+            &path_str(ffmpeg_rgb)?,
+            "-lavfi",
+            &format!("psnr=stats_file={stats_path}"),
+            "-f",
+            "null",
+            "-",
+        ]),
+        "compute fMP4 decode PSNR",
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PsnrSummary {
+    psnr_y_avg: f64,
+    psnr_y_min: f64,
+}
+
+fn parse_psnr_stats(path: &Path) -> Result<PsnrSummary> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let values = text
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .find_map(|field| {
+                    field
+                        .strip_prefix("psnr_y:")
+                        .or_else(|| field.strip_prefix("psnr_avg:"))
+                })
+                .with_context(|| format!("missing psnr_y/psnr_avg field in {line:?}"))?
+                .parse::<f64>()
+                .with_context(|| format!("parse psnr_y/psnr_avg from {line:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values.is_empty() {
+        bail!("PSNR stats file contained no frames");
+    }
+    Ok(PsnrSummary {
+        psnr_y_avg: values.iter().sum::<f64>() / values.len() as f64,
+        psnr_y_min: values.iter().copied().fold(f64::INFINITY, f64::min),
+    })
 }
 
 #[derive(Debug)]
@@ -330,21 +469,27 @@ fn write_report(args: &Args, results: &[CaseResult], report: &Path) -> Result<()
     writeln!(&mut body, "frames: {}", args.frames)?;
     writeln!(&mut body, "fps: {}", args.fps)?;
     writeln!(&mut body, "release: {}", args.release)?;
+    writeln!(&mut body, "min_decode_psnr_y: {:.4}", args.min_decode_psnr_y)?;
     writeln!(&mut body)?;
     writeln!(
         &mut body,
-        "| Backend | Output | Bytes | Reader samples | Metadata frames | Codec | Tag | Duration |"
+        "| Backend | Output | Bytes | Reader samples | Metadata frames | Decode PSNR avg | Decode PSNR min | Codec | Tag | Duration |"
     )?;
-    writeln!(&mut body, "|---|---|---:|---:|---:|---|---|---:|")?;
+    writeln!(
+        &mut body,
+        "|---|---|---:|---:|---:|---:|---:|---|---|---:|"
+    )?;
     for result in results {
         writeln!(
             &mut body,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {:.4} | {:.4} | {} | {} | {} |",
             result.backend,
             result.output.display(),
             result.bytes,
             result.reader_samples,
             result.metadata_frames,
+            result.decode_psnr.psnr_y_avg,
+            result.decode_psnr.psnr_y_min,
             result.ffprobe_codec,
             result.ffprobe_tag,
             result.ffprobe_duration
