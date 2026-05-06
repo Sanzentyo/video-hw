@@ -202,7 +202,8 @@ Tasks:
    submit before the frame decode command buffer. The image path now also uses
    FFmpeg's non-layered decode/DPB image layout and a plain 2D image view for
    one-layer decode images, plus the same decode/DPB image-view usage pNext
-   shape. An opt-in
+   shape. Session creation now uses the capability maximum coded extent, as
+   FFmpeg does, rather than the input frame extent. An opt-in
    `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic can also wrap the decode in a
    result-status query; NVIDIA returns a positive raw status for the generated
    OBU probe, so the remaining failure is pixel/parity modeling rather than a

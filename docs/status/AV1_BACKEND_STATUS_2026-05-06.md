@@ -239,9 +239,11 @@ Current implementation progress:
   `VIDEO_DECODE_DPB_KHR`, matching FFmpeg's non-layered AV1 path, and the decode
   image view uses `TYPE_2D` when only one array layer is allocated, with an
   explicit `VkImageViewUsageCreateInfo` for
-  `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR`. These changes keep the Vulkan
-  command path closer to FFmpeg but leave the PSNR value unchanged. The output
-  is still neutral NV12-like rather than the FFmpeg reference, so the AV1
+  `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR`. Video session creation now uses
+  the capability maximum coded extent, matching FFmpeg's session scope instead
+  of constraining the session to the input frame size. These changes keep the
+  Vulkan command path closer to FFmpeg but leave the PSNR value unchanged. The
+  output is still neutral NV12-like rather than the FFmpeg reference, so the AV1
   picture/session modeling is not yet bit-exact enough to claim decode support.
   An opt-in
   `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic now wraps the decode command

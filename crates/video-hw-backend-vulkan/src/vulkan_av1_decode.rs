@@ -1134,8 +1134,6 @@ struct Av1DecodeSessionParameterProbeConfig<'a> {
     queue_family_index: u32,
     capability_snapshot: &'a Av1DecodeCapabilitySnapshot,
     picture_format: vk::Format,
-    coded_width: u32,
-    coded_height: u32,
     std_sequence_header: &'a StdVideoAV1SequenceHeader,
 }
 
@@ -2643,8 +2641,6 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     queue_family_index,
                     capability_snapshot: &snapshot,
                     picture_format,
-                    coded_width,
-                    coded_height,
                     std_sequence_header,
                 },
             ) {
@@ -2853,8 +2849,6 @@ fn create_and_destroy_av1_decode_session_parameters(
             queue_family_index,
             capability_snapshot,
             picture_format,
-            coded_width,
-            coded_height,
             std_sequence_header: &std_sequence_header,
         },
     )
@@ -2894,8 +2888,8 @@ fn create_av1_decode_session_with_parameters(
         .video_profile(&profile)
         .picture_format(config.picture_format)
         .max_coded_extent(vk::Extent2D {
-            width: config.coded_width,
-            height: config.coded_height,
+            width: config.capability_snapshot.max_coded_width,
+            height: config.capability_snapshot.max_coded_height,
         })
         .reference_picture_format(config.picture_format)
         .max_dpb_slots(config.capability_snapshot.max_dpb_slots)
