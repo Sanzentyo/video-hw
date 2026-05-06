@@ -103,6 +103,10 @@ Current implementation progress:
   given caller-owned Vulkan buffer and destination image view/base layer,
   including a HEVC-style destination picture resource with the parsed coded
   extent;
+- key-frame AV1 setup-reference scaffolding now builds
+  `StdVideoDecodeAV1ReferenceInfo`, `VideoDecodeAV1DpbSlotInfoKHR`, and
+  `VideoReferenceSlotInfoKHR` so the next step can attach a reconstructed
+  picture slot to the real decode command;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

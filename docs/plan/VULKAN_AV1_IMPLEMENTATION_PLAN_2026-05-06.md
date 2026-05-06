@@ -100,7 +100,9 @@ Tasks:
    `srcBufferRange`, coded extent propagation, and relative AV1 frame/tile
    offsets within the range; ash `VideoDecodeInfoKHR` construction with the AV1
    picture-info `pNext` chain and HEVC-style destination picture resource
-   construction are now covered. Vulkan command recording remains.
+   construction are now covered. Key-frame setup-reference scaffolding now
+   builds AV1 std reference info, AV1 DPB slot info, and the Vulkan reference
+   slot chain. Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
@@ -120,7 +122,8 @@ Tasks:
    source buffers plus destination image views/base layers; real buffer/image
    allocation and command submission remain.
 3. For reference frames, populate `StdVideoDecodeAV1ReferenceInfo` and chain
-   `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots.
+   `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots. Key-frame setup
+   reference construction is covered; inter-frame reference lists remain.
 4. Reuse the HEVC readback path for NV12 output only after verifying the output
    image format and coded extent constraints match AV1 capabilities.
 5. Convert NV12 to RGB24 through the existing facade conversion path.

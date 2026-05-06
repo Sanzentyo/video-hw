@@ -696,13 +696,21 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 build_av1_decode_info_skeleton(bitstream)
                     .map(|decode| {
                         let mut av1_picture_info = decode.picture_info.vk_picture_info();
+                        let dst_picture_resource =
+                            decode.dst_picture_resource(vk::ImageView::null(), 0);
+                        let mut setup_dpb_info = decode.vk_setup_dpb_slot_info();
+                        let setup_reference_slot = decode.vk_setup_reference_slot(
+                            0,
+                            &dst_picture_resource,
+                            &mut setup_dpb_info,
+                        );
                         let vk_decode_info = decode.vk_decode_info(
                             vk::Buffer::null(),
-                            decode.dst_picture_resource(vk::ImageView::null(), 0),
+                            dst_picture_resource,
                             &mut av1_picture_info,
-                        );
+                        ).setup_reference_slot(&setup_reference_slot);
                         format!(
-                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, dst_extent={}x{}, frame_header_offset={}, tile_count={})",
+                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, dst_extent={}x{}, setup_slot={}, setup_slot_chained={}, frame_header_offset={}, tile_count={})",
                             decode.src_buffer_offset,
                             decode.src_buffer_range,
                             vk_decode_info.src_buffer_offset,
@@ -711,6 +719,8 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             decode.coded_height,
                             vk_decode_info.dst_picture_resource.coded_extent.width,
                             vk_decode_info.dst_picture_resource.coded_extent.height,
+                            setup_reference_slot.slot_index,
+                            !vk_decode_info.p_setup_reference_slot.is_null(),
                             decode.picture_info.frame_header_offset,
                             decode.tile_count()
                         )
