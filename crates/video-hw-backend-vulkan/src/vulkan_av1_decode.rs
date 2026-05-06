@@ -197,6 +197,16 @@ pub(crate) struct Av1ParsedKeyFrameHeader {
     pub allow_intrabc: bool,
     pub disable_frame_end_update_cdf: bool,
     pub base_q_idx: u8,
+    pub delta_q_y_dc: i8,
+    pub diff_uv_delta: bool,
+    pub delta_q_u_dc: i8,
+    pub delta_q_u_ac: i8,
+    pub delta_q_v_dc: i8,
+    pub delta_q_v_ac: i8,
+    pub using_qmatrix: bool,
+    pub qm_y: u8,
+    pub qm_u: u8,
+    pub qm_v: u8,
     pub delta_q_present: bool,
     pub delta_q_res: u8,
     pub loop_filter_level: [u8; 4],
@@ -211,6 +221,21 @@ pub(crate) struct Av1ParsedKeyFrameHeader {
     pub cdef_uv_sec_strength: [u8; 8],
     pub tx_mode: u32,
     pub reduced_tx_set: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av1ParsedQuantization {
+    base_q_idx: u8,
+    delta_q_y_dc: i8,
+    diff_uv_delta: bool,
+    delta_q_u_dc: i8,
+    delta_q_u_ac: i8,
+    delta_q_v_dc: i8,
+    delta_q_v_ac: i8,
+    using_qmatrix: bool,
+    qm_y: u8,
+    qm_u: u8,
+    qm_v: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -390,7 +415,20 @@ impl Av1DecodeStdPictureInfoScope {
                 );
             scope.std_picture_info.OrderHint = header.order_hint;
             scope.std_picture_info.delta_q_res = header.delta_q_res;
+            scope.quantization.flags._bitfield_1 = StdVideoAV1QuantizationFlags::new_bitfield_1(
+                header.using_qmatrix as u32,
+                header.diff_uv_delta as u32,
+                0,
+            );
             scope.quantization.base_q_idx = header.base_q_idx;
+            scope.quantization.DeltaQYDc = header.delta_q_y_dc;
+            scope.quantization.DeltaQUDc = header.delta_q_u_dc;
+            scope.quantization.DeltaQUAc = header.delta_q_u_ac;
+            scope.quantization.DeltaQVDc = header.delta_q_v_dc;
+            scope.quantization.DeltaQVAc = header.delta_q_v_ac;
+            scope.quantization.qm_y = header.qm_y;
+            scope.quantization.qm_u = header.qm_u;
+            scope.quantization.qm_v = header.qm_v;
             scope.loop_filter.flags._bitfield_1 = StdVideoAV1LoopFilterFlags::new_bitfield_1(
                 header.loop_filter_delta_enabled as u32,
                 header.loop_filter_delta_update as u32,
@@ -1422,6 +1460,7 @@ pub(crate) struct ParsedAv1SequenceHeader {
     pub enable_cdef: bool,
     pub enable_restoration: bool,
     pub film_grain_params_present: bool,
+    pub separate_uv_delta_q: bool,
     pub timing_info_present_flag: bool,
     pub initial_display_delay_present_flag: bool,
     pub order_hint_bits_minus_1: u8,
@@ -3139,7 +3178,7 @@ fn build_av1_tile_group_submit_skeleton(
 
 fn parse_av1_key_frame_obu_header(
     payload: &[u8],
-    _sequence_header: Option<&ParsedAv1SequenceHeader>,
+    sequence_header: Option<&ParsedAv1SequenceHeader>,
 ) -> Result<Av1ParsedKeyFrameHeader, String> {
     let mut bits = BitReader::new(payload);
     let show_existing_frame = bits.read_bool("show_existing_frame")?;
@@ -3176,14 +3215,10 @@ fn parse_av1_key_frame_obu_header(
     while bits.read_bool("tile_cols_log2")? {}
     while bits.read_bool("tile_rows_log2")? {}
 
-    let base_q_idx = bits.read_bits_u8(8, "base_q_idx")?;
-    skip_av1_delta_q(&mut bits, "delta_q_y_dc")?;
-    skip_av1_delta_q(&mut bits, "delta_q_u_dc")?;
-    skip_av1_delta_q(&mut bits, "delta_q_u_ac")?;
-    let using_qmatrix = bits.read_bool("using_qmatrix")?;
-    if using_qmatrix {
-        return Err("AV1 qmatrix parsing is not implemented".to_string());
-    }
+    let quantization = parse_av1_quantization_params(
+        &mut bits,
+        sequence_header.is_some_and(|sequence| sequence.separate_uv_delta_q),
+    )?;
 
     let segmentation_enabled = bits.read_bool("segmentation_enabled")?;
     if segmentation_enabled {
@@ -3246,7 +3281,17 @@ fn parse_av1_key_frame_obu_header(
         order_hint,
         allow_intrabc,
         disable_frame_end_update_cdf,
-        base_q_idx,
+        base_q_idx: quantization.base_q_idx,
+        delta_q_y_dc: quantization.delta_q_y_dc,
+        diff_uv_delta: quantization.diff_uv_delta,
+        delta_q_u_dc: quantization.delta_q_u_dc,
+        delta_q_u_ac: quantization.delta_q_u_ac,
+        delta_q_v_dc: quantization.delta_q_v_dc,
+        delta_q_v_ac: quantization.delta_q_v_ac,
+        using_qmatrix: quantization.using_qmatrix,
+        qm_y: quantization.qm_y,
+        qm_u: quantization.qm_u,
+        qm_v: quantization.qm_v,
         delta_q_present,
         delta_q_res,
         loop_filter_level,
@@ -3264,12 +3309,81 @@ fn parse_av1_key_frame_obu_header(
     })
 }
 
-fn skip_av1_delta_q(bits: &mut BitReader<'_>, field_name: &str) -> Result<(), String> {
+fn parse_av1_quantization_params(
+    bits: &mut BitReader<'_>,
+    separate_uv_delta_q: bool,
+) -> Result<Av1ParsedQuantization, String> {
+    let base_q_idx = bits.read_bits_u8(8, "base_q_idx")?;
+    let delta_q_y_dc = read_av1_delta_q(bits, "delta_q_y_dc")?;
+    let diff_uv_delta = separate_uv_delta_q && bits.read_bool("diff_uv_delta")?;
+    let delta_q_u_dc = read_av1_delta_q(bits, "delta_q_u_dc")?;
+    let delta_q_u_ac = read_av1_delta_q(bits, "delta_q_u_ac")?;
+    let (delta_q_v_dc, delta_q_v_ac) = if diff_uv_delta {
+        (
+            read_av1_delta_q(bits, "delta_q_v_dc")?,
+            read_av1_delta_q(bits, "delta_q_v_ac")?,
+        )
+    } else {
+        (delta_q_u_dc, delta_q_u_ac)
+    };
+    let using_qmatrix = bits.read_bool("using_qmatrix")?;
+    let qm_y = if using_qmatrix {
+        bits.read_bits_u8(4, "qm_y")?
+    } else {
+        0
+    };
+    let qm_u = if using_qmatrix {
+        bits.read_bits_u8(4, "qm_u")?
+    } else {
+        0
+    };
+    let qm_v = if using_qmatrix && separate_uv_delta_q {
+        bits.read_bits_u8(4, "qm_v")?
+    } else {
+        qm_u
+    };
+    Ok(Av1ParsedQuantization {
+        base_q_idx,
+        delta_q_y_dc,
+        diff_uv_delta,
+        delta_q_u_dc,
+        delta_q_u_ac,
+        delta_q_v_dc,
+        delta_q_v_ac,
+        using_qmatrix,
+        qm_y,
+        qm_u,
+        qm_v,
+    })
+}
+
+fn read_av1_delta_q(bits: &mut BitReader<'_>, field_name: &str) -> Result<i8, String> {
     let delta_coded = bits.read_bool(field_name)?;
     if delta_coded {
-        let _delta_q = bits.read_bits_u8(7, field_name)?;
+        read_av1_signed_literal_i8(bits, 7, field_name)
+    } else {
+        Ok(0)
     }
-    Ok(())
+}
+
+fn read_av1_signed_literal_i8(
+    bits: &mut BitReader<'_>,
+    count: usize,
+    field_name: &str,
+) -> Result<i8, String> {
+    if count == 0 || count > 8 {
+        return Err(format!(
+            "{field_name} signed literal bit count {count} is unsupported"
+        ));
+    }
+    let raw = bits.read_bits_u8(count, field_name)?;
+    let sign_bit = 1_u8 << (count - 1);
+    if raw & sign_bit == 0 {
+        i8::try_from(raw).map_err(|_| format!("{field_name} does not fit in i8"))
+    } else {
+        let signed = i16::from(raw) - (1_i16 << count);
+        i8::try_from(signed).map_err(|_| format!("{field_name} does not fit in i8"))
+    }
 }
 
 fn skip_av1_loop_filter_delta_updates(bits: &mut BitReader<'_>) -> Result<(), String> {
@@ -5432,6 +5546,7 @@ fn build_probe_av1_std_sequence_header(
         enable_cdef: false,
         enable_restoration: false,
         film_grain_params_present: false,
+        separate_uv_delta_q: false,
         timing_info_present_flag: false,
         initial_display_delay_present_flag: false,
         order_hint_bits_minus_1: 0,
@@ -5673,10 +5788,13 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
             enable_restoration,
         )
     };
-    let film_grain_params_present = if !reduced_still_picture_header {
+    let color_config = if !reduced_still_picture_header {
         skip_av1_color_config_and_read_film_grain_flag(&mut bits, seq_profile)?
     } else {
-        false
+        Av1ColorConfigParse {
+            film_grain_params_present: false,
+            separate_uv_delta_q: false,
+        }
     };
 
     Ok(ParsedAv1SequenceHeader {
@@ -5701,7 +5819,8 @@ fn parse_av1_sequence_header_payload(payload: &[u8]) -> Result<ParsedAv1Sequence
         enable_superres,
         enable_cdef,
         enable_restoration,
-        film_grain_params_present,
+        film_grain_params_present: color_config.film_grain_params_present,
+        separate_uv_delta_q: color_config.separate_uv_delta_q,
         timing_info_present_flag,
         initial_display_delay_present_flag,
         order_hint_bits_minus_1,
@@ -5763,10 +5882,16 @@ fn skip_av1_operating_points(bits: &mut BitReader<'_>) -> Result<Av1OperatingPoi
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av1ColorConfigParse {
+    film_grain_params_present: bool,
+    separate_uv_delta_q: bool,
+}
+
 fn skip_av1_color_config_and_read_film_grain_flag(
     bits: &mut BitReader<'_>,
     seq_profile: u8,
-) -> Result<bool, String> {
+) -> Result<Av1ColorConfigParse, String> {
     let high_bitdepth = bits.read_bool("high_bitdepth")?;
     if seq_profile == 2 && high_bitdepth {
         let _twelve_bit = bits.read_bool("twelve_bit")?;
@@ -5783,13 +5908,18 @@ fn skip_av1_color_config_and_read_film_grain_flag(
         let _matrix_coefficients = bits.read_bits_u8(8, "matrix_coefficients")?;
     }
     let _color_range = bits.read_bool("color_range")?;
+    let mut separate_uv_delta_q = false;
     if !mono_chrome {
         if seq_profile == 0 {
             let _chroma_sample_position = bits.read_bits_u8(2, "chroma_sample_position")?;
         }
-        let _separate_uv_delta_q = bits.read_bool("separate_uv_delta_q")?;
+        separate_uv_delta_q = bits.read_bool("separate_uv_delta_q")?;
     }
-    bits.read_bool("film_grain_params_present")
+    let film_grain_params_present = bits.read_bool("film_grain_params_present")?;
+    Ok(Av1ColorConfigParse {
+        film_grain_params_present,
+        separate_uv_delta_q,
+    })
 }
 
 fn read_av1_leb128(bytes: &[u8]) -> Result<(usize, usize), String> {
@@ -6259,6 +6389,43 @@ mod tests {
             .expect("loop-filter delta updates should be skipped");
 
         assert_eq!(bits.bit_offset, 24);
+    }
+
+    #[test]
+    fn quantization_parser_reads_signed_deltas_and_qmatrix() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(128, 8);
+        writer.write_bits(1, 1);
+        writer.write_bits(0b111_1110, 7);
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0b000_0101, 7);
+        writer.write_bits(0, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0b111_1111, 7);
+        writer.write_bits(1, 1);
+        writer.write_bits(0b000_0011, 7);
+        writer.write_bits(1, 1);
+        writer.write_bits(2, 4);
+        writer.write_bits(3, 4);
+        writer.write_bits(4, 4);
+        let payload = writer.finish();
+        let mut bits = BitReader::new(&payload);
+
+        let quantization = parse_av1_quantization_params(&mut bits, true)
+            .expect("quantization params should parse");
+
+        assert_eq!(quantization.base_q_idx, 128);
+        assert_eq!(quantization.delta_q_y_dc, -2);
+        assert!(quantization.diff_uv_delta);
+        assert_eq!(quantization.delta_q_u_dc, 5);
+        assert_eq!(quantization.delta_q_u_ac, 0);
+        assert_eq!(quantization.delta_q_v_dc, -1);
+        assert_eq!(quantization.delta_q_v_ac, 3);
+        assert!(quantization.using_qmatrix);
+        assert_eq!(quantization.qm_y, 2);
+        assert_eq!(quantization.qm_u, 3);
+        assert_eq!(quantization.qm_v, 4);
     }
 
     #[test]

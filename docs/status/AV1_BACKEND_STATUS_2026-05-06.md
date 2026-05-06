@@ -272,7 +272,9 @@ Current implementation progress:
   feature flags into the std AV1 structs; the fallback key-frame parser now
   skips AV1 loop-filter ref/mode delta update payloads instead of rejecting the
   stream at `loop_filter_delta_update`, with a unit test covering the bit
-  consumption; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
+  consumption; the same fallback parser now also reads AV1 quantization signed
+  deltas and qmatrix fields into `StdVideoAV1Quantization` instead of rejecting
+  `using_qmatrix`; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
@@ -330,6 +332,7 @@ Latest Vulkan AV1 scaffold verification:
 
 - `cargo fmt --all --check`
 - `cargo test -p video-hw-backend-vulkan --features backend-vulkan loop_filter_delta_updates_skip_ref_and_mode_deltas`
+- `cargo test -p video-hw-backend-vulkan --features backend-vulkan quantization_parser_reads_signed_deltas_and_qmatrix`
 - `cargo test -p video-hw-backend-vulkan --features backend-vulkan av1`
   includes `decode_submit_skeleton_rejects_show_existing_frame_obu`, which
   guards the unsupported-frame-header rejection path added in `d0ee5e9`.
