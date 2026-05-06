@@ -2116,6 +2116,17 @@ mod tests {
                 },
             );
             assert_eq!(vt_hevc.layout, EncodedLayout::Hvcc);
+
+            let vt_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::VideoToolbox,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1, 2, 3],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(vt_av1.layout, EncodedLayout::Av1);
         }
 
         #[cfg(all(
@@ -2133,6 +2144,17 @@ mod tests {
                 },
             );
             assert_eq!(nv.layout, EncodedLayout::AnnexB);
+
+            let nv_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::Nvidia,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(nv_av1.layout, EncodedLayout::Av1);
         }
         #[cfg(all(
             feature = "backend-intel",
@@ -2149,6 +2171,17 @@ mod tests {
                 },
             );
             assert_eq!(intel.layout, EncodedLayout::AnnexB);
+
+            let intel_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::Intel,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(intel_av1.layout, EncodedLayout::Av1);
         }
         #[cfg(all(
             feature = "backend-vulkan",
