@@ -171,7 +171,13 @@ Current implementation progress:
   order the future command buffer recorder will consume them; a result-returning
   record callback wrapper now reports begin/reset/decode/end counts so unsafe
   ash calls can be inserted without changing the sequencing API, and validates
-  those counts against the planned frame count;
+  those counts against the planned frame count; real-bitstream probing now keeps
+  the uploaded source buffer, decode image/view, video session, session
+  parameters, and bound session memory alive together long enough to materialize
+  the command sequence with non-null resource handles; direct
+  `vkCmdDecodeVideoKHR` command-buffer recording is intentionally not part of
+  the default probe yet because issuing the driver command path still needs a
+  dedicated submit/readback gate;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

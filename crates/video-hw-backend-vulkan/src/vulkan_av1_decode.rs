@@ -50,6 +50,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub session_memory_bound_count: usize,
     pub bitstream_upload_bytes: usize,
     pub decode_image_layers: u32,
+    pub command_record_decode_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -839,6 +840,24 @@ struct Av1DecodeSessionBootstrapSummary {
 #[derive(Debug, Clone)]
 struct Av1DecodeSessionMemoryPlan {
     requirements: Vec<vk::VideoSessionMemoryRequirementsKHR<'static>>,
+    summary: Av1DecodeSessionBootstrapSummary,
+}
+
+struct Av1DecodeSourceBufferResource {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+}
+
+struct Av1DecodeImageResource {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+}
+
+struct Av1DecodeSessionResource {
+    session: vk::VideoSessionKHR,
+    parameters: vk::VideoSessionParametersKHR,
+    memories: Vec<vk::DeviceMemory>,
     summary: Av1DecodeSessionBootstrapSummary,
 }
 
@@ -1957,18 +1976,23 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 continue;
             }
         };
-        let upload_result = create_and_destroy_av1_decode_source_buffer(
-            instance,
-            &device,
-            physical_device,
-            &upload_plan.bytes,
-        );
-        let image_plan = match build_av1_key_frame_decode_command_skeleton_from_decodes(
+        let upload_result =
+            create_av1_decode_source_buffer(instance, &device, physical_device, &upload_plan.bytes);
+        let command = match build_av1_key_frame_decode_command_skeleton_from_decodes(
             &upload_plan.decodes,
             snapshot.max_dpb_slots,
-        )
-        .and_then(|command| command.decode_image_plan(picture_format))
-        {
+        ) {
+            Ok(command) => command,
+            Err(err) => {
+                probe_errors.push(err);
+                // SAFETY: The device is no longer used after this point.
+                unsafe {
+                    device.destroy_device(None);
+                }
+                continue;
+            }
+        };
+        let image_plan = match command.decode_image_plan(picture_format) {
             Ok(plan) => plan,
             Err(err) => {
                 probe_errors.push(err);
@@ -1979,11 +2003,16 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 continue;
             }
         };
-        let image_result =
-            create_and_destroy_av1_decode_image(instance, &device, physical_device, &image_plan);
-        let result = upload_result.and_then(|()| {
-            image_result?;
-            create_and_destroy_av1_decode_session_parameters_with_header(
+        let result = upload_result.and_then(|source_buffer| {
+            let image =
+                match create_av1_decode_image(instance, &device, physical_device, &image_plan) {
+                    Ok(image) => image,
+                    Err(err) => {
+                        destroy_av1_decode_source_buffer(&device, source_buffer);
+                        return Err(err);
+                    }
+                };
+            let session = match create_av1_decode_session_with_parameters(
                 instance,
                 &device,
                 Av1DecodeSessionParameterProbeConfig {
@@ -1995,14 +2024,34 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     coded_height,
                     std_sequence_header,
                 },
-            )
+            ) {
+                Ok(session) => session,
+                Err(err) => {
+                    destroy_av1_decode_image(&device, image);
+                    destroy_av1_decode_source_buffer(&device, source_buffer);
+                    return Err(err);
+                }
+            };
+            let record_result = upload_plan.record_decode_command_sequence(
+                &command,
+                session.session,
+                session.parameters,
+                source_buffer.buffer,
+                image.view,
+                |_| Ok(()),
+            );
+            let summary = session.summary;
+            destroy_av1_decode_session_resource(instance, &device, session);
+            destroy_av1_decode_image(&device, image);
+            destroy_av1_decode_source_buffer(&device, source_buffer);
+            record_result.map(|record_summary| (summary, record_summary))
         });
         // SAFETY: The device is no longer used after this point.
         unsafe {
             device.destroy_device(None);
         }
         match result {
-            Ok(summary) => {
+            Ok((summary, record_summary)) => {
                 return Ok(Av1DecodeBitstreamSessionProbe {
                     coded_width,
                     coded_height,
@@ -2017,6 +2066,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session_memory_bound_count: summary.memory_bound_count,
                     bitstream_upload_bytes: upload_plan.bytes.len(),
                     decode_image_layers: image_plan.array_layers,
+                    command_record_decode_count: record_summary.decode_count,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2073,6 +2123,17 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
     device: &ash::Device,
     config: Av1DecodeSessionParameterProbeConfig<'_>,
 ) -> Result<Av1DecodeSessionBootstrapSummary, String> {
+    let resource = create_av1_decode_session_with_parameters(instance, device, config)?;
+    let summary = resource.summary;
+    destroy_av1_decode_session_resource(instance, device, resource);
+    Ok(summary)
+}
+
+fn create_av1_decode_session_with_parameters(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    config: Av1DecodeSessionParameterProbeConfig<'_>,
+) -> Result<Av1DecodeSessionResource, String> {
     let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
         .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
         .film_grain_support(false);
@@ -2116,10 +2177,10 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
         ));
     }
 
-    let parameters_result =
+    let resource_result =
         query_av1_decode_session_memory_requirements(device, &video_queue_device, video_session)
             .and_then(|memory_plan| {
-                let mut session_memories = bind_av1_decode_session_memory(
+                let session_memories = bind_av1_decode_session_memory(
                     instance,
                     device,
                     &video_queue_device,
@@ -2127,31 +2188,42 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
                     video_session,
                     &memory_plan.requirements,
                 )?;
-                let create_result = create_av1_decode_session_parameters(
+                let parameters = match create_av1_decode_session_parameters(
                     device,
                     &video_queue_device,
                     video_session,
                     config.std_sequence_header,
-                );
+                ) {
+                    Ok(parameters) => parameters,
+                    Err(err) => {
+                        for memory in session_memories {
+                            // SAFETY: These allocations were created by this device in this scope.
+                            unsafe { device.free_memory(memory, None) };
+                        }
+                        return Err(err);
+                    }
+                };
                 let mut summary = memory_plan.summary;
                 summary.memory_bound_count = session_memories.len();
-                for memory in session_memories.drain(..) {
-                    // SAFETY: These allocations were created by this device in this scope and
-                    // are no longer used after the bootstrap probe.
-                    unsafe { device.free_memory(memory, None) };
-                }
-                create_result.map(|()| summary)
+                Ok(Av1DecodeSessionResource {
+                    session: video_session,
+                    parameters,
+                    memories: session_memories,
+                    summary,
+                })
             });
 
-    // SAFETY: `video_session` was created by this device and is no longer used.
-    unsafe {
-        (video_queue_device.fp().destroy_video_session_khr)(
-            device.handle(),
-            video_session,
-            std::ptr::null(),
-        );
+    if resource_result.is_err() {
+        // SAFETY: `video_session` was created by this device and is no longer used.
+        unsafe {
+            (video_queue_device.fp().destroy_video_session_khr)(
+                device.handle(),
+                video_session,
+                std::ptr::null(),
+            );
+        }
     }
-    parameters_result
+    resource_result
 }
 
 fn query_av1_decode_session_memory_requirements(
@@ -2321,12 +2393,12 @@ fn select_av1_decode_memory_type_index(
         })
 }
 
-fn create_and_destroy_av1_decode_source_buffer(
+fn create_av1_decode_source_buffer(
     instance: &ash::Instance,
     device: &ash::Device,
     physical_device: vk::PhysicalDevice,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> Result<Av1DecodeSourceBufferResource, String> {
     if bytes.is_empty() {
         return Err("AV1 decode source buffer upload requires non-empty bytes".to_string());
     }
@@ -2392,28 +2464,32 @@ fn create_and_destroy_av1_decode_source_buffer(
         Ok(memory)
     })();
 
-    if let Ok(memory) = upload_result {
-        // SAFETY: The buffer is no longer used after this probe step.
-        unsafe {
-            device.destroy_buffer(buffer, None);
-            device.free_memory(memory, None);
+    match upload_result {
+        Ok(memory) => Ok(Av1DecodeSourceBufferResource { buffer, memory }),
+        Err(err) => {
+            // SAFETY: The buffer was created above and is no longer used after upload failure.
+            unsafe {
+                device.destroy_buffer(buffer, None);
+            }
+            Err(err)
         }
-        Ok(())
-    } else {
-        // SAFETY: The buffer was created above and is no longer used.
-        unsafe {
-            device.destroy_buffer(buffer, None);
-        }
-        upload_result.map(|_| ())
     }
 }
 
-fn create_and_destroy_av1_decode_image(
+fn destroy_av1_decode_source_buffer(device: &ash::Device, resource: Av1DecodeSourceBufferResource) {
+    // SAFETY: The resource was created by this device and is no longer used.
+    unsafe {
+        device.destroy_buffer(resource.buffer, None);
+        device.free_memory(resource.memory, None);
+    }
+}
+
+fn create_av1_decode_image(
     instance: &ash::Instance,
     device: &ash::Device,
     physical_device: vk::PhysicalDevice,
     plan: &Av1DecodeImagePlan,
-) -> Result<(), String> {
+) -> Result<Av1DecodeImageResource, String> {
     let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
         .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
         .film_grain_support(false);
@@ -2508,15 +2584,11 @@ fn create_and_destroy_av1_decode_image(
     })();
 
     match result {
-        Ok((memory, view)) => {
-            // SAFETY: The created resources are probe-local and no longer used.
-            unsafe {
-                device.destroy_image_view(view, None);
-                device.destroy_image(image, None);
-                device.free_memory(memory, None);
-            }
-            Ok(())
-        }
+        Ok((memory, view)) => Ok(Av1DecodeImageResource {
+            image,
+            memory,
+            view,
+        }),
         Err(err) => {
             // SAFETY: The image was created above and is no longer used.
             unsafe {
@@ -2527,12 +2599,21 @@ fn create_and_destroy_av1_decode_image(
     }
 }
 
+fn destroy_av1_decode_image(device: &ash::Device, resource: Av1DecodeImageResource) {
+    // SAFETY: The resource was created by this device and is no longer used.
+    unsafe {
+        device.destroy_image_view(resource.view, None);
+        device.destroy_image(resource.image, None);
+        device.free_memory(resource.memory, None);
+    }
+}
+
 fn create_av1_decode_session_parameters(
     device: &ash::Device,
     video_queue_device: &ash::khr::video_queue::Device,
     video_session: vk::VideoSessionKHR,
     std_sequence_header: &StdVideoAV1SequenceHeader,
-) -> Result<(), String> {
+) -> Result<vk::VideoSessionParametersKHR, String> {
     let mut decode_av1_session_parameters =
         vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
             .std_sequence_header(std_sequence_header);
@@ -2557,15 +2638,31 @@ fn create_av1_decode_session_parameters(
         ));
     }
 
-    // SAFETY: `video_session_parameters` was created by this device and is no longer used.
+    Ok(video_session_parameters)
+}
+
+fn destroy_av1_decode_session_resource(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    mut resource: Av1DecodeSessionResource,
+) {
+    let video_queue_device = ash::khr::video_queue::Device::new(instance, device);
+    // SAFETY: The handles were created by this device and are no longer used.
     unsafe {
         (video_queue_device.fp().destroy_video_session_parameters_khr)(
             device.handle(),
-            video_session_parameters,
+            resource.parameters,
+            std::ptr::null(),
+        );
+        for memory in resource.memories.drain(..) {
+            device.free_memory(memory, None);
+        }
+        (video_queue_device.fp().destroy_video_session_khr)(
+            device.handle(),
+            resource.session,
             std::ptr::null(),
         );
     }
-    Ok(())
 }
 
 fn build_probe_av1_std_sequence_header(
