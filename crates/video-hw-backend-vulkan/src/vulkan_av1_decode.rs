@@ -45,6 +45,11 @@ use oxideav_av1::{
 const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
 const AV1_SELECT_INTEGER_MV: u8 = 2;
 const AV1_WARPEDMODEL_PRECISION_IDENTITY: i32 = 1 << 16;
+const AV1_MAX_SEGMENTS: usize = 8;
+const AV1_SEG_LVL_MAX: usize = 8;
+const AV1_SEG_FEATURE_BITS: [usize; AV1_SEG_LVL_MAX] = [8, 6, 6, 6, 6, 3, 0, 0];
+const AV1_SEG_FEATURE_SIGNED: [bool; AV1_SEG_LVL_MAX] =
+    [true, true, true, true, true, false, false, false];
 
 const fn bool_to_u32(value: bool) -> u32 {
     value as u32
@@ -186,7 +191,7 @@ pub(crate) struct Av1StdPictureOverrides {
     pub global_motion: StdVideoAV1GlobalMotion,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Av1ParsedKeyFrameHeader {
     pub tile_payload_offset: usize,
     pub disable_cdf_update: bool,
@@ -207,6 +212,11 @@ pub(crate) struct Av1ParsedKeyFrameHeader {
     pub qm_y: u8,
     pub qm_u: u8,
     pub qm_v: u8,
+    pub segmentation_enabled: bool,
+    pub segmentation_update_map: bool,
+    pub segmentation_temporal_update: bool,
+    pub segmentation_update_data: bool,
+    pub segmentation: StdVideoAV1Segmentation,
     pub delta_q_present: bool,
     pub delta_q_res: u8,
     pub loop_filter_level: [u8; 4],
@@ -236,6 +246,15 @@ struct Av1ParsedQuantization {
     qm_y: u8,
     qm_u: u8,
     qm_v: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Av1ParsedSegmentation {
+    enabled: bool,
+    update_map: bool,
+    temporal_update: bool,
+    update_data: bool,
+    std_segmentation: StdVideoAV1Segmentation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -403,10 +422,10 @@ impl Av1DecodeStdPictureInfoScope {
                     0,
                     header.delta_q_present as u32,
                     0,
-                    0,
-                    0,
-                    0,
-                    0,
+                    header.segmentation_enabled as u32,
+                    header.segmentation_update_map as u32,
+                    header.segmentation_temporal_update as u32,
+                    header.segmentation_update_data as u32,
                     0,
                     0,
                     0,
@@ -429,6 +448,7 @@ impl Av1DecodeStdPictureInfoScope {
             scope.quantization.qm_y = header.qm_y;
             scope.quantization.qm_u = header.qm_u;
             scope.quantization.qm_v = header.qm_v;
+            scope.segmentation = header.segmentation;
             scope.loop_filter.flags._bitfield_1 = StdVideoAV1LoopFilterFlags::new_bitfield_1(
                 header.loop_filter_delta_enabled as u32,
                 header.loop_filter_delta_update as u32,
@@ -3220,10 +3240,7 @@ fn parse_av1_key_frame_obu_header(
         sequence_header.is_some_and(|sequence| sequence.separate_uv_delta_q),
     )?;
 
-    let segmentation_enabled = bits.read_bool("segmentation_enabled")?;
-    if segmentation_enabled {
-        return Err("AV1 segmentation parsing is not implemented".to_string());
-    }
+    let segmentation = parse_av1_key_frame_segmentation_params(&mut bits)?;
     let delta_q_present = bits.read_bool("delta_q_present")?;
     let mut delta_q_res = 0;
     if delta_q_present {
@@ -3292,6 +3309,11 @@ fn parse_av1_key_frame_obu_header(
         qm_y: quantization.qm_y,
         qm_u: quantization.qm_u,
         qm_v: quantization.qm_v,
+        segmentation_enabled: segmentation.enabled,
+        segmentation_update_map: segmentation.update_map,
+        segmentation_temporal_update: segmentation.temporal_update,
+        segmentation_update_data: segmentation.update_data,
+        segmentation: segmentation.std_segmentation,
         delta_q_present,
         delta_q_res,
         loop_filter_level,
@@ -3383,6 +3405,77 @@ fn read_av1_signed_literal_i8(
     } else {
         let signed = i16::from(raw) - (1_i16 << count);
         i8::try_from(signed).map_err(|_| format!("{field_name} does not fit in i8"))
+    }
+}
+
+fn parse_av1_key_frame_segmentation_params(
+    bits: &mut BitReader<'_>,
+) -> Result<Av1ParsedSegmentation, String> {
+    let enabled = bits.read_bool("segmentation_enabled")?;
+    let mut parsed = Av1ParsedSegmentation {
+        enabled,
+        update_map: false,
+        temporal_update: false,
+        update_data: false,
+        std_segmentation: StdVideoAV1Segmentation {
+            FeatureEnabled: [0; AV1_MAX_SEGMENTS],
+            FeatureData: [[0; AV1_SEG_LVL_MAX]; AV1_MAX_SEGMENTS],
+        },
+    };
+    if !enabled {
+        return Ok(parsed);
+    }
+
+    parsed.update_map = true;
+    parsed.update_data = true;
+    for segment_index in 0..AV1_MAX_SEGMENTS {
+        let mut feature_enabled_bits = 0_u8;
+        for feature_index in 0..AV1_SEG_LVL_MAX {
+            if bits.read_bool("segmentation_feature_enabled")? {
+                feature_enabled_bits |= 1_u8 << feature_index;
+                let feature_bits = AV1_SEG_FEATURE_BITS[feature_index];
+                if feature_bits > 0 {
+                    parsed.std_segmentation.FeatureData[segment_index][feature_index] =
+                        if AV1_SEG_FEATURE_SIGNED[feature_index] {
+                            read_av1_signed_literal_i16(
+                                bits,
+                                feature_bits + 1,
+                                "segmentation_feature_data",
+                            )?
+                        } else {
+                            i16::try_from(
+                                bits.read_bits_u16(feature_bits, "segmentation_feature_data")?,
+                            )
+                            .map_err(|_| {
+                                "segmentation_feature_data does not fit in i16".to_string()
+                            })?
+                        };
+                }
+            }
+        }
+        parsed.std_segmentation.FeatureEnabled[segment_index] = feature_enabled_bits;
+    }
+
+    Ok(parsed)
+}
+
+fn read_av1_signed_literal_i16(
+    bits: &mut BitReader<'_>,
+    count: usize,
+    field_name: &str,
+) -> Result<i16, String> {
+    if count == 0 || count > 16 {
+        return Err(format!(
+            "{field_name} signed literal bit count {count} is unsupported"
+        ));
+    }
+    let raw = bits.read_bits_u16(count, field_name)?;
+    let sign_bit = 1_u16 << (count - 1);
+    if raw & sign_bit == 0 {
+        i16::try_from(raw).map_err(|_| format!("{field_name} does not fit in i16"))
+    } else {
+        let signed = i32::from(raw) - (1_i32 << count);
+        i16::try_from(signed).map_err(|_| format!("{field_name} does not fit in i16"))
     }
 }
 
@@ -6374,6 +6467,7 @@ mod tests {
         assert_eq!(header.base_q_idx, 128);
         assert_eq!(header.loop_filter_level, [7, 7, 13, 13]);
         assert_eq!(header.cdef_bits, 1);
+        assert!(!header.segmentation_enabled);
     }
 
     #[test]
@@ -6426,6 +6520,30 @@ mod tests {
         assert_eq!(quantization.qm_y, 2);
         assert_eq!(quantization.qm_u, 3);
         assert_eq!(quantization.qm_v, 4);
+    }
+
+    #[test]
+    fn key_frame_segmentation_parser_reads_feature_table() {
+        let mut writer = BitWriter::default();
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0b1_1111_1110, 9);
+        for _ in 1..(AV1_MAX_SEGMENTS * AV1_SEG_LVL_MAX) {
+            writer.write_bits(0, 1);
+        }
+        let payload = writer.finish();
+        let mut bits = BitReader::new(&payload);
+
+        let segmentation = parse_av1_key_frame_segmentation_params(&mut bits)
+            .expect("key-frame segmentation params should parse");
+
+        assert!(segmentation.enabled);
+        assert!(segmentation.update_map);
+        assert!(!segmentation.temporal_update);
+        assert!(segmentation.update_data);
+        assert_eq!(segmentation.std_segmentation.FeatureEnabled[0], 1);
+        assert_eq!(segmentation.std_segmentation.FeatureData[0][0], -2);
+        assert_eq!(segmentation.std_segmentation.FeatureEnabled[1], 0);
     }
 
     #[test]
