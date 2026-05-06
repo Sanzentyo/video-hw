@@ -199,7 +199,11 @@ Current implementation progress:
   `image_layers=16`, `barrier_layers=16`, and `record_decodes=1` for decode
   modes; the `full --submit-command-buffer` probe also passes with
   `command_buffer_submitted=true`, reaching queue submit and fence wait before
-  readback;
+  readback; NV12 AV1 readback planning now mirrors the HEVC plane-copy layout
+  for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
+  4-byte plane offset alignment, and bitstream session diagnostics now report
+  readback byte/region counts, but the actual image-to-buffer copy/map gate is
+  still pending;
 - Vulkan AV1 capability is still false because real-bitstream session
   readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,

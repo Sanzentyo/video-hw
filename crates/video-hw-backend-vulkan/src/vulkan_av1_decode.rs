@@ -55,6 +55,8 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub bitstream_upload_bytes: usize,
     pub decode_image_layers: u32,
     pub decode_image_barrier_layers: u32,
+    pub readback_bytes: u64,
+    pub readback_region_count: usize,
     pub command_record_decode_count: usize,
     pub command_buffer_recorded: bool,
     pub command_buffer_submitted: bool,
@@ -247,6 +249,12 @@ pub(crate) struct Av1DecodeImagePlan {
     pub extent: vk::Extent2D,
     pub array_layers: u32,
     pub usage: vk::ImageUsageFlags,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Av1DecodeReadbackPlan {
+    pub buffer_size: u64,
+    pub regions: Vec<vk::BufferImageCopy>,
 }
 
 #[derive(Debug, Clone)]
@@ -668,6 +676,13 @@ impl Av1DecodeCommandSkeleton {
                 base_array_layer: 0,
                 layer_count: self.image_array_layers()?,
             }))
+    }
+
+    pub(crate) fn decode_readback_plan(
+        &self,
+        format: vk::Format,
+    ) -> Result<Av1DecodeReadbackPlan, String> {
+        build_av1_decode_readback_plan(format, self.coded_width, self.coded_height)
     }
 
     pub(crate) fn begin_picture_resources<'a>(
@@ -2194,6 +2209,17 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 continue;
             }
         };
+        let readback_plan = match command.decode_readback_plan(picture_format) {
+            Ok(plan) => plan,
+            Err(err) => {
+                probe_errors.push(err);
+                // SAFETY: The device is no longer used after this point.
+                unsafe {
+                    device.destroy_device(None);
+                }
+                continue;
+            }
+        };
         let result = upload_result.and_then(|source_buffer| {
             let image =
                 match create_av1_decode_image(instance, &device, physical_device, &image_plan) {
@@ -2308,6 +2334,8 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     bitstream_upload_bytes: upload_plan.bytes.len(),
                     decode_image_layers: image_plan.array_layers,
                     decode_image_barrier_layers,
+                    readback_bytes: readback_plan.buffer_size,
+                    readback_region_count: readback_plan.regions.len(),
                     command_record_decode_count: record_summary.decode_count,
                     command_buffer_recorded,
                     command_buffer_submitted,
@@ -3026,6 +3054,85 @@ fn av1_decode_command_buffer_record_mode_from_env() -> Av1DecodeCommandBufferRec
         Some("first_decode") | Some("decode") => Av1DecodeCommandBufferRecordMode::FirstDecode,
         _ => Av1DecodeCommandBufferRecordMode::Full,
     }
+}
+
+fn build_av1_decode_readback_plan(
+    format: vk::Format,
+    coded_width: u32,
+    coded_height: u32,
+) -> Result<Av1DecodeReadbackPlan, String> {
+    if coded_width == 0 || coded_height == 0 {
+        return Err(format!(
+            "invalid coded extent for AV1 decode readback: {coded_width}x{coded_height}"
+        ));
+    }
+
+    let mut regions = Vec::new();
+    let mut next_offset = 0_u64;
+    let mut push_region = |aspect_mask: vk::ImageAspectFlags,
+                           plane_width: u32,
+                           plane_height: u32,
+                           bytes_per_texel: u64|
+     -> Result<(), String> {
+        let row_bytes = u64::from(plane_width)
+            .checked_mul(bytes_per_texel)
+            .ok_or_else(|| "AV1 decode readback row size overflowed u64".to_string())?;
+        let plane_bytes = row_bytes
+            .checked_mul(u64::from(plane_height))
+            .ok_or_else(|| "AV1 decode readback plane size overflowed u64".to_string())?;
+        let offset = align_av1_decode_readback_offset(next_offset, 4);
+        regions.push(
+            vk::BufferImageCopy::default()
+                .buffer_offset(offset)
+                .buffer_row_length(plane_width)
+                .buffer_image_height(plane_height)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D::default())
+                .image_extent(vk::Extent3D {
+                    width: plane_width,
+                    height: plane_height,
+                    depth: 1,
+                }),
+        );
+        next_offset = offset
+            .checked_add(plane_bytes)
+            .ok_or_else(|| "AV1 decode readback buffer size overflowed u64".to_string())?;
+        Ok(())
+    };
+
+    match format {
+        vk::Format::G8_B8R8_2PLANE_420_UNORM => {
+            push_region(vk::ImageAspectFlags::PLANE_0, coded_width, coded_height, 1)?;
+            push_region(
+                vk::ImageAspectFlags::PLANE_1,
+                coded_width.div_ceil(2),
+                coded_height.div_ceil(2),
+                2,
+            )?;
+        }
+        other => {
+            return Err(format!(
+                "AV1 decode readback is not implemented for output format {other:?}"
+            ));
+        }
+    }
+
+    Ok(Av1DecodeReadbackPlan {
+        buffer_size: next_offset,
+        regions,
+    })
+}
+
+fn align_av1_decode_readback_offset(value: u64, alignment: u64) -> u64 {
+    if alignment <= 1 {
+        return value;
+    }
+    value.div_ceil(alignment) * alignment
 }
 
 fn create_av1_decode_session_parameters(
@@ -3989,6 +4096,22 @@ mod tests {
             vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
         );
         assert_eq!(image_barrier.subresource_range.layer_count, 2);
+        let readback_plan = command
+            .decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM)
+            .expect("NV12 readback plan should be built");
+        assert_eq!(readback_plan.buffer_size, 320 * 180 + 320 * 90);
+        assert_eq!(readback_plan.regions.len(), 2);
+        assert_eq!(
+            readback_plan.regions[0].image_subresource.aspect_mask,
+            vk::ImageAspectFlags::PLANE_0
+        );
+        assert_eq!(
+            readback_plan.regions[1].image_subresource.aspect_mask,
+            vk::ImageAspectFlags::PLANE_1
+        );
+        assert_eq!(readback_plan.regions[1].buffer_offset, 320 * 180);
+        assert_eq!(readback_plan.regions[1].image_extent.width, 160);
+        assert_eq!(readback_plan.regions[1].image_extent.height, 90);
 
         let begin_resources = command.begin_picture_resources(vk::ImageView::null());
         assert_eq!(begin_resources.len(), 2);
@@ -4577,6 +4700,33 @@ mod tests {
     }
 
     #[test]
+    fn av1_decode_readback_plan_handles_odd_nv12_dimensions() {
+        let plan = build_av1_decode_readback_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM, 641, 479)
+            .expect("odd NV12 dimensions should produce a readback plan");
+
+        assert_eq!(plan.regions.len(), 2);
+        assert_eq!(plan.regions[0].buffer_offset, 0);
+        assert_eq!(plan.regions[0].buffer_row_length, 641);
+        assert_eq!(plan.regions[0].buffer_image_height, 479);
+        assert_eq!(plan.regions[1].buffer_row_length, 321);
+        assert_eq!(plan.regions[1].buffer_image_height, 240);
+        assert_eq!(plan.regions[1].image_extent.width, 321);
+        assert_eq!(plan.regions[1].image_extent.height, 240);
+        assert_eq!(plan.regions[1].buffer_offset % 4, 0);
+        assert_eq!(
+            plan.buffer_size,
+            plan.regions[1].buffer_offset + 321 * 240 * 2
+        );
+    }
+
+    #[test]
+    fn av1_decode_readback_plan_rejects_unsupported_format() {
+        let err = build_av1_decode_readback_plan(vk::Format::D32_SFLOAT, 320, 180)
+            .expect_err("unsupported readback format should be rejected");
+        assert!(err.contains("not implemented"));
+    }
+
+    #[test]
     #[ignore = "live Vulkan AV1 command-buffer record probe; opt in explicitly"]
     fn live_av1_decode_command_record_probe_reports_status() {
         let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
@@ -4585,13 +4735,15 @@ mod tests {
         match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
             Ok(probe) => {
                 eprintln!(
-                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
+                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, readback_bytes={}, readback_regions={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
                     probe.coded_width,
                     probe.coded_height,
                     probe.picture_format,
                     probe.bitstream_upload_bytes,
                     probe.decode_image_layers,
                     probe.decode_image_barrier_layers,
+                    probe.readback_bytes,
+                    probe.readback_region_count,
                     probe.command_record_decode_count,
                     probe.command_buffer_recorded,
                     probe.command_buffer_submitted

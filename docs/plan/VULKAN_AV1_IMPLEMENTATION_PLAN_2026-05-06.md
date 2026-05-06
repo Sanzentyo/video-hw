@@ -174,7 +174,10 @@ Tasks:
    `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots. Key-frame setup
    reference construction is covered; inter-frame reference lists remain.
 4. Reuse the HEVC readback path for NV12 output only after verifying the output
-   image format and coded extent constraints match AV1 capabilities.
+   image format and coded extent constraints match AV1 capabilities. AV1 now
+   has a pure NV12 readback plan for `G8_B8R8_2PLANE_420_UNORM` that matches the
+   HEVC plane-copy layout, including odd-dimension chroma rounding and 4-byte
+   plane offset alignment; the command-buffer copy/map gate remains.
 5. Convert NV12 to RGB24 through the existing facade conversion path.
 
 Acceptance:
