@@ -99,3 +99,28 @@ The result matches the current implementation model: contiguous decode is
 efficient when callers use the streaming range API; exact-frame sparse access is
 minimal at the encoded byte-cache layer only unless callers opt into
 `CachedFrameDecoder`.
+
+## AV1 fMP4 Hardware Runs
+
+Generated AV1 fMP4 inputs were created with `write_synthetic_fmp4` and measured
+with the same access-pattern benchmark. Both runs compare RGB24 output against
+FFmpeg software decode and therefore report frame correctness through max MSE /
+min PSNR in addition to cache behavior.
+
+- NVIDIA AV1 fMP4, 320x180, 90 frames:
+  `output/benchmark-fmp4-decode-access-1778069696.md`.
+  `decode_range_iter_contiguous` returned all 90 frames in 1.049 s with min
+  PSNR 45.950 dB. Per-sample sequential and reverse no-cache calls replayed GOP
+  data and took 7.430 s / 7.149 s with 1395 sample reads. The decoded-frame LRU
+  reduced sequential and reverse-before access to 0.847 s / 0.846 s with 80 hits
+  and 10 misses; reverse-after stayed slow at 7.458 s because the prefetch
+  direction intentionally mismatched reverse access.
+- Intel oneVPL AV1 fMP4, 320x180, 24 frames:
+  `output/benchmark-fmp4-decode-access-1778070138.md`.
+  `decode_range_iter_contiguous` returned all 24 frames in 1.276 s with min
+  PSNR 46.064 dB. Per-sample sequential and reverse no-cache calls took 29.358 s
+  / 31.215 s with 300 sample reads. The decoded-frame LRU reduced sequential and
+  reverse-before access to 5.957 s / 6.879 s; reverse-after stayed near the
+  no-cache reverse cost at 31.230 s. A 90-frame Intel AV1 run exceeded the
+  240-second local timeout, so larger Intel runs should be treated as a stress
+  case rather than a default smoke.

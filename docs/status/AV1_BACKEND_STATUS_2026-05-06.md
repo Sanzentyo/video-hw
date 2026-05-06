@@ -42,6 +42,16 @@ or better.
   - `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-1778069094.md`
   - NVIDIA: 30 reader samples, 30 `decode_to_yuv --input-format mp4` metadata frames, RGB decode PSNR min 45.98 dB, `codec=av1`, `tag=av01`, duration `1.000000`
   - Intel: 30 reader samples, 30 metadata frames, RGB decode PSNR min 46.07 dB, `codec=av1`, `tag=av01`, duration `1.000000`
+- AV1 fMP4 decode access-order benchmark:
+  - NVIDIA report `output/benchmark-fmp4-decode-access-1778069696.md`: 90
+    frames, contiguous range 1.049s, sequential no-cache 7.430s, reverse
+    no-cache 7.149s, cached reverse-before 0.846s, cached reverse-after 7.458s,
+    min PSNR 45.950 dB.
+  - Intel report `output/benchmark-fmp4-decode-access-1778070138.md`: 24
+    frames, contiguous range 1.276s, sequential no-cache 29.358s, reverse
+    no-cache 31.215s, cached reverse-before 6.879s, cached reverse-after
+    31.230s, min PSNR 46.064 dB. The 90-frame Intel run exceeded the local
+    240-second timeout.
 - Vulkan AV1 integrated benchmark:
   - `output/benchmark-backends-av1-1778068460.md`
   - detail: `output/benchmark-vulkan-av1-1778068460.md`
