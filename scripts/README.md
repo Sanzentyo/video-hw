@@ -66,7 +66,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --rel
 - `--equal-raw-input` で `video-hw` / `ffmpeg` encode に同一 raw ARGB 入力を供給する。
 - `--include-internal-metrics` で `VIDEO_HW_VT_METRICS=1` を有効化し、
   `Internal Metrics (video-hw)` セクションを NV 精密レポートと同形式で出力する。
-- AV1 は `libaom-av1` で生成した fMP4 `av01` input を使う decode-only 比較。`video-hw decode_to_yuv --input-format mp4 --backend vt --codec av1` と FFmpeg `-hwaccel videotoolbox` decode を同じ入力で測る。AV1 encode は未実装のため測定対象外。
+- AV1 は `libaom-av1` で生成した fMP4 `av01` input を使う decode-only 比較。`video-hw decode_to_yuv --input-format mp4 --backend vt --codec av1` と FFmpeg `-hwaccel videotoolbox` decode を同じ入力で測る。`--verify` では FFmpeg software NV12 reference との PSNR-Y も記録し、`--min-psnr-y` で閾値を変更できる。AV1 encode は未実装のため測定対象外。
 
 ### 5) VideoToolbox 精密ベンチ定常運用（直列実行）
 

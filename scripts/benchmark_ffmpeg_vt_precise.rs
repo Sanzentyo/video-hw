@@ -112,6 +112,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     include_internal_metrics: bool,
+
+    #[arg(long, default_value_t = 40.0)]
+    min_psnr_y: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +393,7 @@ fn main() -> Result<()> {
             "av1_note: decode-only; VideoToolbox AV1 encode remains unsupported"
         )?;
         writeln!(&mut report, "decode_input: {}", args.codec.sample_input())?;
+        writeln!(&mut report, "min_psnr_y: {:.4}", args.min_psnr_y)?;
     }
     writeln!(&mut report)?;
     writeln!(
@@ -529,6 +533,15 @@ fn main() -> Result<()> {
     if args.verify && args.codec == Codec::Av1 {
         writeln!(&mut report)?;
         writeln!(&mut report, "## Verification")?;
+        let ffmpeg_ref_nv12 = output_dir.join(format!(
+            "ffmpeg-vt-av1-reference-nv12-{}x{}-{}f.raw",
+            args.width, args.height, args.frame_count
+        ));
+        generate_ffmpeg_nv12_reference(
+            Path::new(args.codec.sample_input()),
+            &ffmpeg_ref_nv12,
+            args.frame_count,
+        )?;
         let bytes = fs::metadata(&video_hw_output).map(|m| m.len()).unwrap_or(0);
         let expected_min = args
             .width
@@ -542,6 +555,25 @@ fn main() -> Result<()> {
         )?;
         if bytes < expected_min as u64 {
             bail!("video-hw AV1 decode output is smaller than expected");
+        }
+        let psnr = compare_nv12_psnr_y(
+            &video_hw_output,
+            &ffmpeg_ref_nv12,
+            args.width,
+            args.height,
+            args.frame_count,
+        )?;
+        writeln!(
+            &mut report,
+            "- video-hw vs ffmpeg software NV12 PSNR-Y: avg={:.4}, min={:.4}, frames={}",
+            psnr.avg_y, psnr.min_y, psnr.frames
+        )?;
+        if psnr.min_y < args.min_psnr_y {
+            bail!(
+                "VideoToolbox AV1 PSNR-Y below threshold: min={:.4}, threshold={:.4}",
+                psnr.min_y,
+                args.min_psnr_y
+            );
         }
         let summary = ffprobe_summary(
             Path::new(args.codec.sample_input()),
@@ -838,6 +870,110 @@ fn generate_av1_fmp4_decode_input(args: &Args, path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn generate_ffmpeg_nv12_reference(
+    input: &Path,
+    output_path: &Path,
+    frame_count: usize,
+) -> Result<()> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-i",
+            &input.to_string_lossy(),
+            "-frames:v",
+            &frame_count.to_string(),
+            "-pix_fmt",
+            "nv12",
+            "-f",
+            "rawvideo",
+            &output_path.to_string_lossy(),
+        ])
+        .output()
+        .with_context(|| format!("generate FFmpeg NV12 reference: {}", output_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "ffmpeg NV12 reference generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PsnrSummary {
+    frames: usize,
+    avg_y: f64,
+    min_y: f64,
+}
+
+fn compare_nv12_psnr_y(
+    actual_path: &Path,
+    reference_path: &Path,
+    width: usize,
+    height: usize,
+    requested_frames: usize,
+) -> Result<PsnrSummary> {
+    let actual = fs::read(actual_path)
+        .with_context(|| format!("read video-hw NV12 output: {}", actual_path.display()))?;
+    let reference = fs::read(reference_path)
+        .with_context(|| format!("read FFmpeg NV12 reference: {}", reference_path.display()))?;
+    let y_size = width
+        .checked_mul(height)
+        .context("NV12 luma plane size overflow")?;
+    let frame_size = y_size
+        .checked_mul(3)
+        .and_then(|v| v.checked_div(2))
+        .context("NV12 frame size overflow")?;
+    let frames = actual
+        .len()
+        .min(reference.len())
+        .checked_div(frame_size)
+        .unwrap_or(0)
+        .min(requested_frames);
+    if frames == 0 {
+        bail!(
+            "no full NV12 frames to compare: actual_bytes={}, reference_bytes={}, frame_size={frame_size}",
+            actual.len(),
+            reference.len()
+        );
+    }
+
+    let mut values = Vec::with_capacity(frames);
+    for frame in 0..frames {
+        let offset = frame * frame_size;
+        let actual_y = &actual[offset..offset + y_size];
+        let reference_y = &reference[offset..offset + y_size];
+        values.push(psnr_y(actual_y, reference_y));
+    }
+    let avg_y = values.iter().sum::<f64>() / values.len() as f64;
+    let min_y = values.iter().copied().fold(f64::INFINITY, f64::min);
+    Ok(PsnrSummary {
+        frames,
+        avg_y,
+        min_y,
+    })
+}
+
+fn psnr_y(actual: &[u8], reference: &[u8]) -> f64 {
+    let mse = actual
+        .iter()
+        .zip(reference.iter())
+        .map(|(a, b)| {
+            let diff = f64::from(*a) - f64::from(*b);
+            diff * diff
+        })
+        .sum::<f64>()
+        / actual.len().max(1) as f64;
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * ((255.0 * 255.0) / mse).log10()
+    }
 }
 
 fn write_raw_argb_input(

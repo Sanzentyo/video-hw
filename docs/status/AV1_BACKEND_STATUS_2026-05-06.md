@@ -539,7 +539,8 @@ Current safeguards and evidence:
 - `decode_to_yuv --input-format mp4` lazily creates VT AV1 sessions after the
   first `av01` sample entry is available;
 - `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --verify` now generates
-  an AV1 fMP4 input and records decode-only video-hw VT vs FFmpeg VT results;
+  an AV1 fMP4 input and records decode-only video-hw VT vs FFmpeg VT results,
+  including PSNR-Y against an FFmpeg software NV12 reference;
   `scripts/run_vt_precise_suite.rs --include-av1` includes that AV1 pass in the
   serial VT suite;
 - `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`
