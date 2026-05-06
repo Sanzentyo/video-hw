@@ -52,6 +52,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub decode_image_layers: u32,
     pub decode_image_barrier_layers: u32,
     pub command_record_decode_count: usize,
+    pub command_buffer_recorded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -893,6 +894,19 @@ struct Av1DecodeSessionResource {
     parameters: vk::VideoSessionParametersKHR,
     memories: Vec<vk::DeviceMemory>,
     summary: Av1DecodeSessionBootstrapSummary,
+}
+
+struct Av1DecodeCommandRecordConfig<'a> {
+    instance: &'a ash::Instance,
+    device: &'a ash::Device,
+    queue_family_index: u32,
+    upload_plan: &'a Av1DecodeBitstreamUploadPlan,
+    command: &'a Av1DecodeCommandSkeleton,
+    video_session: vk::VideoSessionKHR,
+    video_session_parameters: vk::VideoSessionParametersKHR,
+    source_buffer: vk::Buffer,
+    decode_image: vk::Image,
+    image_view: vk::ImageView,
 }
 
 impl Av1DecodeExtensionFlags {
@@ -2082,28 +2096,51 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     return Err(err);
                 }
             };
-            let record_result = upload_plan.record_decode_command_sequence(
-                &command,
-                session.session,
-                session.parameters,
-                source_buffer.buffer,
-                image.view,
-                |_| Ok(()),
-            );
+            let command_buffer_record_requested =
+                std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1");
+            let record_result = if command_buffer_record_requested {
+                record_and_destroy_av1_decode_command_buffer(Av1DecodeCommandRecordConfig {
+                    instance,
+                    device: &device,
+                    queue_family_index,
+                    upload_plan: &upload_plan,
+                    command: &command,
+                    video_session: session.session,
+                    video_session_parameters: session.parameters,
+                    source_buffer: source_buffer.buffer,
+                    decode_image: image.image,
+                    image_view: image.view,
+                })
+            } else {
+                upload_plan.record_decode_command_sequence(
+                    &command,
+                    session.session,
+                    session.parameters,
+                    source_buffer.buffer,
+                    image.view,
+                    |_| Ok(()),
+                )
+            };
             let summary = session.summary;
             let decode_image_barrier_layers = image_barrier.subresource_range.layer_count;
             destroy_av1_decode_session_resource(instance, &device, session);
             destroy_av1_decode_image(&device, image);
             destroy_av1_decode_source_buffer(&device, source_buffer);
-            record_result
-                .map(|record_summary| (summary, record_summary, decode_image_barrier_layers))
+            record_result.map(|record_summary| {
+                (
+                    summary,
+                    record_summary,
+                    decode_image_barrier_layers,
+                    command_buffer_record_requested,
+                )
+            })
         });
         // SAFETY: The device is no longer used after this point.
         unsafe {
             device.destroy_device(None);
         }
         match result {
-            Ok((summary, record_summary, decode_image_barrier_layers)) => {
+            Ok((summary, record_summary, decode_image_barrier_layers, command_buffer_recorded)) => {
                 return Ok(Av1DecodeBitstreamSessionProbe {
                     coded_width,
                     coded_height,
@@ -2120,6 +2157,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     decode_image_layers: image_plan.array_layers,
                     decode_image_barrier_layers,
                     command_record_decode_count: record_summary.decode_count,
+                    command_buffer_recorded,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2659,6 +2697,112 @@ fn destroy_av1_decode_image(device: &ash::Device, resource: Av1DecodeImageResour
         device.destroy_image(resource.image, None);
         device.free_memory(resource.memory, None);
     }
+}
+
+fn record_and_destroy_av1_decode_command_buffer(
+    config: Av1DecodeCommandRecordConfig<'_>,
+) -> Result<Av1DecodeCommandRecordSummary, String> {
+    let device = config.device;
+    let command_pool_info =
+        vk::CommandPoolCreateInfo::default().queue_family_index(config.queue_family_index);
+    // SAFETY: Command pool create info references the selected decode queue family.
+    let command_pool = unsafe { device.create_command_pool(&command_pool_info, None) }
+        .map_err(|err| format!("vkCreateCommandPool for AV1 decode record failed: {err}"))?;
+
+    let result = (|| -> Result<Av1DecodeCommandRecordSummary, String> {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        // SAFETY: Allocate info references a live command pool.
+        let command_buffers = unsafe { device.allocate_command_buffers(&allocate_info) }
+            .map_err(|err| format!("vkAllocateCommandBuffers for AV1 decode failed: {err}"))?;
+        let command_buffer = command_buffers.first().copied().ok_or_else(|| {
+            "vkAllocateCommandBuffers returned no command buffer for AV1 decode".to_string()
+        })?;
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // SAFETY: Command buffer is valid and not already recording.
+        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
+            .map_err(|err| format!("vkBeginCommandBuffer for AV1 decode failed: {err}"))?;
+
+        let source_barrier = Av1DecodeCommandSkeleton::vk_decode_source_memory_barrier();
+        let image_barrier = config
+            .command
+            .vk_decode_image_init_barrier(config.decode_image)?;
+        let dependency_info = vk::DependencyInfo::default()
+            .memory_barriers(std::slice::from_ref(&source_barrier))
+            .image_memory_barriers(std::slice::from_ref(&image_barrier));
+        // SAFETY: Barriers reference live probe resources and command buffer is recording.
+        unsafe {
+            device.cmd_pipeline_barrier2(command_buffer, &dependency_info);
+        }
+
+        let video_queue_device = ash::khr::video_queue::Device::new(config.instance, device);
+        let video_decode_device =
+            ash::khr::video_decode_queue::Device::new(config.instance, device);
+        let record_summary = config.upload_plan.record_decode_command_sequence(
+            config.command,
+            config.video_session,
+            config.video_session_parameters,
+            config.source_buffer,
+            config.image_view,
+            |visit| {
+                match visit {
+                    Av1DecodeCommandVisit::BeginCoding(info) => {
+                        // SAFETY: Command buffer is recording; `info` references live resources.
+                        unsafe {
+                            (video_queue_device.fp().cmd_begin_video_coding_khr)(
+                                command_buffer,
+                                info,
+                            );
+                        }
+                    }
+                    Av1DecodeCommandVisit::ResetCoding(info) => {
+                        // SAFETY: Command buffer is inside a video coding scope.
+                        unsafe {
+                            (video_queue_device.fp().cmd_control_video_coding_khr)(
+                                command_buffer,
+                                info,
+                            );
+                        }
+                    }
+                    Av1DecodeCommandVisit::DecodeFrame { decode_info, .. } => {
+                        // SAFETY: Command buffer is inside a video coding scope and decode info
+                        // chains are scoped to this call.
+                        unsafe {
+                            (video_decode_device.fp().cmd_decode_video_khr)(
+                                command_buffer,
+                                decode_info,
+                            );
+                        }
+                    }
+                    Av1DecodeCommandVisit::EndCoding(info) => {
+                        // SAFETY: Command buffer is inside a video coding scope.
+                        unsafe {
+                            (video_queue_device.fp().cmd_end_video_coding_khr)(
+                                command_buffer,
+                                info,
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )?;
+
+        // SAFETY: Command buffer is recording and all command data has been emitted.
+        unsafe { device.end_command_buffer(command_buffer) }
+            .map_err(|err| format!("vkEndCommandBuffer for AV1 decode failed: {err}"))?;
+        Ok(record_summary)
+    })();
+
+    // SAFETY: Command pool and allocated command buffers are no longer used.
+    unsafe {
+        device.destroy_command_pool(command_pool, None);
+    }
+    result
 }
 
 fn create_av1_decode_session_parameters(

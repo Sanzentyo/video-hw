@@ -177,10 +177,12 @@ Current implementation progress:
   the command sequence with non-null resource handles; command-buffer setup now
   has pure builders for the HOST_WRITE -> VIDEO_DECODE_READ source-buffer memory
   barrier and UNDEFINED -> VIDEO_DECODE_DST_KHR decode-image initialization
-  barrier; direct
-  `vkCmdDecodeVideoKHR` command-buffer recording is intentionally not part of
-  the default probe yet because issuing the driver command path still needs a
-  dedicated submit/readback gate;
+  barrier; an opt-in `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` probe can
+  record a real command buffer with `vkCmdBeginVideoCodingKHR`,
+  `vkCmdControlVideoCodingKHR(RESET)`, `vkCmdDecodeVideoKHR`, and
+  `vkCmdEndVideoCodingKHR` using those live resources, while the default probe
+  still avoids issuing the driver command path until submit/readback has a
+  dedicated gate;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
