@@ -235,10 +235,13 @@ Current implementation progress:
   passes a zeroed `StdVideoAV1TimingInfo`, uses FFmpeg's `[1, 1, 1]`
   `LoopRestorationSize` default when restoration is disabled, and submits the
   initial decoder RESET in a separate command buffer before the frame decode
-  submit path. These changes keep the Vulkan command path closer to FFmpeg but
-  leave the PSNR value unchanged. The output is still neutral NV12-like rather
-  than the FFmpeg reference, so the AV1 picture/session modeling is not yet
-  bit-exact enough to claim decode support. An opt-in
+  submit path. The decode image transition now also uses
+  `VIDEO_DECODE_DPB_KHR`, matching FFmpeg's non-layered AV1 path, and the decode
+  image view uses `TYPE_2D` when only one array layer is allocated. These
+  changes keep the Vulkan command path closer to FFmpeg but leave the PSNR value
+  unchanged. The output is still neutral NV12-like rather than the FFmpeg
+  reference, so the AV1 picture/session modeling is not yet bit-exact enough to
+  claim decode support. An opt-in
   `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic now wraps the decode command
   in a `VK_QUERY_TYPE_RESULT_STATUS_ONLY_KHR` query; on NVIDIA it reports the
   positive raw status `1000331003` for the generated-OBU readback probe, which

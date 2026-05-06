@@ -775,7 +775,7 @@ impl Av1DecodeCommandSkeleton {
             .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
             .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
             .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
+            .new_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -3446,7 +3446,11 @@ fn create_av1_decode_image(
         }
         let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+            .view_type(if plan.array_layers == 1 {
+                vk::ImageViewType::TYPE_2D
+            } else {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            })
             .format(plan.format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -3665,7 +3669,7 @@ fn record_and_destroy_av1_decode_command_buffer(
                 .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
                 .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                 .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
+                .old_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .image(config.decode_image)
                 .subresource_range(vk::ImageSubresourceRange {
@@ -5122,7 +5126,7 @@ mod tests {
         assert_eq!(image_barrier.old_layout, vk::ImageLayout::UNDEFINED);
         assert_eq!(
             image_barrier.new_layout,
-            vk::ImageLayout::VIDEO_DECODE_DST_KHR
+            vk::ImageLayout::VIDEO_DECODE_DPB_KHR
         );
         assert_eq!(
             image_barrier.dst_stage_mask,

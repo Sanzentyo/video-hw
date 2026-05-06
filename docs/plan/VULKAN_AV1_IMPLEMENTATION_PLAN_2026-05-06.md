@@ -199,7 +199,9 @@ Tasks:
    The submit path now also passes a zeroed `StdVideoAV1TimingInfo`, uses
    FFmpeg's `[1, 1, 1]` loop-restoration size defaults when restoration is
    disabled, and runs the initial decoder RESET in a separate command-buffer
-   submit before the frame decode command buffer. An opt-in
+   submit before the frame decode command buffer. The image path now also uses
+   FFmpeg's non-layered decode/DPB image layout and a plain 2D image view for
+   one-layer decode images. An opt-in
    `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic can also wrap the decode in a
    result-status query; NVIDIA returns a positive raw status for the generated
    OBU probe, so the remaining failure is pixel/parity modeling rather than a
