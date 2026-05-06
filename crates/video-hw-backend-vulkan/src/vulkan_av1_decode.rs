@@ -71,6 +71,21 @@ impl Av1DecodePictureInfoSkeleton {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Av1DecodeInfoSkeleton {
+    pub src_buffer_offset: u64,
+    pub src_buffer_range: u64,
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub picture_info: Av1DecodePictureInfoSkeleton,
+}
+
+impl Av1DecodeInfoSkeleton {
+    pub(crate) fn tile_count(&self) -> usize {
+        self.picture_info.tile_offsets.len()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedAv1SequenceHeader {
     pub seq_profile: u8,
@@ -305,6 +320,27 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
     })
 }
 
+pub(crate) fn build_av1_decode_info_skeleton(
+    bitstream: &[u8],
+) -> Result<Av1DecodeInfoSkeleton, String> {
+    let std_sequence_header = extract_av1_std_sequence_header(bitstream)?;
+    let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
+    let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
+    let submit = build_av1_decode_submit_skeleton(bitstream)?;
+    let picture_info = build_av1_decode_picture_info_skeleton(&submit)?;
+    let (src_buffer_offset, src_buffer_range) =
+        av1_decode_source_range(bitstream.len(), &picture_info)?;
+    let rebased_picture_info = rebase_av1_picture_info_offsets(picture_info, src_buffer_offset)?;
+
+    Ok(Av1DecodeInfoSkeleton {
+        src_buffer_offset: u64::from(src_buffer_offset),
+        src_buffer_range: u64::from(src_buffer_range),
+        coded_width,
+        coded_height,
+        picture_info: rebased_picture_info,
+    })
+}
+
 impl ParsedAv1SequenceHeader {
     fn coded_width(&self) -> u32 {
         self.max_frame_width_minus_1 + 1
@@ -313,6 +349,64 @@ impl ParsedAv1SequenceHeader {
     fn coded_height(&self) -> u32 {
         self.max_frame_height_minus_1 + 1
     }
+}
+
+fn av1_decode_source_range(
+    bitstream_len: usize,
+    picture_info: &Av1DecodePictureInfoSkeleton,
+) -> Result<(u32, u32), String> {
+    let frame_header_offset = picture_info.frame_header_offset;
+    let mut range_start = frame_header_offset;
+    let mut range_end = frame_header_offset
+        .checked_add(1)
+        .ok_or_else(|| "AV1 frame header offset overflows u32".to_string())?;
+
+    for (&tile_offset, &tile_size) in picture_info
+        .tile_offsets
+        .iter()
+        .zip(picture_info.tile_sizes.iter())
+    {
+        if tile_size == 0 {
+            return Err("AV1 decode info contains an empty tile payload".to_string());
+        }
+        let tile_end = tile_offset
+            .checked_add(tile_size)
+            .ok_or_else(|| "AV1 tile payload range overflows u32".to_string())?;
+        range_start = range_start.min(tile_offset);
+        range_end = range_end.max(tile_end);
+    }
+
+    let bitstream_len = u32::try_from(bitstream_len)
+        .map_err(|_| "AV1 bitstream is too large for Vulkan u32 offsets".to_string())?;
+    if range_end > bitstream_len {
+        return Err(format!(
+            "AV1 decode source range exceeds bitstream length: end={range_end}, len={bitstream_len}"
+        ));
+    }
+    let range_len = range_end
+        .checked_sub(range_start)
+        .ok_or_else(|| "AV1 decode source range is inverted".to_string())?;
+    if range_len == 0 {
+        return Err("AV1 decode source range is empty".to_string());
+    }
+
+    Ok((range_start, range_len))
+}
+
+fn rebase_av1_picture_info_offsets(
+    mut picture_info: Av1DecodePictureInfoSkeleton,
+    src_buffer_offset: u32,
+) -> Result<Av1DecodePictureInfoSkeleton, String> {
+    picture_info.frame_header_offset = picture_info
+        .frame_header_offset
+        .checked_sub(src_buffer_offset)
+        .ok_or_else(|| "AV1 frame header offset precedes source buffer range".to_string())?;
+    for tile_offset in &mut picture_info.tile_offsets {
+        *tile_offset = tile_offset
+            .checked_sub(src_buffer_offset)
+            .ok_or_else(|| "AV1 tile offset precedes source buffer range".to_string())?;
+    }
+    Ok(picture_info)
 }
 
 fn key_frame_std_picture_info() -> StdVideoDecodeAV1PictureInfo {
@@ -1725,6 +1819,64 @@ mod tests {
         let err = build_av1_decode_picture_info_skeleton(&submit)
             .expect_err("empty tile list should be rejected");
         assert!(err.contains("at least one tile offset"));
+    }
+
+    #[test]
+    fn decode_info_skeleton_rebases_frame_obu_offsets_to_source_range() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let frame_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(6, &[0xaa, 0xbb, 0xcc]));
+
+        let decode = build_av1_decode_info_skeleton(&bitstream)
+            .expect("frame OBU should produce a decode info skeleton");
+
+        assert_eq!(decode.src_buffer_offset as usize, frame_obu_start + 2);
+        assert_eq!(decode.src_buffer_range, 3);
+        assert_eq!(decode.coded_width, 320);
+        assert_eq!(decode.coded_height, 180);
+        assert_eq!(decode.picture_info.frame_header_offset, 0);
+        assert_eq!(decode.picture_info.tile_offsets, vec![0]);
+        assert_eq!(decode.picture_info.tile_sizes, vec![3]);
+        assert_eq!(decode.tile_count(), 1);
+    }
+
+    #[test]
+    fn decode_info_skeleton_covers_frame_header_and_tile_group_range() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let frame_header_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(3, &[0x10, 0x11]));
+        let tile_group_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(4, &[0x20, 0x21, 0x22]));
+
+        let decode = build_av1_decode_info_skeleton(&bitstream)
+            .expect("frame-header + tile-group OBUs should produce a decode info skeleton");
+        let source_start = frame_header_obu_start + 2;
+        let tile_payload_start = tile_group_obu_start + 2;
+        let source_end = tile_payload_start + 3;
+
+        assert_eq!(decode.src_buffer_offset as usize, source_start);
+        assert_eq!(decode.src_buffer_range as usize, source_end - source_start);
+        assert_eq!(decode.picture_info.frame_header_offset, 0);
+        assert_eq!(
+            decode.picture_info.tile_offsets,
+            vec![(tile_payload_start - source_start) as u32]
+        );
+        assert_eq!(decode.picture_info.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_info_source_range_rejects_tiles_beyond_bitstream() {
+        let picture = Av1DecodePictureInfoSkeleton {
+            std_picture_info: key_frame_std_picture_info(),
+            reference_name_slot_indices: [-1; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
+            frame_header_offset: 4,
+            tile_offsets: vec![8],
+            tile_sizes: vec![5],
+        };
+
+        let err = av1_decode_source_range(12, &picture)
+            .expect_err("tile payload beyond the bitstream should be rejected");
+        assert!(err.contains("exceeds bitstream length"));
     }
 
     #[test]

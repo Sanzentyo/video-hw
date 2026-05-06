@@ -14,10 +14,10 @@ use crate::{
     DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
     VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
-        Av1DecodePrerequisiteProbe, build_av1_decode_picture_info_skeleton,
-        build_av1_decode_submit_skeleton, extract_av1_std_sequence_header,
-        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
-        probe_av1_decode_session_parameters_for_bitstream,
+        Av1DecodePrerequisiteProbe, build_av1_decode_info_skeleton,
+        build_av1_decode_picture_info_skeleton, build_av1_decode_submit_skeleton,
+        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
+        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -644,7 +644,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
     match inspect_av1_low_overhead_obus(bitstream) {
         Ok(inspection) => {
             message.push_str(&format!(
-                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}",
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}",
                 inspection.obu_count,
                 inspection.temporal_unit_count,
                 inspection.has_sequence_header,
@@ -690,6 +690,19 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             picture.tile_offsets.len(),
                             picture.tile_sizes.iter().copied().sum::<u32>(),
                             picture.reference_name_slot_indices.len()
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_decode_info_skeleton(bitstream)
+                    .map(|decode| {
+                        format!(
+                            "ready(src_offset={}, src_range={}, coded={}x{}, frame_header_offset={}, tile_count={})",
+                            decode.src_buffer_offset,
+                            decode.src_buffer_range,
+                            decode.coded_width,
+                            decode.coded_height,
+                            decode.picture_info.frame_header_offset,
+                            decode.tile_count()
                         )
                     })
                     .unwrap_or_else(|err| format!("unavailable({err})"))

@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, extracts sequence-header coded extent, and builds a reduced-still `StdVideoAV1SequenceHeader`; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, extracts sequence-header coded extent, builds a reduced-still `StdVideoAV1SequenceHeader`, and now builds relative decode-info source ranges; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -94,6 +94,10 @@ Current implementation progress:
 - the picture-info skeleton can now materialize `vk::VideoDecodeAV1PictureInfoKHR`
   with stable pointers to std picture info and tile arrays for the upcoming
   `VideoDecodeInfoKHR` chain;
+- AV1 decode info skeleton extraction now computes the minimum consecutive
+  `srcBufferOffset` / `srcBufferRange` covering the frame header and tiles,
+  rebases AV1 frame/tile offsets relative to that range as Vulkan requires, and
+  carries coded width/height from the parsed sequence header;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
@@ -128,9 +132,10 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Implement Vulkan AV1 sequence-header parsing into `StdVideoAV1SequenceHeader`
-   and session parameter creation.
-2. Add Vulkan AV1 decode submit/readback and PSNR check against FFmpeg software
+1. Build the real Vulkan AV1 `VideoDecodeInfoKHR` chain from the decode-info
+   skeleton, allocate resources, and record the first `vkCmdDecodeVideoKHR`
+   key-frame submit.
+2. Add Vulkan AV1 decode readback and PSNR check against FFmpeg software
    decode.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and

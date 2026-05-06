@@ -96,7 +96,9 @@ Tasks:
    submit skeleton extraction now covers frame-header offset and tile
    offset/size discovery, and key-frame `StdVideoDecodeAV1PictureInfo` skeleton
    plus `vk::VideoDecodeAV1PictureInfoKHR` construction is covered; Vulkan
-   command recording remains.
+   decode-info source range construction now covers `srcBufferOffset`,
+   `srcBufferRange`, coded extent propagation, and relative AV1 frame/tile
+   offsets within the range; Vulkan command recording remains.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
@@ -110,7 +112,9 @@ Acceptance:
 Tasks:
 
 1. Populate `StdVideoDecodeAV1PictureInfo` for key-frame-only streams first.
-2. Chain `VideoDecodeAV1PictureInfoKHR` onto `VideoDecodeInfoKHR`.
+2. Chain `VideoDecodeAV1PictureInfoKHR` onto `VideoDecodeInfoKHR`. The pure
+   decode-info skeleton now validates the source bitstream range and relative
+   AV1 offsets; real buffer/image resources and command submission remain.
 3. For reference frames, populate `StdVideoDecodeAV1ReferenceInfo` and chain
    `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots.
 4. Reuse the HEVC readback path for NV12 output only after verifying the output
