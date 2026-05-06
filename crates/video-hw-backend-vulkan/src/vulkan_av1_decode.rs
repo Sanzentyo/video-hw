@@ -70,6 +70,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub command_record_decode_count: usize,
     pub command_buffer_recorded: bool,
     pub command_buffer_submitted: bool,
+    pub decode_query_status_raw: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -666,6 +667,7 @@ pub(crate) struct Av1DecodeCommandRecordSummary {
     pub reset_count: usize,
     pub decode_count: usize,
     pub end_count: usize,
+    pub decode_query_status_raw: Option<i32>,
     first_error: Option<String>,
 }
 
@@ -1202,6 +1204,10 @@ struct Av1DecodeCommandRecordConfig<'a> {
     decode_image: vk::Image,
     image_view: vk::ImageView,
     readback: Option<Av1DecodeCommandReadbackConfig<'a>>,
+}
+
+struct Av1DecodeStatusQueryResource {
+    pool: vk::QueryPool,
 }
 
 struct Av1DecodeCommandReadbackConfig<'a> {
@@ -2802,6 +2808,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     command_record_decode_count: record_summary.decode_count,
                     command_buffer_recorded,
                     command_buffer_submitted,
+                    decode_query_status_raw: record_summary.decode_query_status_raw,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -3514,6 +3521,14 @@ fn record_and_destroy_av1_decode_command_buffer(
                 config.video_session_parameters,
             )?;
         }
+        let status_query = if config.submit_command_buffer
+            && record_mode == Av1DecodeCommandBufferRecordMode::Full
+            && std::env::var("VIDEO_HW_VULKAN_AV1_QUERY_STATUS").as_deref() == Ok("1")
+        {
+            Some(create_av1_decode_status_query_resource(device)?)
+        } else {
+            None
+        };
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -3543,7 +3558,14 @@ fn record_and_destroy_av1_decode_command_buffer(
         let video_decode_device =
             ash::khr::video_decode_queue::Device::new(config.instance, device);
         let mut emitted_first_decode = false;
+        let mut query_started = false;
         let mut record_summary = Av1DecodeCommandRecordSummary::default();
+        if let Some(status_query) = &status_query {
+            // SAFETY: Query pool belongs to this device and the command buffer is recording.
+            unsafe {
+                device.cmd_reset_query_pool(command_buffer, status_query.pool, 0, 1);
+            }
+        }
         config.upload_plan.visit_decode_command_sequence(
             config.command,
             config.video_session,
@@ -3594,6 +3616,17 @@ fn record_and_destroy_av1_decode_command_buffer(
                         // SAFETY: Command buffer is inside a video coding scope and decode info
                         // chains are scoped to this call.
                         unsafe {
+                            if let Some(status_query) = &status_query
+                                && !query_started
+                            {
+                                device.cmd_begin_query(
+                                    command_buffer,
+                                    status_query.pool,
+                                    0,
+                                    vk::QueryControlFlags::empty(),
+                                );
+                                query_started = true;
+                            }
                             (video_decode_device.fp().cmd_decode_video_khr)(
                                 command_buffer,
                                 decode_info,
@@ -3605,6 +3638,11 @@ fn record_and_destroy_av1_decode_command_buffer(
                     Av1DecodeCommandVisit::EndCoding(info) => {
                         // SAFETY: Command buffer is inside a video coding scope.
                         unsafe {
+                            if let Some(status_query) = &status_query
+                                && query_started
+                            {
+                                device.cmd_end_query(command_buffer, status_query.pool, 0);
+                            }
                             (video_queue_device.fp().cmd_end_video_coding_khr)(
                                 command_buffer,
                                 info,
@@ -3669,6 +3707,11 @@ fn record_and_destroy_av1_decode_command_buffer(
         if config.submit_command_buffer {
             submit_av1_decode_command_buffer(device, config.queue_family_index, command_buffer)?;
         }
+        if let Some(status_query) = status_query {
+            record_summary.decode_query_status_raw =
+                Some(read_av1_decode_query_status(device, status_query.pool)?.as_raw());
+            destroy_av1_decode_status_query_resource(device, status_query);
+        }
         Ok(record_summary)
     })();
 
@@ -3677,6 +3720,59 @@ fn record_and_destroy_av1_decode_command_buffer(
         device.destroy_command_pool(command_pool, None);
     }
     result
+}
+
+fn create_av1_decode_status_query_resource(
+    device: &ash::Device,
+) -> Result<Av1DecodeStatusQueryResource, String> {
+    let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
+        .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
+        .film_grain_support(false);
+    let mut decode_usage = vk::VideoDecodeUsageInfoKHR::default()
+        .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+    let mut profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_AV1)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .push_next(&mut decode_av1_profile)
+        .push_next(&mut decode_usage);
+    let create_info = vk::QueryPoolCreateInfo::default()
+        .query_type(vk::QueryType::RESULT_STATUS_ONLY_KHR)
+        .query_count(1)
+        .push_next(&mut profile);
+    // SAFETY: Query pool create info references stack profile structs alive for the call.
+    let pool = unsafe { device.create_query_pool(&create_info, None) }
+        .map_err(|err| format!("vkCreateQueryPool for AV1 decode status failed: {err}"))?;
+    Ok(Av1DecodeStatusQueryResource { pool })
+}
+
+fn read_av1_decode_query_status(
+    device: &ash::Device,
+    query_pool: vk::QueryPool,
+) -> Result<vk::QueryResultStatusKHR, String> {
+    let mut status = vk::QueryResultStatusKHR::NOT_READY;
+    // SAFETY: Query pool belongs to this device and query 0 was ended before submit completion.
+    unsafe {
+        device.get_query_pool_results(
+            query_pool,
+            0,
+            std::slice::from_mut(&mut status),
+            vk::QueryResultFlags::WAIT | vk::QueryResultFlags::WITH_STATUS_KHR,
+        )
+    }
+    .map_err(|err| format!("vkGetQueryPoolResults for AV1 decode status failed: {err}"))?;
+    Ok(status)
+}
+
+fn destroy_av1_decode_status_query_resource(
+    device: &ash::Device,
+    resource: Av1DecodeStatusQueryResource,
+) {
+    // SAFETY: Query pool was created by this device and is no longer in use after submit wait.
+    unsafe {
+        device.destroy_query_pool(resource.pool, None);
+    }
 }
 
 fn record_submit_av1_decode_reset_command_buffer(
@@ -5416,6 +5512,7 @@ mod tests {
                 reset_count: 1,
                 decode_count: 2,
                 end_count: 1,
+                decode_query_status_raw: None,
                 first_error: None,
             }
         );
@@ -5429,6 +5526,7 @@ mod tests {
             reset_count: 1,
             decode_count: 1,
             end_count: 1,
+            decode_query_status_raw: None,
             first_error: None,
         }
         .validate_for_command(&command)
@@ -5684,7 +5782,7 @@ mod tests {
         match probe_av1_decode_session_parameters_for_bitstream(&bitstream) {
             Ok(probe) => {
                 eprintln!(
-                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, readback_bytes={}, readback_regions={}, readback_mapped_bytes={}, readback_non_zero={}, readback_sample_len={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}",
+                    "AV1 Vulkan command record probe: coded={}x{}, format={:?}, upload_bytes={}, image_layers={}, barrier_layers={}, readback_bytes={}, readback_regions={}, readback_mapped_bytes={}, readback_non_zero={}, readback_sample_len={}, record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}, decode_query_status_raw={:?}",
                     probe.coded_width,
                     probe.coded_height,
                     probe.picture_format,
@@ -5698,7 +5796,8 @@ mod tests {
                     probe.readback_sample.len(),
                     probe.command_record_decode_count,
                     probe.command_buffer_recorded,
-                    probe.command_buffer_submitted
+                    probe.command_buffer_submitted,
+                    probe.decode_query_status_raw
                 );
                 if std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1")
                 {

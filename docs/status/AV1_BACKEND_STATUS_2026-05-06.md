@@ -238,7 +238,12 @@ Current implementation progress:
   submit path. These changes keep the Vulkan command path closer to FFmpeg but
   leave the PSNR value unchanged. The output is still neutral NV12-like rather
   than the FFmpeg reference, so the AV1 picture/session modeling is not yet
-  bit-exact enough to claim decode support;
+  bit-exact enough to claim decode support. An opt-in
+  `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic now wraps the decode command
+  in a `VK_QUERY_TYPE_RESULT_STATUS_ONLY_KHR` query; on NVIDIA it reports the
+  positive raw status `1000331003` for the generated-OBU readback probe, which
+  means the operations inside the query completed successfully even though the
+  decoded pixels still do not match FFmpeg;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -250,6 +255,7 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
+- `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode metadata`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode nv12 --output output/vulkan-av1-record-probe/av1-vulkan-decode.nv12`
 - `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode rgb24 --output output/vulkan-av1-record-probe/av1-vulkan-decode.rgb`
