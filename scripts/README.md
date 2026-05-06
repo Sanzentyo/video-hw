@@ -244,6 +244,18 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --f
 - decode や PSNR setup で失敗した場合も FAIL markdown report を残す。
 - 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも 8-frame keyframe-only 入力で `--min-psnr-y 60` に PASS し、`psnr_y_min=inf`。
 
+### 11.3) Vulkan AV1 encode binding check
+
+```bash
+cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs
+```
+
+- local Cargo registry にある `ash` source を走査し、
+  `VK_KHR_video_decode_av1` / `VideoDecodeAV1*` と
+  `VK_KHR_video_encode_av1` / `VideoEncodeAV1*` の有無を markdown report に
+  記録する。
+- `--fail-on-missing` を付けると、AV1 encode binding がない場合に非0終了する。
+
 ### 12) fMP4 decode access pattern benchmark
 
 ```bash

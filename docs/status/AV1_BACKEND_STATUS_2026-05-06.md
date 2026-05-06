@@ -301,8 +301,12 @@ Current implementation progress:
   (`0.38.0+1.3.281`), and local registry inspection finds
   `VK_KHR_video_decode_av1` / `VideoDecodeAV1*` bindings but no
   `VK_KHR_video_encode_av1`, `video_encode_av1`, `VideoEncodeAV1*`, or
-  `ENCODE_AV1` bindings. Vulkan AV1 encode therefore needs a binding stack
-  update or local generated bindings before implementation can start safely.
+  `ENCODE_AV1` bindings. The reproducible binding check is
+  `scripts/check_vulkan_av1_encode_bindings.rs`; latest report
+  `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md`
+  records decode symbols present and encode symbols absent. Vulkan AV1 encode
+  therefore needs a binding stack update or local generated bindings before
+  implementation can start safely.
 
 Latest Vulkan AV1 scaffold verification:
 
@@ -328,6 +332,9 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs`
+  (`output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md`,
+  `encode_bindings_present=false`)
 - `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --frame-count 8 --width 320 --height 180 --release true --allow-failures true`
   (`output/benchmark-backends-av1-1778068460.md`,
   `output/benchmark-vulkan-av1-1778068460.md`)
