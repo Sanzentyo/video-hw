@@ -67,6 +67,15 @@ or better.
   - detail: `output/benchmark-vulkan-av1-1778068469.md`
   - generated fragmented MP4 `av01` decode input is recorded as `decode_input_format: fmp4`
   - NVIDIA: video-hw Vulkan AV1 fMP4 decode 0.144s / 55.412 fps vs FFmpeg Vulkan fMP4 decode 0.311s / 25.712 fps for 8 generated keyframe-only frames at 320x180 (`--release true`, warmup 1, repeat 3)
+- AV1 frame-type inspection:
+  - `output/av1-frame-types/av1-frame-types-1778070797962.md`: generated OBU,
+    `--gop-size 1`, 8 frame headers, all `frame_type=0`.
+  - `output/av1-frame-types/av1-frame-types-1778070802078.md`: generated OBU,
+    `--gop-size 30`, 8 frame headers, frame 0 is `frame_type=0` and frames 1-7
+    are `frame_type=1`.
+  - `output/av1-frame-types/av1-frame-types-1778070805328.md`: generated fMP4
+    extracted to OBU, `--gop-size 30`, same `frame_type=1` inter-frame pattern
+    after the keyframe.
 
 ## Vulkan AV1 Status
 
@@ -337,6 +346,15 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs`
   (`output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md`,
   `encode_bindings_present=false`)
+- `cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 1`
+  (`output/av1-frame-types/av1-frame-types-1778070797962.md`,
+  `has_inter_frame=false`)
+- `cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 30`
+  (`output/av1-frame-types/av1-frame-types-1778070802078.md`,
+  `has_inter_frame=true`)
+- `cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input-format fmp4 --frames 8 --gop-size 30`
+  (`output/av1-frame-types/av1-frame-types-1778070805328.md`,
+  `has_inter_frame=true`)
 - `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --frame-count 8 --width 320 --height 180 --release true --allow-failures true`
   (`output/benchmark-backends-av1-1778068460.md`,
   `output/benchmark-vulkan-av1-1778068460.md`)

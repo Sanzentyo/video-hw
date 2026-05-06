@@ -256,6 +256,20 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs
   記録する。
 - `--fail-on-missing` を付けると、AV1 encode binding がない場合に非0終了する。
 
+### 11.4) AV1 frame type inspection
+
+```bash
+cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 30
+cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input-format fmp4 --frames 8 --gop-size 30
+```
+
+- FFmpeg `libaom-av1` で生成した low-overhead OBU または fragmented MP4
+  を検査し、frame/header OBU の `show_existing_frame` と `frame_type` を
+  markdown report に記録する。
+- Vulkan AV1 GOP replay 実装前の診断では、`--gop-size 1` が全
+  `frame_type=0`、`--gop-size 30` が2フレーム目以降 `frame_type=1` に
+  なることを確認できる。
+
 ### 12) fMP4 decode access pattern benchmark
 
 ```bash
