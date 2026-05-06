@@ -316,6 +316,8 @@ Latest Vulkan AV1 scaffold verification:
   guards the unsupported-frame-header rejection path added in `d0ee5e9`.
 - `cargo check -p video-hw-backend-vulkan --features backend-vulkan`
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
+- `cargo test -p video-hw --features "backend-nvidia backend-intel backend-vulkan" av1`
+  verifies that AV1 length-prefixed fMP4 samples are forwarded as OBU payload.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
 - `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1 cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
@@ -371,7 +373,8 @@ Current safeguards:
 - `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1` produces a FAIL report
   on macOS instead of treating AV1 as a passing parity case;
 - `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`
-  passes on the cross target.
+  passes on the cross target. Latest local verification on 2026-05-06 also
+  passed this command.
 
 Remaining work requires a macOS host with AV1 VideoToolbox support to verify
 format description creation, encoded packet layout, fMP4 integration, FFmpeg
