@@ -22,6 +22,7 @@
 ## 計画
 
 - `plan/ROADMAP.md`
+- `plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`（Vulkan AV1 decode/encode の実装計画）
 - `plan/NEXT_ACTION_PLAN_2026-02-23.md`（deepresearchベースの短期実行計画）
 - `plan/API_REDESIGN_BLUEPRINT_2026-02-21.md`（互換非維持の新API設計）
 - `plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`

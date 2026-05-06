@@ -62,6 +62,8 @@ encode, `VK_KHR_video_encode_av1` where the driver exposes it. The current HEVC
 Vulkan implementation is not a drop-in AV1 implementation because AV1 requires
 different codec profile/session parameters, picture info, reference handling,
 OBU packetization, and validation/PSNR gates.
+The detailed implementation plan is
+`docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
 
 ## VideoToolbox AV1 Status
 
