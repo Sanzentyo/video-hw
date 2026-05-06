@@ -666,8 +666,12 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 probe_av1_decode_session_parameters_for_bitstream(bitstream)
                     .map(|probe| {
                         format!(
-                            "ready(coded={}x{}, picture_format={:?})",
-                            probe.coded_width, probe.coded_height, probe.picture_format
+                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={})",
+                            probe.coded_width,
+                            probe.coded_height,
+                            probe.picture_format,
+                            probe.min_bitstream_buffer_offset_alignment,
+                            probe.min_bitstream_buffer_size_alignment
                         )
                     })
                     .unwrap_or_else(|err| format!("unavailable({err})")),
@@ -780,12 +784,30 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                         )
                     })
                     .and_then(|command_status| {
-                        build_av1_aligned_key_frame_decode_command_skeleton(bitstream, 4, 4096, 4096)
+                        let (offset_alignment, size_alignment, alignment_source) =
+                            probe_av1_decode_session_parameters_for_bitstream(bitstream)
+                                .map(|probe| {
+                                    (
+                                        probe.min_bitstream_buffer_offset_alignment,
+                                        probe.min_bitstream_buffer_size_alignment,
+                                        "capability",
+                                    )
+                                })
+                                .unwrap_or((4096, 4096, "fallback"));
+                        build_av1_aligned_key_frame_decode_command_skeleton(
+                            bitstream,
+                            4,
+                            offset_alignment,
+                            size_alignment,
+                        )
                             .map(|(upload_plan, aligned_command)| {
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
+                                    offset_alignment,
+                                    size_alignment,
+                                    alignment_source,
                                     aligned_command
                                         .frames
                                         .first()
@@ -1508,11 +1530,13 @@ mod tests {
         let sequence_header = av1_test_obu(1, &av1_test_sequence_header_payload(320, 180));
         let mut bitstream = av1_test_obu(2, &[]);
         bitstream.extend_from_slice(&sequence_header);
+        bitstream.extend_from_slice(&av1_test_obu(6, &[0x11, 0x12]));
         let message = av1_decode_blocker_message_with_bitstream(&bitstream);
         assert!(message.contains("Vulkan AV1 decode initialization failed"));
         assert!(message.contains("parsed AV1 OBUs"));
         assert!(message.contains("sequence_header=true"));
         assert!(message.contains("coded=320x180"));
+        assert!(message.contains("aligned_upload=ready"));
     }
 
     #[test]

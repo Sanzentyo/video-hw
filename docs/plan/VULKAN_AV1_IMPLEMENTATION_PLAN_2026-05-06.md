@@ -117,7 +117,9 @@ Tasks:
    decode-info indices to destination base layers. Aligned bitstream upload
    planning now rewrites per-frame `srcBufferOffset` / `srcBufferRange` to
    caller-provided alignment boundaries while copying only the minimal decode
-   payload bytes into a compact submit buffer.
+   payload bytes into a compact submit buffer; bitstream session diagnostics now
+   surface the adapter's Vulkan Video bitstream offset/range alignments so the
+   plan can use capability-derived values instead of a fixed constant.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

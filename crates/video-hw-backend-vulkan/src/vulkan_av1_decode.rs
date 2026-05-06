@@ -42,6 +42,8 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub coded_width: u32,
     pub coded_height: u32,
     pub picture_format: vk::Format,
+    pub min_bitstream_buffer_offset_alignment: u64,
+    pub min_bitstream_buffer_size_alignment: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +460,8 @@ struct Av1DecodeCapabilitySnapshot {
     min_coded_height: u32,
     max_coded_width: u32,
     max_coded_height: u32,
+    min_bitstream_buffer_offset_alignment: u64,
+    min_bitstream_buffer_size_alignment: u64,
     max_dpb_slots: u32,
     max_active_reference_pictures: u32,
     max_level: ash::vk::native::StdVideoAV1Level,
@@ -1284,6 +1288,8 @@ fn query_av1_decode_capability_snapshot(
     let min_coded_height = capabilities.min_coded_extent.height;
     let max_coded_width = capabilities.max_coded_extent.width;
     let max_coded_height = capabilities.max_coded_extent.height;
+    let min_bitstream_buffer_offset_alignment = capabilities.min_bitstream_buffer_offset_alignment;
+    let min_bitstream_buffer_size_alignment = capabilities.min_bitstream_buffer_size_alignment;
     let max_dpb_slots = capabilities.max_dpb_slots;
     let max_active_reference_pictures = capabilities.max_active_reference_pictures;
     let std_header_version = capabilities.std_header_version;
@@ -1294,6 +1300,8 @@ fn query_av1_decode_capability_snapshot(
         min_coded_height,
         max_coded_width,
         max_coded_height,
+        min_bitstream_buffer_offset_alignment,
+        min_bitstream_buffer_size_alignment,
         max_dpb_slots,
         max_active_reference_pictures,
         max_level,
@@ -1590,6 +1598,10 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     coded_width,
                     coded_height,
                     picture_format,
+                    min_bitstream_buffer_offset_alignment: snapshot
+                        .min_bitstream_buffer_offset_alignment,
+                    min_bitstream_buffer_size_alignment: snapshot
+                        .min_bitstream_buffer_size_alignment,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2128,6 +2140,8 @@ mod tests {
             min_coded_height: 16,
             max_coded_width: 4096,
             max_coded_height: 2160,
+            min_bitstream_buffer_offset_alignment: 4096,
+            min_bitstream_buffer_size_alignment: 4096,
             max_dpb_slots: 4,
             max_active_reference_pictures: 3,
             max_level: ash::vk::native::StdVideoAV1Level_STD_VIDEO_AV1_LEVEL_4_0,

@@ -143,8 +143,10 @@ Current implementation progress:
 - aligned AV1 bitstream upload planning now copies each decode unit into a
   compact buffer with caller-provided `srcBufferOffset` and `srcBufferRange`
   alignment, preserving picture-info offsets relative to the aligned
-  `srcBufferOffset`; blocker diagnostics exercise a 4096/4096 plan matching
-  common Vulkan Video capability requirements;
+  `srcBufferOffset`; bitstream session probing now reports the adapter's
+  `minBitstreamBufferOffsetAlignment` and `minBitstreamBufferSizeAlignment`, and
+  blocker diagnostics use those capability-derived alignments when available
+  with a 4096/4096 fallback;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
