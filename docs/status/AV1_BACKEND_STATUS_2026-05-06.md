@@ -89,6 +89,9 @@ Current implementation progress:
 - the same probe now creates and destroys an AV1 `VideoSessionKHR` plus
   `VideoDecodeAV1SessionParametersCreateInfoKHR` using a reduced-still synthetic
   sequence header within the advertised coded-extent range;
+- AV1 session bootstrap probing now also queries
+  `vkGetVideoSessionMemoryRequirementsKHR` and reports requirement count, total
+  size, and maximum alignment before the later bind-memory implementation;
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;

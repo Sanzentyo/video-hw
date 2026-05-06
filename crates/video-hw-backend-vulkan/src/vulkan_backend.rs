@@ -666,12 +666,15 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 probe_av1_decode_session_parameters_for_bitstream(bitstream)
                     .map(|probe| {
                         format!(
-                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={})",
+                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={}, session_memory_count={}, session_memory_total={}, session_memory_max_align={})",
                             probe.coded_width,
                             probe.coded_height,
                             probe.picture_format,
                             probe.min_bitstream_buffer_offset_alignment,
-                            probe.min_bitstream_buffer_size_alignment
+                            probe.min_bitstream_buffer_size_alignment,
+                            probe.session_memory_requirement_count,
+                            probe.session_memory_total_size,
+                            probe.session_memory_max_alignment
                         )
                     })
                     .unwrap_or_else(|err| format!("unavailable({err})")),

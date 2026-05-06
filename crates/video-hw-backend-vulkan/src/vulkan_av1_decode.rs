@@ -44,6 +44,9 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub picture_format: vk::Format,
     pub min_bitstream_buffer_offset_alignment: u64,
     pub min_bitstream_buffer_size_alignment: u64,
+    pub session_memory_requirement_count: usize,
+    pub session_memory_total_size: u64,
+    pub session_memory_max_alignment: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,6 +740,13 @@ struct Av1DecodeSessionParameterProbeConfig<'a> {
     coded_width: u32,
     coded_height: u32,
     std_sequence_header: &'a StdVideoAV1SequenceHeader,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Av1DecodeSessionBootstrapSummary {
+    memory_requirement_count: usize,
+    memory_total_size: u64,
+    memory_max_alignment: u64,
 }
 
 impl Av1DecodeExtensionFlags {
@@ -1770,7 +1780,7 @@ fn probe_av1_decode_session_parameters(
     unsafe {
         device.destroy_device(None);
     }
-    result
+    result.map(|_| ())
 }
 
 fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
@@ -1853,7 +1863,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             device.destroy_device(None);
         }
         match result {
-            Ok(()) => {
+            Ok(summary) => {
                 return Ok(Av1DecodeBitstreamSessionProbe {
                     coded_width,
                     coded_height,
@@ -1862,6 +1872,9 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                         .min_bitstream_buffer_offset_alignment,
                     min_bitstream_buffer_size_alignment: snapshot
                         .min_bitstream_buffer_size_alignment,
+                    session_memory_requirement_count: summary.memory_requirement_count,
+                    session_memory_total_size: summary.memory_total_size,
+                    session_memory_max_alignment: summary.memory_max_alignment,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -1883,7 +1896,7 @@ fn create_and_destroy_av1_decode_session_parameters(
     device: &ash::Device,
     queue_family_index: u32,
     capability_snapshot: &Av1DecodeCapabilitySnapshot,
-) -> Result<(), String> {
+) -> Result<Av1DecodeSessionBootstrapSummary, String> {
     let picture_format = *capability_snapshot
         .decode_output_formats
         .first()
@@ -1915,7 +1928,7 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
     instance: &ash::Instance,
     device: &ash::Device,
     config: Av1DecodeSessionParameterProbeConfig<'_>,
-) -> Result<(), String> {
+) -> Result<Av1DecodeSessionBootstrapSummary, String> {
     let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
         .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
         .film_grain_support(false);
@@ -1959,12 +1972,17 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
         ));
     }
 
-    let parameters_result = create_av1_decode_session_parameters(
-        device,
-        &video_queue_device,
-        video_session,
-        config.std_sequence_header,
-    );
+    let parameters_result =
+        query_av1_decode_session_memory_requirements(device, &video_queue_device, video_session)
+            .and_then(|summary| {
+                create_av1_decode_session_parameters(
+                    device,
+                    &video_queue_device,
+                    video_session,
+                    config.std_sequence_header,
+                )
+                .map(|()| summary)
+            });
 
     // SAFETY: `video_session` was created by this device and is no longer used.
     unsafe {
@@ -1975,6 +1993,72 @@ fn create_and_destroy_av1_decode_session_parameters_with_header(
         );
     }
     parameters_result
+}
+
+fn query_av1_decode_session_memory_requirements(
+    device: &ash::Device,
+    video_queue_device: &ash::khr::video_queue::Device,
+    video_session: vk::VideoSessionKHR,
+) -> Result<Av1DecodeSessionBootstrapSummary, String> {
+    let mut requirement_count = 0_u32;
+    // SAFETY: Count query writes only `requirement_count` for a valid video session.
+    let count_result = unsafe {
+        (video_queue_device
+            .fp()
+            .get_video_session_memory_requirements_khr)(
+            device.handle(),
+            video_session,
+            &mut requirement_count,
+            std::ptr::null_mut(),
+        )
+    };
+    if count_result != vk::Result::SUCCESS {
+        return Err(format!(
+            "vkGetVideoSessionMemoryRequirementsKHR for AV1 decode count query failed: {count_result:?}"
+        ));
+    }
+    if requirement_count == 0 {
+        return Err(
+            "vkGetVideoSessionMemoryRequirementsKHR for AV1 decode returned no memory requirements"
+                .to_string(),
+        );
+    }
+
+    let mut requirements =
+        vec![vk::VideoSessionMemoryRequirementsKHR::default(); requirement_count as usize];
+    // SAFETY: `requirements` has storage for the count returned above.
+    let query_result = unsafe {
+        (video_queue_device
+            .fp()
+            .get_video_session_memory_requirements_khr)(
+            device.handle(),
+            video_session,
+            &mut requirement_count,
+            requirements.as_mut_ptr(),
+        )
+    };
+    if query_result != vk::Result::SUCCESS {
+        return Err(format!(
+            "vkGetVideoSessionMemoryRequirementsKHR for AV1 decode query failed: {query_result:?}"
+        ));
+    }
+    requirements.truncate(requirement_count as usize);
+
+    let memory_total_size = requirements
+        .iter()
+        .map(|requirement| requirement.memory_requirements.size)
+        .sum();
+    let memory_max_alignment = requirements
+        .iter()
+        .map(|requirement| requirement.memory_requirements.alignment)
+        .max()
+        .unwrap_or(0);
+
+    Ok(Av1DecodeSessionBootstrapSummary {
+        memory_requirement_count: requirements.len(),
+        memory_total_size,
+        memory_max_alignment,
+    })
 }
 
 fn create_av1_decode_session_parameters(
