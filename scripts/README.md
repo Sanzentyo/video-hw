@@ -259,8 +259,9 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs
 ### 11.4) AV1 frame type inspection
 
 ```bash
-cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 30
-cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input-format fmp4 --frames 8 --gop-size 30
+cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 1 --expect-inter-frame false
+cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 30 --expect-inter-frame true
+cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input-format fmp4 --frames 8 --gop-size 30 --expect-inter-frame true
 ```
 
 - FFmpeg `libaom-av1` で生成した low-overhead OBU または fragmented MP4
@@ -269,6 +270,8 @@ cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input-format fmp4 -
 - Vulkan AV1 GOP replay 実装前の診断では、`--gop-size 1` が全
   `frame_type=0`、`--gop-size 30` が2フレーム目以降 `frame_type=1` に
   なることを確認できる。
+- `--expect-inter-frame true|false` を指定すると、期待と異なる入力で
+  非0終了する。失敗時も markdown report は残る。
 
 ### 12) fMP4 decode access pattern benchmark
 

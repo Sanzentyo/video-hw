@@ -48,6 +48,9 @@ struct Args {
 
     #[arg(long, default_value_t = 30)]
     gop_size: u32,
+
+    #[arg(long)]
+    expect_inter_frame: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -89,7 +92,7 @@ fn main() -> Result<()> {
     }
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create output dir: {}", args.output_dir.display()))?;
-    let run_id = epoch_millis()?;
+    let run_id = epoch_nanos()?;
     let input = match &args.input {
         Some(path) => path.clone(),
         None => generate_input(&args, run_id)?,
@@ -102,15 +105,23 @@ fn main() -> Result<()> {
         .with_context(|| format!("read AV1 OBU input: {}", obu_input.display()))?;
     let records = parse_obus(&bitstream).map_err(anyhow::Error::msg)?;
     let frame_headers = inspect_frame_headers(&bitstream, &records).map_err(anyhow::Error::msg)?;
+    let has_inter_frame = frame_headers
+        .iter()
+        .any(|header| header.frame_type.is_some_and(|frame_type| frame_type != 0));
     let report = write_report(&args, &input, &obu_input, &records, &frame_headers, run_id)?;
     println!(
         "av1_frame_types frame_headers={} has_inter_frame={} report={}",
         frame_headers.len(),
-        frame_headers
-            .iter()
-            .any(|header| header.frame_type.is_some_and(|frame_type| frame_type != 0)),
+        has_inter_frame,
         report.display()
     );
+    if let Some(expected) = args.expect_inter_frame
+        && expected != has_inter_frame
+    {
+        bail!(
+            "AV1 inter-frame expectation failed: expected={expected}, actual={has_inter_frame}"
+        );
+    }
     Ok(())
 }
 
@@ -297,7 +308,7 @@ fn write_report(
         .join(format!("av1-frame-types-{run_id}.md"));
     let mut text = String::new();
     writeln!(&mut text, "# AV1 Frame Type Inspection")?;
-    writeln!(&mut text, "epoch_millis: {run_id}")?;
+    writeln!(&mut text, "epoch_nanos: {run_id}")?;
     writeln!(&mut text, "input: {}", input.display())?;
     writeln!(&mut text, "obu_input: {}", obu_input.display())?;
     writeln!(&mut text, "input_format: {:?}", args.input_format)?;
@@ -305,6 +316,9 @@ fn write_report(
     writeln!(&mut text, "height: {}", args.height)?;
     writeln!(&mut text, "frames: {}", args.frames)?;
     writeln!(&mut text, "gop_size: {}", args.gop_size)?;
+    if let Some(expected) = args.expect_inter_frame {
+        writeln!(&mut text, "expected_inter_frame: {expected}")?;
+    }
     writeln!(&mut text, "obu_count: {}", records.len())?;
     writeln!(&mut text, "frame_header_count: {}", frame_headers.len())?;
     writeln!(
@@ -395,9 +409,9 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn epoch_millis() -> Result<u128> {
+fn epoch_nanos() -> Result<u128> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before UNIX_EPOCH")?
-        .as_millis())
+        .as_nanos())
 }
