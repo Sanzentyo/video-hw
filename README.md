@@ -99,6 +99,7 @@ Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|
 - NVIDIA parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv --codec av1 --release true` で実行できます。320x180/30 frames の確認では `video-hw decode 0.118-0.120s`、`ffmpeg decode 0.131-0.133s`、`video-hw encode 0.148-0.162s`、`ffmpeg encode 0.164-0.174s` で parity PASS でした。
 - Intel oneVPL parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends intel --codec av1 --release true` で実行できます。320x180/30 encode frames / 640x360/120 decode frames の確認では `video-hw decode 0.406s`、`ffmpeg decode 0.392s`、`video-hw encode 0.425s`、`ffmpeg encode 0.429s` で parity PASS でした。AV1 OBU decode input は H.264/HEVC のように byte-repeat せず、生成済み elementary stream をそのまま使います。
 - AV1 の MSE/PSNR smoke は `cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --release true` で実行できます。320x180/30 frames の確認では NVIDIA encode PSNR-Y avg 60.43 dB / decode PSNR-Y min 50.54 dB、Intel encode PSNR-Y avg 55.62 dB / decode PSNR-Y min 50.48 dB でした。
+- Vulkan AV1 は video-hw では未実装です。統合 benchmark は `Vulkan AV1 decode/encode is not implemented in video-hw yet` を report に残します。この環境では FFmpeg `av1_vulkan` は NVIDIA adapter で encode/decode 可能、Intel adapter では encode が `VK_KHR_video_encode_queue` 不足で不可でした。
 
 #### onevpl fork 更新時の手順
 
@@ -201,7 +202,7 @@ cargo test --workspace --features backend-intel -- --nocapture
 ## Vulkan backend 依存
 
 `backend-vulkan` は Rust から Vulkan Video API を直接利用します（`vk-video` + `ash`）。  
-現行実装は **H.264 の decode/encode** と **HEVC decode** に対応します。HEVC decode は ash-level の `VK_KHR_video_decode_h265` submit path を使い、DPB 参照付きの full-stream readback を既定で有効にします。`DecodeOutputMode::Metadata` では access-unit 推定数に対応するメタデータ frame を返し、非 metadata モード（`Nv12` / `Rgb24`）では submit probe の NV12 readback を access-unit 単位で回収して ARGB frame を返します。HEVC encode は NVIDIA Vulkan adapter 上で実験的な IDR-only production path を有効化しています。FFmpeg `hevc_vulkan` で生成した同サイズの parameter/header sample が必要で、参照フレーム/GOP encode と長寿命encoder sessionは未実装ですが、warmup後の統合benchmarkではFFmpeg Vulkan HEVC encode以上の throughput を確認しています。
+現行実装は **H.264 の decode/encode** と **HEVC decode** に対応します。HEVC decode は ash-level の `VK_KHR_video_decode_h265` submit path を使い、DPB 参照付きの full-stream readback を既定で有効にします。`DecodeOutputMode::Metadata` では access-unit 推定数に対応するメタデータ frame を返し、非 metadata モード（`Nv12` / `Rgb24`）では submit probe の NV12 readback を access-unit 単位で回収して ARGB frame を返します。HEVC encode は NVIDIA Vulkan adapter 上で実験的な IDR-only production path を有効化しています。FFmpeg `hevc_vulkan` で生成した同サイズの parameter/header sample が必要で、参照フレーム/GOP encode と長寿命encoder sessionは未実装ですが、warmup後の統合benchmarkではFFmpeg Vulkan HEVC encode以上の throughput を確認しています。AV1 encode/decode は Vulkan backend では未実装で、要求時は明示的に `UnsupportedConfig` を返します。
 
 - `require_hardware=true` では Vulkan 実行を必須とし、利用不可時は `UnsupportedConfig` を返します。
 - `require_hardware=false` でも direct Vulkan backend に software fallback はありません（`Vulkan*Options::allow_software_fallback` は現時点では実質未対応）。
