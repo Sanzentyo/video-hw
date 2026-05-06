@@ -174,7 +174,10 @@ Current implementation progress:
   those counts against the planned frame count; real-bitstream probing now keeps
   the uploaded source buffer, decode image/view, video session, session
   parameters, and bound session memory alive together long enough to materialize
-  the command sequence with non-null resource handles; direct
+  the command sequence with non-null resource handles; command-buffer setup now
+  has pure builders for the HOST_WRITE -> VIDEO_DECODE_READ source-buffer memory
+  barrier and UNDEFINED -> VIDEO_DECODE_DST_KHR decode-image initialization
+  barrier; direct
   `vkCmdDecodeVideoKHR` command-buffer recording is intentionally not part of
   the default probe yet because issuing the driver command path still needs a
   dedicated submit/readback gate;

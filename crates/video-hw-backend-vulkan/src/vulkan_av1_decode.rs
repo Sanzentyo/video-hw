@@ -50,6 +50,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub session_memory_bound_count: usize,
     pub bitstream_upload_bytes: usize,
     pub decode_image_layers: u32,
+    pub decode_image_barrier_layers: u32,
     pub command_record_decode_count: usize,
 }
 
@@ -461,15 +462,19 @@ impl Av1DecodeCommandSkeleton {
         }
     }
 
+    pub(crate) fn image_array_layers(&self) -> Result<u32, String> {
+        if self.begin_slots.is_empty() {
+            return Err("AV1 decode image requires at least one begin slot".to_string());
+        }
+        u32::try_from(self.begin_slots.len())
+            .map_err(|_| "AV1 decode image array layer count exceeds u32 range".to_string())
+    }
+
     pub(crate) fn decode_image_plan(
         &self,
         format: vk::Format,
     ) -> Result<Av1DecodeImagePlan, String> {
-        if self.begin_slots.is_empty() {
-            return Err("AV1 decode image plan requires at least one begin slot".to_string());
-        }
-        let array_layers = u32::try_from(self.begin_slots.len())
-            .map_err(|_| "AV1 decode image array layer count exceeds u32 range".to_string())?;
+        let array_layers = self.image_array_layers()?;
         Ok(Av1DecodeImagePlan {
             format,
             extent: self.coded_extent(),
@@ -499,6 +504,35 @@ impl Av1DecodeCommandSkeleton {
             .usage(plan.usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
+    }
+
+    pub(crate) fn vk_decode_source_memory_barrier() -> vk::MemoryBarrier2<'static> {
+        vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::HOST)
+            .src_access_mask(vk::AccessFlags2::HOST_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+            .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_READ_KHR)
+    }
+
+    pub(crate) fn vk_decode_image_init_barrier(
+        &self,
+        image: vk::Image,
+    ) -> Result<vk::ImageMemoryBarrier2<'static>, String> {
+        Ok(vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::NONE)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+            .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::VIDEO_DECODE_DST_KHR)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: self.image_array_layers()?,
+            }))
     }
 
     pub(crate) fn begin_picture_resources<'a>(
@@ -2012,6 +2046,22 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                         return Err(err);
                     }
                 };
+            let source_barrier = Av1DecodeCommandSkeleton::vk_decode_source_memory_barrier();
+            if source_barrier.dst_access_mask != vk::AccessFlags2::VIDEO_DECODE_READ_KHR {
+                destroy_av1_decode_image(&device, image);
+                destroy_av1_decode_source_buffer(&device, source_buffer);
+                return Err(
+                    "AV1 decode source barrier does not target VIDEO_DECODE_READ_KHR".to_string(),
+                );
+            }
+            let image_barrier = match command.vk_decode_image_init_barrier(image.image) {
+                Ok(barrier) => barrier,
+                Err(err) => {
+                    destroy_av1_decode_image(&device, image);
+                    destroy_av1_decode_source_buffer(&device, source_buffer);
+                    return Err(err);
+                }
+            };
             let session = match create_av1_decode_session_with_parameters(
                 instance,
                 &device,
@@ -2041,17 +2091,19 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 |_| Ok(()),
             );
             let summary = session.summary;
+            let decode_image_barrier_layers = image_barrier.subresource_range.layer_count;
             destroy_av1_decode_session_resource(instance, &device, session);
             destroy_av1_decode_image(&device, image);
             destroy_av1_decode_source_buffer(&device, source_buffer);
-            record_result.map(|record_summary| (summary, record_summary))
+            record_result
+                .map(|record_summary| (summary, record_summary, decode_image_barrier_layers))
         });
         // SAFETY: The device is no longer used after this point.
         unsafe {
             device.destroy_device(None);
         }
         match result {
-            Ok((summary, record_summary)) => {
+            Ok((summary, record_summary, decode_image_barrier_layers)) => {
                 return Ok(Av1DecodeBitstreamSessionProbe {
                     coded_width,
                     coded_height,
@@ -2066,6 +2118,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session_memory_bound_count: summary.memory_bound_count,
                     bitstream_upload_bytes: upload_plan.bytes.len(),
                     decode_image_layers: image_plan.array_layers,
+                    decode_image_barrier_layers,
                     command_record_decode_count: record_summary.decode_count,
                 });
             }
@@ -3542,6 +3595,33 @@ mod tests {
         assert_eq!(image_create_info.extent.height, 180);
         assert_eq!(image_create_info.array_layers, 2);
         assert_eq!(image_create_info.usage, image_plan.usage);
+        let source_barrier = Av1DecodeCommandSkeleton::vk_decode_source_memory_barrier();
+        assert_eq!(source_barrier.src_stage_mask, vk::PipelineStageFlags2::HOST);
+        assert_eq!(
+            source_barrier.dst_stage_mask,
+            vk::PipelineStageFlags2::VIDEO_DECODE_KHR
+        );
+        assert_eq!(
+            source_barrier.dst_access_mask,
+            vk::AccessFlags2::VIDEO_DECODE_READ_KHR
+        );
+        let image_barrier = command
+            .vk_decode_image_init_barrier(vk::Image::null())
+            .expect("command should produce an image initialization barrier");
+        assert_eq!(image_barrier.old_layout, vk::ImageLayout::UNDEFINED);
+        assert_eq!(
+            image_barrier.new_layout,
+            vk::ImageLayout::VIDEO_DECODE_DST_KHR
+        );
+        assert_eq!(
+            image_barrier.dst_stage_mask,
+            vk::PipelineStageFlags2::VIDEO_DECODE_KHR
+        );
+        assert_eq!(
+            image_barrier.dst_access_mask,
+            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
+        );
+        assert_eq!(image_barrier.subresource_range.layer_count, 2);
 
         let begin_resources = command.begin_picture_resources(vk::ImageView::null());
         assert_eq!(begin_resources.len(), 2);

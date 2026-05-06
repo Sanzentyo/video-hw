@@ -666,7 +666,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 probe_av1_decode_session_parameters_for_bitstream(bitstream)
                     .map(|probe| {
                         format!(
-                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={}, upload_bytes={}, decode_image_layers={}, command_record_decodes={}, session_memory_count={}, session_memory_bound={}, session_memory_total={}, session_memory_max_align={})",
+                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={}, upload_bytes={}, decode_image_layers={}, decode_image_barrier_layers={}, command_record_decodes={}, session_memory_count={}, session_memory_bound={}, session_memory_total={}, session_memory_max_align={})",
                             probe.coded_width,
                             probe.coded_height,
                             probe.picture_format,
@@ -674,6 +674,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             probe.min_bitstream_buffer_size_alignment,
                             probe.bitstream_upload_bytes,
                             probe.decode_image_layers,
+                            probe.decode_image_barrier_layers,
                             probe.command_record_decode_count,
                             probe.session_memory_requirement_count,
                             probe.session_memory_bound_count,

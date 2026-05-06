@@ -141,9 +141,11 @@ Tasks:
    that source buffer together with the decode image/view, video session,
    session parameters, and bound session memory while materializing the command
    sequence, and reports the planned decode-command count using real non-null
-   handles. Actual `vkCmdDecodeVideoKHR` command-buffer recording is still
-   deferred to the submit/readback phase rather than hidden inside the default
-   capability probe.
+   handles. Command-buffer setup now has pure builders for the source-buffer
+   HOST_WRITE -> VIDEO_DECODE_READ memory barrier and decode-image UNDEFINED ->
+   VIDEO_DECODE_DST_KHR initialization barrier. Actual `vkCmdDecodeVideoKHR`
+   command-buffer recording is still deferred to the submit/readback phase
+   rather than hidden inside the default capability probe.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
