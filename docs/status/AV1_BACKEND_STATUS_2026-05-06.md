@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough; roundtrip smoke verifies reader sample count plus `decode_to_yuv --input-format mp4` metadata and RGB24 decode PSNR vs FFmpeg | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated AV1 OBU/fMP4 decode through submit/readback on NVIDIA for keyframe-only and short GOP replay cases; PSNR gates pass against FFmpeg software reference for those scopes. Long GOP replay still fails PSNR. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode partial, encode blocked |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated AV1 OBU/fMP4 decode through submit/readback on NVIDIA for keyframe-only, short GOP, and generated long-GOP replay cases; PSNR gates pass against FFmpeg software reference for those scopes. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode generated-GOP partial, encode blocked |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -274,8 +274,8 @@ Current implementation progress:
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
 - Vulkan AV1 capability is still conservative because the implemented scope is
-  generated keyframe-only decode plus short GOP replay and does not yet include
-  long GOP reference/state replay or encode. Earlier FFmpeg-reference PSNR work recorded a one-frame
+  generated keyframe-only, short GOP, and generated long-GOP decode replay and
+  does not yet include arbitrary AV1 stream coverage or encode. Earlier FFmpeg-reference PSNR work recorded a one-frame
   generated-OBU result as `psnr_y_min=12.9600` after fixing the explicit submit
   path and proving the readback copy overwrites a sentinel buffer. Follow-up
   parity work now also gives AV1 session parameters an 8-bit
@@ -390,10 +390,20 @@ Latest Vulkan AV1 scaffold verification:
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`
   (`--frames 2 --gop-size 2`, `psnr_y_min=inf`), and
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`
-  (`--frames 8 --gop-size 2`, `psnr_y_min=inf`). Long GOP replay is still not
-  complete:
-  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074653056.md`
-  (`--frames 8 --gop-size 30`, `psnr_y_min=20.9200`).
+  (`--frames 8 --gop-size 2`, `psnr_y_min=inf`). The long-GOP failure was
+  traced to AV1 reference-name state: `OrderHints` must be populated in
+  INTRA/LAST..ALTREF reference-name order, not raw DPB-slot order, and
+  `StdVideoDecodeAV1ReferenceInfo.RefFrameSignBias` must be derived from
+  relative reference/current `OrderHint` values as FFmpeg does. After making
+  replay DPB-aware through `oxideav-av1`, carrying per-reference
+  `SavedOrderHints`, fixing reference-name `OrderHints`, and setting
+  `RefFrameSignBias`, generated long-GOP OBU replay now passes exactly:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`
+  (`--frames 8 --gop-size 30`, `psnr_y_min=inf`, threshold 60 dB).
+- Generated AV1 fMP4 long-GOP replay also passes:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`
+  (`--input-format fmp4 --frames 8 --gop-size 30`, `psnr_y_min=inf`,
+  threshold 60 dB).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
@@ -419,18 +429,14 @@ Latest Vulkan AV1 scaffold verification:
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 30`
-  intentionally fails on the current keyframe-only implementation
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068076063.md`,
-  `failed_stage=decode Vulkan AV1 to NV12`, stderr includes
-  `frame_type=1`). This is the active inter-frame/GOP replay gap.
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`,
+  `psnr_y_min=inf`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`,
   `psnr_y_min=inf`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60 --gop-size 30`
-  intentionally fails on the same inter-frame gap through the MP4/`av1C` path
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068145633.md`,
-  `failed_stage=decode Vulkan AV1 to NV12`, stderr includes
-  `frame_type=1`).
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`,
+  `psnr_y_min=inf`)
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -454,11 +460,11 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Add inter-frame/GOP replay support and targeted decode-order tests/benches;
-   the current Vulkan AV1 path is validated only for generated keyframe-only
-   streams. The `--gop-size 30` PSNR gate records the current failure.
-2. Keep OBU and fMP4 8-frame PSNR gates passing while expanding parser coverage
-   beyond the generated `libaom-av1 -g 1` fixture.
+1. Expand Vulkan AV1 parser/reference-state coverage beyond generated libaom
+   fixtures; keyframe-only, short GOP, long GOP OBU, and long GOP fMP4 gates now
+   pass, but arbitrary AV1 streams are not yet a support claim.
+2. Keep OBU and fMP4 8-frame PSNR gates passing while adding broader
+   inter-frame fixtures, larger dimensions, and access-order benches.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also

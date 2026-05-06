@@ -10,9 +10,9 @@ plan covers the missing work tracked in
 ## Current Boundary
 
 - NVIDIA and Intel oneVPL AV1 are implemented and verified.
-- Vulkan AV1 decode now supports generated keyframe-only OBU/fMP4 and short GOP
-  replay scopes on NVIDIA and is still not a full capability claim for arbitrary
-  AV1 streams.
+- Vulkan AV1 decode now supports generated keyframe-only OBU/fMP4, short GOP,
+  long-GOP OBU, and long-GOP fMP4 replay scopes on NVIDIA and is still not a
+  full capability claim for arbitrary AV1 streams.
 - Vulkan AV1 decode prerequisite probing and low-overhead OBU inspection are now
   implemented in `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`.
 - FFmpeg `av1_vulkan` decode and encode work on the NVIDIA adapter in this
@@ -258,17 +258,12 @@ Acceptance:
   writes FAIL markdown reports even when decode or PSNR setup fails before
   per-frame PSNR can be computed, including the stderr tail that reports the
   first unsupported `frame_type=1`.
-- First-pass reference-frame replay is now present in the decode skeleton path:
+- Reference-frame replay is now present in the decode skeleton path:
   parsed `ref_frame_idx` values are resolved through an 8-entry AV1 reference
   frame state that is updated by `refresh_frame_flags`, command recording
   carries the resulting reference slots into each `VideoDecodeInfoKHR`, and
-  begin-coding starts with zero active references after RESET. This advances the
-  failure from "inter-frame reference-slot replay is not implemented" to live
-  submit/readback with bad pixels. Current live gates still fail at
-  `psnr_y_min=12.5300` for `--frames 1 --gop-size 2` and
-  `--frames 2 --gop-size 2`, so the next implementation task is full
-  non-reduced frame-header/std-picture parity, not merely slot plumbing. The
-  follow-up std-picture parity pass now maps the remaining oxideav frame-header
+  begin-coding starts with zero active references after RESET. The
+  std-picture parity pass maps the remaining oxideav frame-header
   flags needed by short generated GOPs, starts the submitted source range at the
   Frame/Header OBU start as required by Vulkan, and fixes setup-slot rotation to
   use allocated DPB slots. With that pass, `--frames 1 --gop-size 2`,
@@ -276,16 +271,19 @@ Acceptance:
   `psnr_y_min=inf`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`,
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`,
-  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`). Long GOP replay
-  still fails and remains the next decode task:
-  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074653056.md`
-  (`--frames 8 --gop-size 30`, `psnr_y_min=20.9200`).
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`). Follow-up
+  DPB-aware parsing and replay now matches FFmpeg's reference-name state:
+  `OrderHints` are populated in INTRA/LAST..ALTREF order, per-reference
+  `SavedOrderHints` are preserved, and `RefFrameSignBias` is computed from
+  relative reference/current `OrderHint` values. Generated long-GOP OBU replay
+  now passes at `psnr_y_min=inf`:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`
+  (`--frames 8 --gop-size 30`, threshold 60 dB).
 - The same gate now covers fragmented MP4 input:
   `--input-format fmp4 --gop-size 1` passes at `psnr_y_min=inf`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), while
-  `--input-format fmp4 --gop-size 30` fails at decode with the same
-  unsupported `frame_type=1`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068145633.md`).
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), and
+  `--input-format fmp4 --gop-size 30` now passes at `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`).
 
 ### Phase 5: Integrated Benchmark
 

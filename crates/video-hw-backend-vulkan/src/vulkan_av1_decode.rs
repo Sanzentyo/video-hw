@@ -34,6 +34,8 @@ use ash::vk::native::{
 use oxideav_av1::{
     FrameHeader as OxideAv1FrameHeader, FrameType as OxideAv1FrameType,
     SequenceHeader as OxideAv1SequenceHeader,
+    dpb::Dpb as OxideAv1Dpb,
+    frame_header::{parse_frame_header_with_dpb, parse_frame_obu_with_dpb},
     frame_header_tail::{
         GmType as OxideAv1GmType, LoopRestorationParams as OxideAv1LoopRestorationParams,
         RESTORATION_SGR, RESTORATION_SWITCHABLE, RESTORATION_WIENER, TxMode as OxideAv1TxMode,
@@ -217,6 +219,8 @@ pub(crate) struct Av1ParsedFrameHeaderSummary {
     pub show_existing_frame: bool,
     pub error_resilient_mode: bool,
     pub order_hint: u8,
+    pub enable_order_hint: bool,
+    pub order_hint_bits: u32,
     pub primary_ref_frame: u8,
     pub refresh_frame_flags: u8,
     pub ref_frame_idx: [i32; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
@@ -557,6 +561,7 @@ pub(crate) struct Av1DecodeInfoSkeleton {
     pub coded_height: u32,
     pub picture_info: Av1DecodePictureInfoSkeleton,
     pub setup_reference_info: StdVideoDecodeAV1ReferenceInfo,
+    pub reference_slot_infos: Vec<StdVideoDecodeAV1ReferenceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1275,6 +1280,9 @@ impl Av1DecodeInfoSkeleton {
         &self,
         reference_slot_indices: &[i32],
     ) -> Vec<StdVideoDecodeAV1ReferenceInfo> {
+        if self.reference_slot_infos.len() == reference_slot_indices.len() {
+            return self.reference_slot_infos.clone();
+        }
         reference_slot_indices
             .iter()
             .map(|_| key_frame_std_reference_info_for_order_hint(0))
@@ -1815,6 +1823,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
         .flatten();
     let mut submits = Vec::new();
     let mut consumed_tile_groups = vec![false; records.len()];
+    let mut oxideav_dpb = OxideAv1Dpb::new();
 
     for (index, record) in records.iter().enumerate() {
         match record.obu_type {
@@ -1824,6 +1833,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                     record,
                     sequence_header.as_ref(),
                     oxideav_sequence_header.as_ref(),
+                    &mut oxideav_dpb,
                 )?);
             }
             Av1ObuType::FrameHeader => {
@@ -1845,6 +1855,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                         &tile_groups,
                         sequence_header.as_ref(),
                         oxideav_sequence_header.as_ref(),
+                        &mut oxideav_dpb,
                     )?);
                 }
             }
@@ -1890,43 +1901,107 @@ pub(crate) fn build_av1_decode_info_skeletons(
 fn apply_av1_reference_name_slot_replay(
     decodes: &mut [Av1DecodeInfoSkeleton],
 ) -> Result<(), String> {
-    let mut reference_frame_slots: [Option<i32>; 8] = [None; 8];
+    #[derive(Clone, Copy)]
+    struct ReferenceFrameReplayState {
+        slot_index: i32,
+        order_hint: u8,
+        reference_info: StdVideoDecodeAV1ReferenceInfo,
+    }
+
+    let mut reference_frame_slots: [Option<ReferenceFrameReplayState>; 8] = [None; 8];
 
     for (frame_index, decode) in decodes.iter_mut().enumerate() {
         let setup_slot_index = i32::try_from(frame_index)
             .map_err(|_| "AV1 replay frame index exceeds i32 slot range".to_string())?;
         if let Some(summary) = decode.picture_info.frame_header_summary {
+            let mut ref_frame_sign_bias = 0_u8;
             if summary.is_key_frame() {
                 decode.picture_info.reference_name_slot_indices = [-1; 7];
+                decode.picture_info.std_picture_info.OrderHints = [0; 8];
+                if let Some(overrides) = decode.picture_info.std_overrides.as_mut() {
+                    overrides.order_hints = [0; 8];
+                }
+                decode.reference_slot_infos.clear();
             } else {
+                let mut order_hints = [0_u8; 8];
                 for (name_index, ref_frame_idx) in summary.ref_frame_idx.iter().enumerate() {
                     let ref_frame_idx = usize::try_from(*ref_frame_idx).map_err(|_| {
                         format!("AV1 ref_frame_idx[{name_index}] is negative: {ref_frame_idx}")
                     })?;
-                    let slot = reference_frame_slots.get(ref_frame_idx).copied().flatten();
-                    decode.picture_info.reference_name_slot_indices[name_index] =
-                        slot.ok_or_else(|| {
+                    let state = reference_frame_slots
+                        .get(ref_frame_idx)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
                             format!(
                                 "AV1 reference frame state {ref_frame_idx} is unavailable for reference name {name_index}"
                             )
                         })?;
+                    decode.picture_info.reference_name_slot_indices[name_index] = state.slot_index;
+                    let reference_name = name_index + 1;
+                    order_hints[reference_name] = state.order_hint;
+                    if summary.enable_order_hint
+                        && av1_relative_dist(
+                            u32::from(state.order_hint),
+                            u32::from(summary.order_hint),
+                            summary.order_hint_bits,
+                        ) > 0
+                    {
+                        ref_frame_sign_bias |= 1_u8 << reference_name;
+                    }
                 }
+                decode.picture_info.std_picture_info.OrderHints = order_hints;
+                if let Some(overrides) = decode.picture_info.std_overrides.as_mut() {
+                    overrides.order_hints = order_hints;
+                }
+                decode.reference_slot_infos = decode
+                    .reference_slot_indices()
+                    .into_iter()
+                    .map(|slot_index| {
+                        reference_frame_slots
+                            .iter()
+                            .flatten()
+                            .find_map(|state| {
+                                (state.slot_index == slot_index).then_some(state.reference_info)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "AV1 reference slot {slot_index} is missing std reference info"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
             }
 
+            let mut setup_reference_info = av1_std_reference_info(&decode.picture_info);
+            setup_reference_info.SavedOrderHints = decode.picture_info.std_picture_info.OrderHints;
+            setup_reference_info.RefFrameSignBias = ref_frame_sign_bias;
             for (ref_index, reference_frame_slot) in reference_frame_slots.iter_mut().enumerate() {
                 if (summary.refresh_frame_flags & (1_u8 << ref_index)) != 0 {
-                    *reference_frame_slot = Some(setup_slot_index);
+                    *reference_frame_slot = Some(ReferenceFrameReplayState {
+                        slot_index: setup_slot_index,
+                        order_hint: decode.picture_info.std_picture_info.OrderHint,
+                        reference_info: setup_reference_info,
+                    });
                 }
             }
+            decode.setup_reference_info = setup_reference_info;
         } else if decode
             .picture_info
             .frame_header_summary
             .is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame)
         {
-            reference_frame_slots.fill(Some(setup_slot_index));
+            let mut setup_reference_info = av1_std_reference_info(&decode.picture_info);
+            setup_reference_info.SavedOrderHints =
+                [decode.picture_info.std_picture_info.OrderHint; 8];
+            reference_frame_slots.fill(Some(ReferenceFrameReplayState {
+                slot_index: setup_slot_index,
+                order_hint: decode.picture_info.std_picture_info.OrderHint,
+                reference_info: setup_reference_info,
+            }));
+            decode.reference_slot_infos.clear();
+            decode.setup_reference_info = setup_reference_info;
         }
-
-        decode.setup_reference_info = av1_std_reference_info(&decode.picture_info);
     }
 
     Ok(())
@@ -1950,6 +2025,7 @@ fn build_av1_decode_info_skeleton_from_submit(
         coded_width,
         coded_height,
         setup_reference_info: av1_std_reference_info(&rebased_picture_info),
+        reference_slot_infos: Vec::new(),
         picture_info: rebased_picture_info,
     })
 }
@@ -2280,17 +2356,19 @@ fn av1_std_frame_type(frame_type: u8) -> Result<ash::vk::native::StdVideoAV1Fram
     }
 }
 
-fn parse_av1_frame_obu_summary(
+fn parse_av1_frame_obu_summary_with_dpb(
     sequence_header: &OxideAv1SequenceHeader,
     payload: &[u8],
+    dpb: &mut OxideAv1Dpb,
 ) -> Result<Av1ParsedFrameHeaderSummary, String> {
-    let (frame_header, tile_payload) = oxideav_av1::parse_frame_obu(sequence_header, payload)
+    let (frame_header, tile_payload) = parse_frame_obu_with_dpb(sequence_header, payload, dpb)
         .map_err(|err| format!("oxideav AV1 frame OBU parse failed: {err}"))?;
     let tile_payload_offset = payload
         .len()
         .checked_sub(tile_payload.len())
         .ok_or_else(|| "oxideav AV1 frame OBU tile payload exceeds payload length".to_string())?;
-    av1_frame_header_summary_from_oxideav(frame_header, tile_payload_offset)
+    update_oxideav_dpb_from_frame_header(dpb, &frame_header);
+    av1_frame_header_summary_from_oxideav(sequence_header, frame_header, tile_payload_offset)
 }
 
 fn reject_show_existing_av1_frame(
@@ -2305,16 +2383,33 @@ fn reject_show_existing_av1_frame(
     Ok(())
 }
 
-fn parse_av1_frame_header_summary(
+fn parse_av1_frame_header_summary_with_dpb(
     sequence_header: &OxideAv1SequenceHeader,
     payload: &[u8],
+    dpb: &mut OxideAv1Dpb,
 ) -> Result<Av1ParsedFrameHeaderSummary, String> {
-    let frame_header = oxideav_av1::parse_frame_header(sequence_header, payload)
+    let frame_header = parse_frame_header_with_dpb(sequence_header, payload, dpb)
         .map_err(|err| format!("oxideav AV1 frame-header parse failed: {err}"))?;
-    av1_frame_header_summary_from_oxideav(frame_header, 0)
+    update_oxideav_dpb_from_frame_header(dpb, &frame_header);
+    av1_frame_header_summary_from_oxideav(sequence_header, frame_header, 0)
+}
+
+fn update_oxideav_dpb_from_frame_header(dpb: &mut OxideAv1Dpb, frame_header: &OxideAv1FrameHeader) {
+    if frame_header.frame_type == OxideAv1FrameType::Key {
+        dpb.reset();
+    }
+    if frame_header.refresh_frame_flags != 0 {
+        dpb.refresh_with_gm(
+            frame_header.refresh_frame_flags,
+            frame_header.order_hint,
+            None,
+            &frame_header.gm_params,
+        );
+    }
 }
 
 fn av1_frame_header_summary_from_oxideav(
+    sequence_header: &OxideAv1SequenceHeader,
     frame_header: OxideAv1FrameHeader,
     tile_payload_offset: usize,
 ) -> Result<Av1ParsedFrameHeaderSummary, String> {
@@ -2345,12 +2440,23 @@ fn av1_frame_header_summary_from_oxideav(
         show_existing_frame: frame_header.show_existing_frame,
         error_resilient_mode: frame_header.error_resilient_mode,
         order_hint,
+        enable_order_hint: sequence_header.enable_order_hint,
+        order_hint_bits: sequence_header.order_hint_bits,
         primary_ref_frame,
         refresh_frame_flags: frame_header.refresh_frame_flags,
         ref_frame_idx,
         tile_payload_offset,
         std_overrides: Some(av1_std_picture_overrides_from_oxideav(&frame_header)?),
     })
+}
+
+fn av1_relative_dist(a: u32, b: u32, order_hint_bits: u32) -> i32 {
+    if order_hint_bits == 0 {
+        return 0;
+    }
+    let diff = a.wrapping_sub(b);
+    let m = 1_u32 << (order_hint_bits - 1);
+    ((diff & (m - 1)) as i32) - ((diff & m) as i32)
 }
 
 fn av1_std_picture_overrides_from_oxideav(
@@ -2555,7 +2661,7 @@ fn av1_restoration_size(log2_size: u8) -> u16 {
     if log2_size == 0 {
         1
     } else {
-        1_u16.checked_shl(u32::from(log2_size)).unwrap_or(u16::MAX)
+        u16::from(log2_size.saturating_sub(5))
     }
 }
 
@@ -2691,12 +2797,19 @@ fn av1_std_reference_info(
     StdVideoDecodeAV1ReferenceInfo {
         flags: StdVideoDecodeAV1ReferenceInfoFlags {
             _bitfield_align_1: [],
-            _bitfield_1: StdVideoDecodeAV1ReferenceInfoFlags::new_bitfield_1(0, 0, 0),
+            _bitfield_1: StdVideoDecodeAV1ReferenceInfoFlags::new_bitfield_1(
+                picture_info
+                    .std_picture_info
+                    .flags
+                    .disable_frame_end_update_cdf(),
+                picture_info.std_picture_info.flags.segmentation_enabled(),
+                0,
+            ),
         },
         frame_type: picture_info.std_picture_info.frame_type as u8,
         RefFrameSignBias: 0,
         OrderHint: picture_info.std_picture_info.OrderHint,
-        SavedOrderHints: [0; 8],
+        SavedOrderHints: picture_info.std_picture_info.OrderHints,
     }
 }
 
@@ -2763,6 +2876,7 @@ fn build_av1_frame_obu_submit_skeleton(
     frame_record: &Av1ObuRecord,
     sequence_header: Option<&ParsedAv1SequenceHeader>,
     oxideav_sequence_header: Option<&OxideAv1SequenceHeader>,
+    oxideav_dpb: &mut OxideAv1Dpb,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_record.obu_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
@@ -2771,8 +2885,9 @@ fn build_av1_frame_obu_submit_skeleton(
     let payload = bitstream
         .get(frame_record.payload_range.clone())
         .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
-    let frame_header_summary = oxideav_sequence_header
-        .and_then(|sequence_header| parse_av1_frame_obu_summary(sequence_header, payload).ok());
+    let frame_header_summary = oxideav_sequence_header.and_then(|sequence_header| {
+        parse_av1_frame_obu_summary_with_dpb(sequence_header, payload, oxideav_dpb).ok()
+    });
     reject_show_existing_av1_frame(frame_header_summary)?;
     let key_frame_header =
         if frame_header_summary.is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame) {
@@ -2839,6 +2954,7 @@ fn build_av1_tile_group_submit_skeleton(
     tile_group_records: &[(usize, &Av1ObuRecord)],
     sequence_header: Option<&ParsedAv1SequenceHeader>,
     oxideav_sequence_header: Option<&OxideAv1SequenceHeader>,
+    oxideav_dpb: &mut OxideAv1Dpb,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_header_record.obu_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
@@ -2846,7 +2962,8 @@ fn build_av1_tile_group_submit_skeleton(
         .get(frame_header_record.payload_range.clone())
         .ok_or_else(|| "AV1 frame-header OBU payload range exceeds bitstream".to_string())?;
     let frame_header_summary = oxideav_sequence_header.and_then(|sequence_header| {
-        parse_av1_frame_header_summary(sequence_header, frame_header_payload).ok()
+        parse_av1_frame_header_summary_with_dpb(sequence_header, frame_header_payload, oxideav_dpb)
+            .ok()
     });
     reject_show_existing_av1_frame(frame_header_summary)?;
     let key_frame_header =
@@ -6154,6 +6271,8 @@ mod tests {
             show_existing_frame: false,
             error_resilient_mode: false,
             order_hint: 1,
+            enable_order_hint: true,
+            order_hint_bits: 8,
             primary_ref_frame: 6,
             refresh_frame_flags: 0x02,
             ref_frame_idx: [0, 1, 2, 3, 4, 5, 6],
@@ -6190,6 +6309,7 @@ mod tests {
             coded_width: 320,
             coded_height: 180,
             setup_reference_info: av1_std_reference_info(&picture),
+            reference_slot_infos: Vec::new(),
             picture_info: picture,
         };
         let command = build_av1_key_frame_decode_command_skeleton_from_decodes(&[decode], 8)
