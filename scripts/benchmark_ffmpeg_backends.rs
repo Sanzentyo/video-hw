@@ -173,6 +173,10 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     vulkan_av1_gop_size: usize,
 
+    /// libaom lookahead for generated Vulkan AV1 decode inputs.
+    #[arg(long, default_value_t = 0)]
+    vulkan_av1_lag_in_frames: usize,
+
     #[arg(long, default_value = "output")]
     output_dir: PathBuf,
 }
@@ -910,7 +914,10 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create output directory: {}", args.output_dir.display()))?;
     let av1_gop_suffix = if args.codec == Codec::Av1 {
-        format!("-gop{}", args.vulkan_av1_gop_size)
+        format!(
+            "-gop{}-lag{}",
+            args.vulkan_av1_gop_size, args.vulkan_av1_lag_in_frames
+        )
     } else {
         String::new()
     };
@@ -974,7 +981,7 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
                 "-g",
                 &args.vulkan_av1_gop_size.to_string(),
                 "-lag-in-frames",
-                "0",
+                &args.vulkan_av1_lag_in_frames.to_string(),
             ]);
         }
     }
@@ -1057,6 +1064,8 @@ fn vulkan_av1_psnr_verify_command(
         "30",
         "--gop-size",
         &args.vulkan_av1_gop_size.to_string(),
+        "--lag-in-frames",
+        &args.vulkan_av1_lag_in_frames.to_string(),
         "--vulkan-adapter-index",
         &adapter_index.to_string(),
         "--min-psnr-y",
@@ -1372,6 +1381,11 @@ fn write_vulkan_report(
     )?;
     if args.codec == Codec::Av1 {
         writeln!(&mut report, "vulkan_av1_gop_size: {}", args.vulkan_av1_gop_size)?;
+        writeln!(
+            &mut report,
+            "vulkan_av1_lag_in_frames: {}",
+            args.vulkan_av1_lag_in_frames
+        )?;
     }
     writeln!(&mut report, "decode_input: {}", decode_input.display())?;
     writeln!(&mut report)?;

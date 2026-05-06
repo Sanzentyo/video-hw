@@ -55,6 +55,9 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     gop_size: u32,
 
+    #[arg(long, default_value_t = 0)]
+    lag_in_frames: u32,
+
     #[arg(long)]
     expect_inter_frame: Option<bool>,
 }
@@ -97,7 +100,8 @@ struct FrameHeaderSummary {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.width == 0 || args.height == 0 || args.frames == 0 || args.fps == 0 || args.gop_size == 0 {
+    if args.width == 0 || args.height == 0 || args.frames == 0 || args.fps == 0 || args.gop_size == 0
+    {
         bail!("--width/--height/--frames/--fps/--gop-size must be non-zero");
     }
     fs::create_dir_all(&args.output_dir)
@@ -164,7 +168,7 @@ fn generate_input(args: &Args, run_id: u128) -> Result<PathBuf> {
         "-g",
         &args.gop_size.to_string(),
         "-lag-in-frames",
-        "0",
+        &args.lag_in_frames.to_string(),
     ]);
     match args.input_format {
         InputFormat::Obu => {
@@ -370,6 +374,7 @@ fn write_report(
     writeln!(&mut text, "height: {}", args.height)?;
     writeln!(&mut text, "frames: {}", args.frames)?;
     writeln!(&mut text, "gop_size: {}", args.gop_size)?;
+    writeln!(&mut text, "lag_in_frames: {}", args.lag_in_frames)?;
     if let Some(expected) = args.expect_inter_frame {
         writeln!(&mut text, "expected_inter_frame: {expected}")?;
     }

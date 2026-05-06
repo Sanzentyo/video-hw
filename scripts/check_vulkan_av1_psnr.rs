@@ -28,6 +28,7 @@ struct Args {
     frames: u32,
     fps: u32,
     gop_size: u32,
+    lag_in_frames: u32,
     vulkan_adapter_index: Option<usize>,
     min_psnr_y: f64,
     skip_build: bool,
@@ -133,6 +134,7 @@ fn parse_args() -> Result<Args> {
     let mut frames = 1;
     let mut fps = 30;
     let mut gop_size = 1;
+    let mut lag_in_frames = 0;
     let mut vulkan_adapter_index = None;
     let mut min_psnr_y = 40.0;
     let mut skip_build = false;
@@ -151,6 +153,9 @@ fn parse_args() -> Result<Args> {
             "--frames" => frames = next_value(&mut iter, "--frames")?.parse()?,
             "--fps" => fps = next_value(&mut iter, "--fps")?.parse()?,
             "--gop-size" | "--gop" => gop_size = next_value(&mut iter, "--gop-size")?.parse()?,
+            "--lag-in-frames" => {
+                lag_in_frames = next_value(&mut iter, "--lag-in-frames")?.parse()?
+            }
             "--vulkan-adapter-index" => {
                 vulkan_adapter_index =
                     Some(next_value(&mut iter, "--vulkan-adapter-index")?.parse()?)
@@ -159,7 +164,7 @@ fn parse_args() -> Result<Args> {
             "--skip-build" => skip_build = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--decode-bin PATH] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--vulkan-adapter-index N] [--min-psnr-y DB] [--skip-build]"
+                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--decode-bin PATH] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--lag-in-frames N] [--vulkan-adapter-index N] [--min-psnr-y DB] [--skip-build]"
                 );
                 std::process::exit(0);
             }
@@ -180,6 +185,7 @@ fn parse_args() -> Result<Args> {
         frames,
         fps,
         gop_size,
+        lag_in_frames,
         vulkan_adapter_index,
         min_psnr_y,
         skip_build,
@@ -220,7 +226,7 @@ fn generate_ffmpeg_av1_input(args: &Args, output: &Path) -> Result<()> {
             "-g",
             &args.gop_size.to_string(),
             "-lag-in-frames",
-            "0",
+            &args.lag_in_frames.to_string(),
     ]);
     match args.input_format {
         Av1InputFormat::Obu => {
@@ -363,10 +369,11 @@ fn write_failure_report(
     let frame_type_gate = frame_type_gate_command(args, input);
     let adapter_line = adapter_report_line(args);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\n{}frames: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nlag_in_frames: `{}`\n\n{}frames: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
+        args.lag_in_frames,
         adapter_line,
         args.width,
         args.height,
@@ -387,10 +394,11 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
     let frame_type_gate = frame_type_gate_command(args, input);
     let adapter_line = adapter_report_line(args);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\n{}frames: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nlag_in_frames: `{}`\n\n{}frames: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
+        args.lag_in_frames,
         adapter_line,
         summary.frames,
         args.width,
@@ -416,13 +424,14 @@ fn frame_type_gate_command(args: &Args, input: &Path) -> String {
     };
     let expected = args.gop_size > 1;
     format!(
-        "cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input {} --input-format {input_format} --width {} --height {} --frames {} --fps {} --gop-size {} --expect-inter-frame {expected}",
+        "cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --input {} --input-format {input_format} --width {} --height {} --frames {} --fps {} --gop-size {} --lag-in-frames {} --expect-inter-frame {expected}",
         input.display(),
         args.width,
         args.height,
         args.frames,
         args.fps,
-        args.gop_size
+        args.gop_size,
+        args.lag_in_frames
     )
 }
 

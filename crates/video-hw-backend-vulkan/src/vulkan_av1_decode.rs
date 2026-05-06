@@ -1883,7 +1883,7 @@ pub(crate) fn build_av1_decode_info_skeletons(
     let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
     let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
 
-    let mut decodes = build_av1_decode_submit_skeletons(bitstream)?
+    build_av1_decode_submit_skeletons(bitstream)?
         .into_iter()
         .map(|submit| {
             build_av1_decode_info_skeleton_from_submit(
@@ -1893,14 +1893,18 @@ pub(crate) fn build_av1_decode_info_skeletons(
                 submit,
             )
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    apply_av1_reference_name_slot_replay(&mut decodes)?;
-    Ok(decodes)
+        .collect::<Result<Vec<_>, String>>()
 }
 
 fn apply_av1_reference_name_slot_replay(
     decodes: &mut [Av1DecodeInfoSkeleton],
+    max_dpb_slots: u32,
 ) -> Result<(), String> {
+    if max_dpb_slots == 0 {
+        return Err("AV1 reference replay requires at least one DPB slot".to_string());
+    }
+    let max_dpb_slots = usize::try_from(max_dpb_slots)
+        .map_err(|_| "AV1 max_dpb_slots does not fit usize".to_string())?;
     #[derive(Clone, Copy)]
     struct ReferenceFrameReplayState {
         slot_index: i32,
@@ -1911,7 +1915,7 @@ fn apply_av1_reference_name_slot_replay(
     let mut reference_frame_slots: [Option<ReferenceFrameReplayState>; 8] = [None; 8];
 
     for (frame_index, decode) in decodes.iter_mut().enumerate() {
-        let setup_slot_index = i32::try_from(frame_index)
+        let setup_slot_index = i32::try_from(frame_index % max_dpb_slots)
             .map_err(|_| "AV1 replay frame index exceeds i32 slot range".to_string())?;
         if let Some(summary) = decode.picture_info.frame_header_summary {
             let mut ref_frame_sign_bias = 0_u8;
@@ -2043,7 +2047,8 @@ pub(crate) fn build_av1_key_frame_decode_command_skeleton(
     bitstream: &[u8],
     max_dpb_slots: u32,
 ) -> Result<Av1DecodeCommandSkeleton, String> {
-    let decodes = build_av1_decode_info_skeletons(bitstream)?;
+    let mut decodes = build_av1_decode_info_skeletons(bitstream)?;
+    apply_av1_reference_name_slot_replay(&mut decodes, max_dpb_slots)?;
     build_av1_key_frame_decode_command_skeleton_from_decodes(&decodes, max_dpb_slots)
 }
 
@@ -2051,11 +2056,15 @@ pub(crate) fn build_av1_aligned_decode_bitstream_upload_plan(
     bitstream: &[u8],
     offset_alignment: u64,
     size_alignment: u64,
+    max_dpb_slots: u32,
 ) -> Result<Av1DecodeBitstreamUploadPlan, String> {
     let mut bytes = Vec::new();
     let mut aligned_decodes = Vec::new();
 
-    for decode in build_av1_decode_info_skeletons(bitstream)? {
+    let mut decodes = build_av1_decode_info_skeletons(bitstream)?;
+    apply_av1_reference_name_slot_replay(&mut decodes, max_dpb_slots)?;
+
+    for decode in decodes {
         let current_len =
             u64::try_from(bytes.len()).map_err(|_| "AV1 upload buffer length exceeds u64")?;
         let aligned_offset = align_up_av1_decode_value(current_len, offset_alignment);
@@ -2108,6 +2117,7 @@ pub(crate) fn build_av1_aligned_key_frame_decode_command_skeleton(
         bitstream,
         offset_alignment,
         size_alignment,
+        max_dpb_slots,
     )?;
     let command = build_av1_key_frame_decode_command_skeleton_from_decodes(
         &upload_plan.decodes,
@@ -3685,6 +3695,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             bitstream,
             snapshot.min_bitstream_buffer_offset_alignment,
             snapshot.min_bitstream_buffer_size_alignment,
+            snapshot.max_dpb_slots,
         ) {
             Ok(plan) => plan,
             Err(err) => {
@@ -6323,6 +6334,71 @@ mod tests {
     }
 
     #[test]
+    fn reference_name_slot_replay_keeps_slots_within_dpb_capacity() {
+        let mut decodes = (0..18)
+            .map(|frame_index| {
+                let is_key = frame_index == 0;
+                let mut std_picture_info = key_frame_std_picture_info();
+                std_picture_info.frame_type = if is_key {
+                    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY
+                } else {
+                    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTER
+                };
+                std_picture_info.OrderHint = frame_index as u8;
+                let summary = Av1ParsedFrameHeaderSummary {
+                    frame_type: if is_key { 0 } else { 1 },
+                    show_existing_frame: false,
+                    error_resilient_mode: is_key,
+                    order_hint: frame_index as u8,
+                    enable_order_hint: true,
+                    order_hint_bits: 8,
+                    primary_ref_frame: if is_key { 7 } else { 0 },
+                    refresh_frame_flags: if is_key { 0xff } else { 1 << (frame_index % 8) },
+                    ref_frame_idx: [0, 1, 2, 3, 4, 5, 6],
+                    tile_payload_offset: 0,
+                    std_overrides: None,
+                };
+                let picture_info = Av1DecodePictureInfoSkeleton {
+                    std_picture_info,
+                    reference_name_slot_indices: [-1; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
+                    frame_header_offset: 0,
+                    tile_offsets: vec![0],
+                    tile_sizes: vec![1],
+                    use_128x128_superblock: false,
+                    key_frame_header: None,
+                    frame_header_summary: Some(summary),
+                    std_overrides: None,
+                };
+                Av1DecodeInfoSkeleton {
+                    temporal_unit_index: frame_index,
+                    src_buffer_offset: frame_index as u64,
+                    src_buffer_range: 1,
+                    coded_width: 320,
+                    coded_height: 180,
+                    setup_reference_info: av1_std_reference_info(&picture_info),
+                    reference_slot_infos: Vec::new(),
+                    picture_info,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        apply_av1_reference_name_slot_replay(&mut decodes, 4)
+            .expect("bounded DPB replay should succeed");
+
+        assert!(decodes.iter().skip(1).all(|decode| {
+            decode
+                .picture_info
+                .reference_name_slot_indices
+                .iter()
+                .filter(|slot| **slot >= 0)
+                .all(|slot| *slot < 4)
+        }));
+        let command = build_av1_key_frame_decode_command_skeleton_from_decodes(&decodes, 4)
+            .expect("bounded reference slots should fit command DPB capacity");
+        assert_eq!(command.begin_slots.len(), 4);
+    }
+
+    #[test]
     fn picture_info_skeleton_rejects_empty_tiles() {
         let submit = Av1DecodeSubmitSkeleton {
             temporal_unit_index: 0,
@@ -6683,7 +6759,7 @@ mod tests {
         bitstream.extend_from_slice(&make_obu(2, &[]));
         bitstream.extend_from_slice(&make_obu(6, &[0x21, 0x22, 0x23]));
 
-        let plan = build_av1_aligned_decode_bitstream_upload_plan(&bitstream, 8, 4)
+        let plan = build_av1_aligned_decode_bitstream_upload_plan(&bitstream, 8, 4, 4)
             .expect("aligned upload plan should be built for multi-frame AV1");
 
         assert_eq!(plan.decodes.len(), 2);

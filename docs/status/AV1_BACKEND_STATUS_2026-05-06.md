@@ -454,6 +454,24 @@ Latest Vulkan AV1 scaffold verification:
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076585814.md` and
   `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076599799.md`
   (`--frames 8 --gop-size 30 --vulkan-adapter-index 0`, `psnr_y_min=inf`).
+- Vulkan AV1 generation controls now expose libaom lookahead:
+  `scripts/benchmark_ffmpeg_backends.rs --vulkan-av1-lag-in-frames <N>`,
+  `scripts/check_vulkan_av1_psnr.rs --lag-in-frames <N>`, and
+  `scripts/inspect_av1_frame_types.rs --lag-in-frames <N>`. The default stays
+  `0`, preserving the passing generated-GOP30 scope. A new bounded-DPB unit test
+  (`reference_name_slot_replay_keeps_slots_within_dpb_capacity`) verifies that
+  reference-name replay no longer records unbounded frame indexes as DPB slots.
+  Stress report `output/benchmark-backends-av1-1778077279.md` /
+  `output/benchmark-vulkan-av1-1778077279.md` uses
+  `--frames 16 --gop-size 30 --vulkan-av1-lag-in-frames 25 --verify`; FFmpeg
+  Vulkan decode on NVIDIA passes, but video-hw Vulkan AV1 fails before PSNR
+  with `readback frame count is too small: got 16, need 17`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077278007.md`). The generated
+  stream has 16 temporal units, 22 frame headers, 16 inter frames, and 5
+  show-existing frames; the command skeleton reaches 17 decode commands with
+  bounded slots `0/1/2/3/...`. The remaining gap is the current single coding
+  scope / post-submit DPB readback design: it cannot return every displayed
+  frame once coded decode commands exceed the retained DPB readback samples.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
