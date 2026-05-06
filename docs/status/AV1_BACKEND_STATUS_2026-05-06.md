@@ -476,6 +476,14 @@ Latest Vulkan AV1 scaffold verification:
   bounded slots `0/1/2/3/...`. The remaining gap is the current single coding
   scope / post-submit DPB readback design: it cannot return every displayed
   frame once coded decode commands exceed the retained DPB readback samples.
+  The same lag25 stress through fMP4 input also preserves the display-frame
+  count (`decode_to_yuv ... --input-format mp4 --output-mode metadata` prints
+  `frames=16`) and passes metadata decode at 0.231s vs FFmpeg Vulkan fMP4 decode
+  0.311s:
+  `output/benchmark-backends-av1-1778077931.md` /
+  `output/benchmark-vulkan-av1-1778077931.md`. Its PSNR/NV12 row fails at the
+  same readback boundary
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778077930197.md`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
