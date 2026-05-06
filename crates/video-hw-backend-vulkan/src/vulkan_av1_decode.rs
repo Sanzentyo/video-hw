@@ -3210,7 +3210,7 @@ fn parse_av1_key_frame_obu_header(
         if loop_filter_delta_enabled {
             loop_filter_delta_update = bits.read_bool("loop_filter_delta_update")?;
             if loop_filter_delta_update {
-                return Err("AV1 loop-filter delta update parsing is not implemented".to_string());
+                skip_av1_loop_filter_delta_updates(&mut bits)?;
             }
         }
     }
@@ -3269,6 +3269,29 @@ fn skip_av1_delta_q(bits: &mut BitReader<'_>, field_name: &str) -> Result<(), St
     if delta_coded {
         let _delta_q = bits.read_bits_u8(7, field_name)?;
     }
+    Ok(())
+}
+
+fn skip_av1_loop_filter_delta_updates(bits: &mut BitReader<'_>) -> Result<(), String> {
+    for _ in 0..8 {
+        if bits.read_bool("loop_filter_ref_delta_update")? {
+            skip_av1_loop_filter_signed_delta(bits, "loop_filter_ref_delta")?;
+        }
+    }
+    for _ in 0..2 {
+        if bits.read_bool("loop_filter_mode_delta_update")? {
+            skip_av1_loop_filter_signed_delta(bits, "loop_filter_mode_delta")?;
+        }
+    }
+    Ok(())
+}
+
+fn skip_av1_loop_filter_signed_delta(
+    bits: &mut BitReader<'_>,
+    field_name: &str,
+) -> Result<(), String> {
+    let _magnitude = bits.read_bits_u8(6, field_name)?;
+    let _sign = bits.read_bool(field_name)?;
     Ok(())
 }
 
@@ -6221,6 +6244,21 @@ mod tests {
         assert_eq!(header.base_q_idx, 128);
         assert_eq!(header.loop_filter_level, [7, 7, 13, 13]);
         assert_eq!(header.cdef_bits, 1);
+    }
+
+    #[test]
+    fn loop_filter_delta_updates_skip_ref_and_mode_deltas() {
+        let payload = [
+            // ref0 update=1, magnitude=0b100101, sign=1, refs1..7 update=0.
+            0xcb, 0x00, // mode0 update=1, magnitude=0b000011, sign=0, mode1 update=0.
+            0x86, 0x00,
+        ];
+        let mut bits = BitReader::new(&payload);
+
+        skip_av1_loop_filter_delta_updates(&mut bits)
+            .expect("loop-filter delta updates should be skipped");
+
+        assert_eq!(bits.bit_offset, 24);
     }
 
     #[test]

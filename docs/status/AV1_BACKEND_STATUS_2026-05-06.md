@@ -269,7 +269,10 @@ Current implementation progress:
   `rgb24` at 320x180; the Frame OBU path now parses the generated key-frame
   header far enough to split frame-header bytes from tile payload bytes and to
   feed observed base quantizer, loop-filter, CDEF, tx-mode, and sequence-header
-  feature flags into the std AV1 structs; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
+  feature flags into the std AV1 structs; the fallback key-frame parser now
+  skips AV1 loop-filter ref/mode delta update payloads instead of rejecting the
+  stream at `loop_filter_delta_update`, with a unit test covering the bit
+  consumption; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
@@ -326,6 +329,7 @@ Current implementation progress:
 Latest Vulkan AV1 scaffold verification:
 
 - `cargo fmt --all --check`
+- `cargo test -p video-hw-backend-vulkan --features backend-vulkan loop_filter_delta_updates_skip_ref_and_mode_deltas`
 - `cargo test -p video-hw-backend-vulkan --features backend-vulkan av1`
   includes `decode_submit_skeleton_rejects_show_existing_frame_obu`, which
   guards the unsupported-frame-header rejection path added in `d0ee5e9`.
