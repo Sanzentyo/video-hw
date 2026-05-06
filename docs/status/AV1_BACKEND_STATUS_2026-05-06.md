@@ -74,6 +74,9 @@ Current implementation progress:
 - sequence-header parsing now extracts reduced-still-picture coded width/height,
   core sequence flags, and maps them into an ash `StdVideoAV1SequenceHeader`
   skeleton for the later session-parameter builder;
+- `extract_av1_std_sequence_header` exposes that mapping from a low-overhead AV1
+  bitstream so session parameter creation can consume a Vulkan std header
+  without depending on parser internals;
 - Vulkan AV1 capability is still false because session parameter creation,
   decode submit, readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,

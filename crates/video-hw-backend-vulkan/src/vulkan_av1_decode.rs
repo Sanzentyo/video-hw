@@ -146,6 +146,19 @@ pub(crate) fn inspect_av1_low_overhead_obus(
     })
 }
 
+pub(crate) fn extract_av1_std_sequence_header(
+    bitstream: &[u8],
+) -> Result<StdVideoAV1SequenceHeader, String> {
+    let records = parse_av1_low_overhead_obus(bitstream)?;
+    let sequence_header = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .ok_or_else(|| "missing AV1 sequence header OBU".to_string())?;
+    let parsed =
+        parse_av1_sequence_header_payload(&bitstream[sequence_header.payload_range.clone()])?;
+    build_av1_std_sequence_header(&parsed)
+}
+
 impl ParsedAv1SequenceHeader {
     fn coded_width(&self) -> u32 {
         self.max_frame_width_minus_1 + 1
@@ -852,6 +865,28 @@ mod tests {
         assert_eq!(std_header.max_frame_height_minus_1, 359);
         assert!(std_header.pColorConfig.is_null());
         assert!(std_header.pTimingInfo.is_null());
+    }
+
+    #[test]
+    fn bitstream_sequence_header_extractor_returns_vulkan_std_header() {
+        let sequence_header = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let mut bitstream = make_obu(2, &[]);
+        bitstream.extend_from_slice(&sequence_header);
+        bitstream.extend_from_slice(&make_obu(6, &[0x80]));
+
+        let std_header = extract_av1_std_sequence_header(&bitstream)
+            .expect("synthetic AV1 bitstream should yield a Vulkan std sequence header");
+
+        assert_eq!(std_header.max_frame_width_minus_1, 319);
+        assert_eq!(std_header.max_frame_height_minus_1, 179);
+    }
+
+    #[test]
+    fn bitstream_sequence_header_extractor_rejects_missing_sequence_header() {
+        let bitstream = make_obu(6, &[0x80]);
+        let err = extract_av1_std_sequence_header(&bitstream)
+            .expect_err("missing AV1 sequence header should be rejected");
+        assert!(err.contains("missing AV1 sequence header"));
     }
 
     #[test]
