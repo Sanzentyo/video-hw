@@ -439,6 +439,13 @@ Latest Vulkan AV1 scaffold verification:
   Vulkan rows remain explicit. The runner now also marks an empty adapter
   selection as failed instead of writing a passing report with no cases
   (`output/benchmark-backends-av1-1778076131.md`).
+- Vulkan AV1 integrated `--verify` now invokes
+  `scripts/check_vulkan_av1_psnr.rs` for each `video-hw` Vulkan adapter using
+  the same generated benchmark input and records a `video-hw PSNR verify` row.
+  Smoke report `output/benchmark-vulkan-av1-1778076340.md` includes a passing
+  NVIDIA `video-hw PSNR verify` row; the generated PSNR report is
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076337706.md`
+  (`--frames 4 --gop-size 30 --vulkan-adapter-index 0`, `psnr_y_min=inf`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)

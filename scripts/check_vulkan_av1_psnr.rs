@@ -27,6 +27,7 @@ struct Args {
     frames: u32,
     fps: u32,
     gop_size: u32,
+    vulkan_adapter_index: Option<usize>,
     min_psnr_y: f64,
     skip_build: bool,
 }
@@ -130,6 +131,7 @@ fn parse_args() -> Result<Args> {
     let mut frames = 1;
     let mut fps = 30;
     let mut gop_size = 1;
+    let mut vulkan_adapter_index = None;
     let mut min_psnr_y = 40.0;
     let mut skip_build = false;
     let mut iter = env::args().skip(1);
@@ -146,11 +148,15 @@ fn parse_args() -> Result<Args> {
             "--frames" => frames = next_value(&mut iter, "--frames")?.parse()?,
             "--fps" => fps = next_value(&mut iter, "--fps")?.parse()?,
             "--gop-size" | "--gop" => gop_size = next_value(&mut iter, "--gop-size")?.parse()?,
+            "--vulkan-adapter-index" => {
+                vulkan_adapter_index =
+                    Some(next_value(&mut iter, "--vulkan-adapter-index")?.parse()?)
+            }
             "--min-psnr-y" => min_psnr_y = next_value(&mut iter, "--min-psnr-y")?.parse()?,
             "--skip-build" => skip_build = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--min-psnr-y DB] [--skip-build]"
+                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--vulkan-adapter-index N] [--min-psnr-y DB] [--skip-build]"
                 );
                 std::process::exit(0);
             }
@@ -170,6 +176,7 @@ fn parse_args() -> Result<Args> {
         frames,
         fps,
         gop_size,
+        vulkan_adapter_index,
         min_psnr_y,
         skip_build,
     })
@@ -238,25 +245,27 @@ fn decode_with_vulkan(args: &Args, input: &Path, output: &Path) -> Result<()> {
         Av1InputFormat::Obu => "annexb",
         Av1InputFormat::Fmp4 => "mp4",
     };
-    run(
-        Command::new(executable).args([
-            "--backend",
-            "vulkan",
-            "--codec",
-            "av1",
-            "--input",
-            &input.display().to_string(),
-            "--input-format",
-            input_format,
-            "--output-mode",
-            "nv12",
-            "--output",
-            &output.display().to_string(),
-            "--fps",
-            &args.fps.to_string(),
-        ]),
-        "decode Vulkan AV1 to NV12",
-    )
+    let mut command = Command::new(executable);
+    command.args([
+        "--backend",
+        "vulkan",
+        "--codec",
+        "av1",
+        "--input",
+        &input.display().to_string(),
+        "--input-format",
+        input_format,
+        "--output-mode",
+        "nv12",
+        "--output",
+        &output.display().to_string(),
+        "--fps",
+        &args.fps.to_string(),
+    ]);
+    if let Some(adapter_index) = args.vulkan_adapter_index {
+        command.args(["--vulkan-adapter-index", &adapter_index.to_string()]);
+    }
+    run(&mut command, "decode Vulkan AV1 to NV12")
 }
 
 fn decode_with_ffmpeg(args: &Args, input: &Path, output: &Path) -> Result<()> {
@@ -348,11 +357,13 @@ fn write_failure_report(
     report: &Path,
 ) -> Result<()> {
     let frame_type_gate = frame_type_gate_command(args, input);
+    let adapter_line = adapter_report_line(args);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: FAIL\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\n{}frames: `n/a`\n\nsize: `{}x{}`\n\nfailed_stage: `{}`\n\nerror: `{}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
+        adapter_line,
         args.width,
         args.height,
         stage,
@@ -370,11 +381,13 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
         "FAIL"
     };
     let frame_type_gate = frame_type_gate_command(args, input);
+    let adapter_line = adapter_report_line(args);
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\ngop_size: `{}`\n\n{}frames: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n\nframe_type_gate: `{}`\n",
         input.display(),
         args.input_format,
         args.gop_size,
+        adapter_line,
         summary.frames,
         args.width,
         args.height,
@@ -384,6 +397,12 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
         frame_type_gate.replace('`', "'")
     );
     fs::write(report, body).with_context(|| format!("write {}", report.display()))
+}
+
+fn adapter_report_line(args: &Args) -> String {
+    args.vulkan_adapter_index
+        .map(|adapter_index| format!("vulkan_adapter_index: `{adapter_index}`\n\n"))
+        .unwrap_or_default()
 }
 
 fn frame_type_gate_command(args: &Args, input: &Path) -> String {

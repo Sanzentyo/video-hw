@@ -293,7 +293,10 @@ Tasks:
    is measured when the bootstrap probe passes. The runner now accepts
    `--vulkan-av1-gop-size` and defaults generated AV1 Vulkan decode inputs to
    `-g 30 -lag-in-frames 0`, with `--vulkan-av1-gop-size 1` available for
-   legacy keyframe-only comparison.
+   legacy keyframe-only comparison. When `--verify` is requested for Vulkan
+   AV1, the runner now calls `scripts/check_vulkan_av1_psnr.rs` with the same
+   generated input and records a `video-hw PSNR verify` row for each `video-hw`
+   Vulkan adapter.
 2. Keep FFmpeg `av1_vulkan` adapter comparison in the report.
 3. Treat Intel Vulkan encode as unavailable when FFmpeg also cannot encode on
    that adapter; do not claim parity for unsupported hardware.

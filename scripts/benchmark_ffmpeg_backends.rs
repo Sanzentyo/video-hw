@@ -534,6 +534,14 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
             args.warmup,
             || vulkan_decode_command(&decode_bin, args, &decode_input, adapter.index),
         ));
+        if args.verify && args.codec == Codec::Av1 {
+            cases.push(run_vulkan_verify_case(
+                adapter.index,
+                &video_hw_adapter_label,
+                "video-hw PSNR verify",
+                || vulkan_av1_psnr_verify_command(args, &decode_input, adapter.index),
+            ));
+        }
         if let Some(ffmpeg_adapter) = ffmpeg_match {
             cases.push(run_vulkan_case(
                 ffmpeg_adapter.index,
@@ -842,6 +850,35 @@ where
     summary
 }
 
+fn run_vulkan_verify_case<F>(
+    adapter_index: usize,
+    adapter_name: &str,
+    label: &'static str,
+    command_factory: F,
+) -> CaseSummary
+where
+    F: FnOnce() -> Result<Command>,
+{
+    println!("  {label} [{adapter_name} vk{adapter_index}]");
+    let command = match command_factory() {
+        Ok(command) => command,
+        Err(err) => return failed_case(adapter_index, adapter_name, label, err),
+    };
+    match run_timed(command) {
+        Ok(seconds) => {
+            println!("    {seconds:.3}s");
+            CaseSummary {
+                case: format!("{label} [{adapter_name} vk{adapter_index}]"),
+                status: "passed".to_string(),
+                mean_seconds: Some(seconds),
+                p50_seconds: Some(seconds),
+                throughput_fps: None,
+            }
+        }
+        Err(err) => failed_case(adapter_index, adapter_name, label, err),
+    }
+}
+
 fn failed_case(
     adapter_index: usize,
     adapter_name: &str,
@@ -985,6 +1022,44 @@ fn vulkan_decode_command(
         "--require-hardware",
         "--vulkan-adapter-index",
         &adapter_index.to_string(),
+    ]);
+    Ok(command)
+}
+
+fn vulkan_av1_psnr_verify_command(
+    args: &Args,
+    decode_input: &Path,
+    adapter_index: usize,
+) -> Result<Command> {
+    let input_format = match args.vulkan_decode_input_format {
+        VulkanDecodeInputFormat::Annexb => "obu",
+        VulkanDecodeInputFormat::Fmp4 => "fmp4",
+    };
+    let mut command = Command::new("cargo");
+    command.args([
+        "+nightly",
+        "-Zscript",
+        "scripts/check_vulkan_av1_psnr.rs",
+        "--input",
+        &decode_input.to_string_lossy(),
+        "--input-format",
+        input_format,
+        "--width",
+        &args.width.to_string(),
+        "--height",
+        &args.height.to_string(),
+        "--frames",
+        &args.frame_count.to_string(),
+        "--fps",
+        "30",
+        "--gop-size",
+        &args.vulkan_av1_gop_size.to_string(),
+        "--vulkan-adapter-index",
+        &adapter_index.to_string(),
+        "--min-psnr-y",
+        "60",
+        "--output-dir",
+        "output/vulkan-av1-psnr",
     ]);
     Ok(command)
 }
