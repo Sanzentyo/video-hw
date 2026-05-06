@@ -71,6 +71,8 @@ Current implementation progress:
 - low-overhead AV1 OBU inspection now reports OBU count, temporal-unit count,
   sequence-header presence, and frame-payload presence in Vulkan AV1 decode
   blocker messages;
+- IVF container bytes passed to the Vulkan AV1 elementary-stream path are now
+  rejected explicitly before OBU parsing;
 - sequence-header parsing now extracts reduced-still-picture coded width/height,
   core sequence flags, and maps them into an ash `StdVideoAV1SequenceHeader`
   skeleton for the later session-parameter builder;

@@ -72,7 +72,7 @@ Tasks:
    covered for temporal-delimiter-separated frame OBUs, and multiple tile-group
    OBUs following one frame header are grouped into one submit skeleton.
 4. Reject unsupported input forms explicitly:
-   - IVF container bytes passed as elementary stream;
+   - IVF container bytes passed as elementary stream. Done.
    - OBUs without size fields if the submit path cannot packetize them safely;
    - missing sequence header before first frame.
 5. Unit tests:

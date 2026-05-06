@@ -1369,6 +1369,12 @@ fn create_av1_decode_device(
 }
 
 fn parse_av1_low_overhead_obus(bitstream: &[u8]) -> Result<Vec<Av1ObuRecord>, String> {
+    if bitstream.starts_with(b"DKIF") {
+        return Err(
+            "AV1 IVF container input is not a low-overhead OBU elementary stream".to_string(),
+        );
+    }
+
     let mut records = Vec::new();
     let mut cursor = 0usize;
     let mut temporal_unit_index = 0usize;
@@ -1763,6 +1769,13 @@ mod tests {
         let err =
             inspect_av1_low_overhead_obus(&[1 << 3]).expect_err("size-less OBU should be rejected");
         assert!(err.contains("lacks the low-overhead size field"));
+    }
+
+    #[test]
+    fn low_overhead_obu_parser_rejects_ivf_container_bytes() {
+        let err = inspect_av1_low_overhead_obus(b"DKIF\0\0\0\0")
+            .expect_err("IVF container bytes should be rejected explicitly");
+        assert!(err.contains("IVF container input"));
     }
 
     #[test]
