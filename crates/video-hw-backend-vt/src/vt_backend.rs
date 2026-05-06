@@ -1711,6 +1711,72 @@ mod tests {
     }
 
     #[test]
+    fn av1_capability_report_never_claims_vt_support() {
+        let decoder = VtDecoderAdapter::new(DecoderConfig {
+            codec: Codec::Av1,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Default,
+        });
+        let decode_report = decoder.query_capability(Codec::Av1).unwrap();
+        assert!(!decode_report.decode_supported);
+        assert!(!decode_report.encode_supported);
+        assert!(!decode_report.hardware_acceleration);
+        assert!(decode_report.decode_output_modes.is_empty());
+
+        let encoder = VtEncoderAdapter::with_config(Codec::Av1, 30, false);
+        let encode_report = encoder.query_capability(Codec::Av1).unwrap();
+        assert!(!encode_report.decode_supported);
+        assert!(!encode_report.encode_supported);
+        assert!(!encode_report.hardware_acceleration);
+        assert!(encode_report.decode_output_modes.is_empty());
+    }
+
+    #[test]
+    fn vt_av1_runtime_paths_return_actionable_unsupported_errors() {
+        let mut decoder = VtDecoderAdapter::new(DecoderConfig {
+            codec: Codec::Av1,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Default,
+        });
+        let err = decoder
+            .push_bitstream_chunk(&[0x12, 0x00], None)
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedConfig(message) => {
+                assert!(message.contains("VideoToolbox AV1 decode is not implemented"));
+            }
+            other => panic!("unexpected VT AV1 decode error: {other:?}"),
+        }
+
+        let mut encoder = VtEncoderAdapter::with_config(Codec::Av1, 30, false);
+        let err = encoder
+            .push_frame(Frame {
+                width: 16,
+                height: 16,
+                pixel_format: None,
+                pts_90k: Some(0),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
+                argb: Some(vec![0; 16 * 16 * 4]),
+                nv12: None,
+                force_keyframe: true,
+            })
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedConfig(message) => {
+                assert!(message.contains("VideoToolbox AV1 encode is not implemented"));
+            }
+            other => panic!("unexpected VT AV1 encode error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn vt_switch_immediate_updates_generation_hint() {
         let mut adapter = VtEncoderAdapter::with_config(Codec::H264, 30, false);
         assert_eq!(adapter.pipeline_generation_hint(), Some(1));
