@@ -211,6 +211,17 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --ge
 - 2026-05-06 の Windows/Intel-visible 環境では `--no-record-command-buffer` / `--record-mode barrier_only` / `begin_end` / `reset_end` / `first_decode` / `full` が PASS。`--record-mode full --submit-command-buffer` も PASS し、queue submit と fence wait まで到達する。`--readback` も synthetic reduced-still OBU と FFmpeg生成OBUの両方で PASS し、`readback_bytes=86400`、`readback_mapped_bytes=86400`、`readback_non_zero=true` を確認済み。
 - これは isolated probe の submit/readback であり、PSNR や実AV1 file decode parity ではない。Vulkan AV1 backend はまだ実装完了扱いにしない。
 
+### 11.2) Vulkan AV1 PSNR check
+
+```bash
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 40
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0
+```
+
+- 生成レポート: `output/vulkan-av1-psnr/vulkan-av1-psnr-<epoch>.md`
+- 既定では FFmpeg `libaom-av1` で1フレームの AV1 low-overhead OBU を生成し、`decode_to_yuv --backend vulkan --codec av1 --output-mode nv12` の出力を FFmpeg software decode の NV12 と raw-vs-raw で比較する。
+- 現状の `--min-psnr-y 40` は FAIL する。2026-05-06 の Windows/Intel-visible 環境では `--min-psnr-y 0` で実行確認し、`psnr_y_min=5.6200`。submit/readback と facade 出力は通っているが、AV1 picture info が実frame headerを十分に反映していないため、decode parity は未達。
+
 ### 12) fMP4 decode access pattern benchmark
 
 ```bash

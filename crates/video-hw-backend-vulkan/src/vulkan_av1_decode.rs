@@ -65,6 +65,14 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub command_buffer_submitted: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Av1DecodeReadbackFrame {
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub data: Vec<u8>,
+    pub readback_non_zero: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av1DecodeSubmitSkeleton {
     pub temporal_unit_index: usize,
@@ -1051,7 +1059,14 @@ struct Av1DecodeReadbackBufferResource {
 struct Av1DecodeReadbackSample {
     mapped_bytes: usize,
     non_zero: bool,
-    sample: Vec<u8>,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Av1DecodeBitstreamSessionProbeOptions {
+    record_command_buffer: bool,
+    submit_command_buffer: bool,
+    readback: bool,
 }
 
 struct Av1DecodeSessionResource {
@@ -1169,6 +1184,46 @@ pub(crate) fn extract_av1_std_sequence_header(
 pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
     bitstream: &[u8],
 ) -> Result<Av1DecodeBitstreamSessionProbe, String> {
+    let options = Av1DecodeBitstreamSessionProbeOptions::from_env();
+    probe_av1_decode_session_parameters_for_bitstream_with_options(bitstream, options)
+}
+
+pub(crate) fn decode_av1_bitstream_to_nv12(
+    bitstream: &[u8],
+) -> Result<Av1DecodeReadbackFrame, String> {
+    let probe = probe_av1_decode_session_parameters_for_bitstream_with_options(
+        bitstream,
+        Av1DecodeBitstreamSessionProbeOptions {
+            record_command_buffer: true,
+            submit_command_buffer: true,
+            readback: true,
+        },
+    )?;
+    if probe.picture_format != vk::Format::G8_B8R8_2PLANE_420_UNORM {
+        return Err(format!(
+            "Vulkan AV1 decode output currently requires G8_B8R8_2PLANE_420_UNORM readback (got {:?})",
+            probe.picture_format
+        ));
+    }
+    if probe.readback_sample.len() != probe.readback_mapped_bytes {
+        return Err(format!(
+            "Vulkan AV1 decode readback did not retain full mapped payload: mapped={}, retained={}",
+            probe.readback_mapped_bytes,
+            probe.readback_sample.len()
+        ));
+    }
+    Ok(Av1DecodeReadbackFrame {
+        coded_width: probe.coded_width,
+        coded_height: probe.coded_height,
+        data: probe.readback_sample,
+        readback_non_zero: probe.readback_non_zero,
+    })
+}
+
+fn probe_av1_decode_session_parameters_for_bitstream_with_options(
+    bitstream: &[u8],
+    options: Av1DecodeBitstreamSessionProbeOptions,
+) -> Result<Av1DecodeBitstreamSessionProbe, String> {
     let std_sequence_header = extract_av1_std_sequence_header(bitstream)?;
     let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
     let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
@@ -1189,6 +1244,7 @@ pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
         &std_sequence_header,
         coded_width,
         coded_height,
+        options,
     );
 
     // SAFETY: The instance was created in this function and is not used afterwards.
@@ -1196,6 +1252,21 @@ pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
         instance.destroy_instance(None);
     }
     result
+}
+
+impl Av1DecodeBitstreamSessionProbeOptions {
+    fn from_env() -> Self {
+        let record_command_buffer =
+            std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1");
+        let submit_command_buffer = record_command_buffer
+            && std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1");
+        let readback = std::env::var("VIDEO_HW_VULKAN_AV1_READBACK").as_deref() == Ok("1");
+        Self {
+            record_command_buffer,
+            submit_command_buffer,
+            readback,
+        }
+    }
 }
 
 pub(crate) fn build_av1_decode_submit_skeleton(
@@ -2132,6 +2203,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
     std_sequence_header: &StdVideoAV1SequenceHeader,
     coded_width: u32,
     coded_height: u32,
+    options: Av1DecodeBitstreamSessionProbeOptions,
 ) -> Result<Av1DecodeBitstreamSessionProbe, String> {
     // SAFETY: `instance` is valid here; we only enumerate physical device handles.
     let physical_devices = unsafe { instance.enumerate_physical_devices() }
@@ -2287,12 +2359,10 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     return Err(err);
                 }
             };
-            let command_buffer_record_requested =
-                std::env::var("VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER").as_deref() == Ok("1");
-            let command_buffer_submit_requested = command_buffer_record_requested
-                && std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1");
-            let readback_requested =
-                std::env::var("VIDEO_HW_VULKAN_AV1_READBACK").as_deref() == Ok("1");
+            let command_buffer_record_requested = options.record_command_buffer;
+            let command_buffer_submit_requested =
+                command_buffer_record_requested && options.submit_command_buffer;
+            let readback_requested = options.readback;
             if readback_requested
                 && (!command_buffer_record_requested || !command_buffer_submit_requested)
             {
@@ -2428,7 +2498,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     readback_region_count: readback_plan.regions.len(),
                     readback_mapped_bytes: readback_sample.mapped_bytes,
                     readback_non_zero: readback_sample.non_zero,
-                    readback_sample: readback_sample.sample,
+                    readback_sample: readback_sample.data,
                     command_record_decode_count: record_summary.decode_count,
                     command_buffer_recorded,
                     command_buffer_submitted,
@@ -2936,8 +3006,7 @@ fn map_av1_decode_readback_buffer(
     .map_err(|err| format!("vkMapMemory for AV1 decode readback failed: {err}"))?;
     // SAFETY: The mapped pointer is valid for `mapped_len` bytes until unmap.
     let mapped_slice = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), mapped_len) };
-    let sample_len = mapped_slice.len().min(256);
-    let sample = mapped_slice[..sample_len].to_vec();
+    let data = mapped_slice.to_vec();
     let non_zero = mapped_slice.iter().any(|&byte| byte != 0);
     // SAFETY: The memory was mapped above and is no longer accessed after this point.
     unsafe {
@@ -2946,7 +3015,7 @@ fn map_av1_decode_readback_buffer(
     Ok(Av1DecodeReadbackSample {
         mapped_bytes: mapped_len,
         non_zero,
-        sample,
+        data,
     })
 }
 

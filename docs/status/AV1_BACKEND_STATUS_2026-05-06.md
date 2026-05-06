@@ -205,18 +205,24 @@ Current implementation progress:
   fence, maps the readback allocation, and passes on the current
   Windows/Intel-visible adapter with `readback_bytes=86400`,
   `readback_mapped_bytes=86400`, `readback_non_zero=true`, and
-  `readback_sample_len=256`; the live probe can now read an external AV1
+  `readback_sample_len=86400`; the live probe can now read an external AV1
   low-overhead OBU elementary stream through
   `VIDEO_HW_VULKAN_AV1_PROBE_BITSTREAM_PATH`, and
   `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
   generates a one-frame `libaom-av1` OBU with FFmpeg and passes the same
-  submit/readback gate with `upload_bytes=1536`; NV12 AV1 readback planning
-  mirrors the HEVC plane-copy layout
+  submit/readback gate with `upload_bytes=1536`; the explicit Vulkan backend
+  decode path now reuses that submit/readback path for one-frame key-frame OBU
+  inputs, so `decode_to_yuv --backend vulkan --codec av1` returns one frame for
+  `metadata`, writes 86,400 bytes for `nv12`, and writes 172,800 bytes for
+  `rgb24` at 320x180; NV12 AV1 readback planning mirrors the HEVC plane-copy layout
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
-- Vulkan AV1 capability is still false because real-bitstream session
-  PSNR and benchmark gates are not implemented;
+- Vulkan AV1 capability is still false because FFmpeg-reference PSNR is not
+  passing yet: `scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
+  records the current one-frame generated-OBU result as `psnr_y_min=5.6200`,
+  which confirms the output path is live but the AV1 picture-info/default
+  modeling is not yet bit-exact enough to claim decode support;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 
@@ -228,6 +234,10 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback --generate-ffmpeg-obu --width 320 --height 180 --frames 1`
+- `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode metadata`
+- `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode nv12 --output output/vulkan-av1-record-probe/av1-vulkan-decode.nv12`
+- `cargo run -p video-hw --features backend-vulkan --example decode_to_yuv -- --backend vulkan --codec av1 --input output/vulkan-av1-record-probe/ffmpeg-av1-probe-1778061973933.obu --output-mode rgb24 --output output/vulkan-av1-record-probe/av1-vulkan-decode.rgb`
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -250,9 +260,11 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Promote the FFmpeg-generated one-frame OBU submit/readback probe into a
-   reusable decode output path for `decode_to_yuv`.
-2. Add Vulkan AV1 decode PSNR check against FFmpeg software decode.
+1. Replace the key-frame/single-tile AV1 picture-info defaults with values
+   parsed from the real AV1 frame header until the generated-OBU PSNR gate
+   reaches the same threshold as other decode backends.
+2. Keep the one-frame `decode_to_yuv` path passing while adding multi-frame
+   key-frame-only coverage.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also

@@ -11,15 +11,17 @@ use vk_video::{
 
 use crate::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
-    VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
+    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame,
+    Nv12FramePayload, VideoDecoder, VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions,
+    argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
         Av1DecodeCommandVisit, Av1DecodePrerequisiteProbe,
         build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
         build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
         build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
-        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
-        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
+        decode_av1_bitstream_to_nv12, extract_av1_std_sequence_header,
+        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
+        probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -118,9 +120,7 @@ impl VulkanDecoderAdapter {
             return self.decode_pending_hevc_bitstream(bitstream);
         }
         if matches!(self.config.codec, Codec::Av1) {
-            return Err(BackendError::UnsupportedConfig(
-                av1_decode_blocker_message_with_bitstream(bitstream),
-            ));
+            return self.decode_pending_av1_bitstream(bitstream);
         }
         if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
             return self.decode_pending_h264_metadata(bitstream);
@@ -356,6 +356,42 @@ impl VulkanDecoderAdapter {
             self.next_pts_90k,
             pts_step,
         ))
+    }
+
+    fn decode_pending_av1_bitstream(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
+        let decodes = build_av1_decode_info_skeletons(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode could not build decode-info skeletons: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        if decodes.len() != 1 {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode currently supports exactly one key-frame decode per bitstream, got {}; {}",
+                decodes.len(),
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            )));
+        }
+        let readback = decode_av1_bitstream_to_nv12(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode submit/readback failed: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        let width = usize::try_from(readback.coded_width).map_err(|_| {
+            BackendError::InvalidInput("decoded AV1 width does not fit in usize".to_string())
+        })?;
+        let height = usize::try_from(readback.coded_height).map_err(|_| {
+            BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
+        })?;
+        let mut frame = metadata_only_frame(width, height, Some(self.next_pts_90k));
+        frame.decode_info_flags = Some(if readback.readback_non_zero { 1 } else { 0 });
+        if !matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+            frame.pixel_format = Some(u32::from_le_bytes(*b"NV12"));
+            frame.nv12 = Some(av1_readback_to_nv12_payload(&readback.data, width, height)?);
+            frame.force_keyframe = true;
+        }
+        Ok(vec![frame])
     }
 }
 
@@ -1326,6 +1362,37 @@ fn hevc_probe_readback_to_argb(
     Ok(argb)
 }
 
+fn av1_readback_to_nv12_payload(
+    readback_sample: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Nv12FramePayload, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "Vulkan AV1 non-metadata output currently requires even coded extent, got {}x{}",
+            width, height
+        )));
+    }
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|y| y.checked_add(y / 2))
+        .ok_or_else(|| {
+            BackendError::UnsupportedConfig(
+                "Vulkan AV1 readback size overflow while preparing NV12 payload".to_string(),
+            )
+        })?;
+    if readback_sample.len() < expected_len {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "Vulkan AV1 readback sample too short for NV12 payload: got {}, need at least {expected_len}",
+            readback_sample.len(),
+        )));
+    }
+    Ok(Nv12FramePayload {
+        pitch: width,
+        data: readback_sample[..expected_len].to_vec(),
+    })
+}
+
 fn ensure_hevc_non_metadata_probe_coverage(
     metadata_only: bool,
     total_access_units: usize,
@@ -1748,6 +1815,21 @@ mod tests {
             }
             other => panic!("unexpected error for unsupported readback format: {other:?}"),
         }
+    }
+
+    #[test]
+    fn av1_readback_to_nv12_payload_uses_expected_even_extent_size() {
+        let payload = av1_readback_to_nv12_payload(&[1, 2, 3, 4, 5, 6], 2, 2)
+            .expect("2x2 NV12 readback should map to one payload");
+        assert_eq!(payload.pitch, 2);
+        assert_eq!(payload.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn av1_readback_to_nv12_payload_rejects_odd_extent() {
+        let err = av1_readback_to_nv12_payload(&[0; 16], 3, 2)
+            .expect_err("odd AV1 readback extent should be rejected for facade NV12");
+        assert!(matches!(err, BackendError::UnsupportedConfig(_)));
     }
 
     #[test]

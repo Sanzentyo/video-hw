@@ -183,16 +183,22 @@ Tasks:
    and maps the full planned byte range. The same probe can now accept an
    external AV1 low-overhead OBU stream, and
    `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
-   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback.
-5. Convert NV12 to RGB24 through the existing facade conversion path.
+   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback. The
+   explicit Vulkan backend path now reuses this for one-frame key-frame OBU
+   inputs and returns metadata/NV12/RGB24 through `decode_to_yuv`; PSNR is still
+   low because the AV1 picture info is still mostly key-frame defaults rather
+   than parsed frame-header state.
+5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
+   the one-frame explicit Vulkan AV1 path.
 
 Acceptance:
 
 - `decode_to_yuv --backend vulkan --codec av1 --output-mode metadata` returns
   the expected frame count for generated key-frame-only input.
 - `--output-mode nv12` and `--output-mode rgb24` return non-empty payloads.
-- `scripts/check_av1_psnr.rs` gains a Vulkan backend option and passes decode
-  PSNR against FFmpeg software decode on NVIDIA.
+- `scripts/check_vulkan_av1_psnr.rs` records the current FFmpeg-reference
+  decode PSNR. It intentionally fails at production thresholds until AV1
+  frame-header-derived picture info replaces the current defaults.
 
 ### Phase 5: Integrated Benchmark
 
