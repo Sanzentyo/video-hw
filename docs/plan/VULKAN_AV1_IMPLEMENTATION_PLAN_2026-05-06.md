@@ -244,10 +244,11 @@ Acceptance:
 - `scripts/check_vulkan_av1_psnr.rs --gop-size <N>` now allows the same PSNR
   gate to generate non-keyframe-only GOP input. On the current implementation
   `--gop-size 30` fails at the Vulkan decode stage
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067977096.md`), which is the
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068076063.md`), which is the
   expected failure until AV1 reference-frame replay is implemented. The script
   writes FAIL markdown reports even when decode or PSNR setup fails before
-  per-frame PSNR can be computed.
+  per-frame PSNR can be computed, including the stderr tail that reports the
+  first unsupported `frame_type=1`.
 
 ### Phase 5: Integrated Benchmark
 

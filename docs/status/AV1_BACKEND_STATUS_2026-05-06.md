@@ -301,13 +301,13 @@ Latest Vulkan AV1 scaffold verification:
   (`output/benchmark-backends-av1-1778067552.md`,
   `output/benchmark-vulkan-av1-1778067552.md`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067970112.md`,
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 30`
   intentionally fails on the current keyframe-only implementation
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067977096.md`,
-  `failed_stage=decode Vulkan AV1 to NV12`). This is the active
-  inter-frame/GOP replay gap.
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068076063.md`,
+  `failed_stage=decode Vulkan AV1 to NV12`, stderr includes
+  `frame_type=1`). This is the active inter-frame/GOP replay gap.
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.

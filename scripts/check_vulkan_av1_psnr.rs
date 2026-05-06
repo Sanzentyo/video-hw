@@ -400,11 +400,40 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn run(command: &mut Command, label: &str) -> Result<()> {
-    let status = command.status().with_context(|| format!("spawn {label}"))?;
-    if status.success() {
+    let output = command.output().with_context(|| format!("spawn {label}"))?;
+    print_process_output(&output.stdout);
+    print_process_output(&output.stderr);
+    if output.status.success() {
         Ok(())
     } else {
-        bail!("{label} failed with status {status}")
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{label} failed with status {}; stdout_tail={}; stderr_tail={}",
+            output.status,
+            tail_for_report(&stdout),
+            tail_for_report(&stderr)
+        )
+    }
+}
+
+fn print_process_output(bytes: &[u8]) {
+    if !bytes.is_empty() {
+        print!("{}", String::from_utf8_lossy(bytes));
+    }
+}
+
+fn tail_for_report(text: &str) -> String {
+    let fields = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        "-".to_string()
+    } else {
+        fields.into_iter().rev().collect::<Vec<_>>().join(" / ")
     }
 }
 
