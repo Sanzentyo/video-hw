@@ -2,6 +2,8 @@
 
 `video-hw` の encoder/decoder を使って fragmented MP4 を扱うための crate です。
 
+H.264 (`avc1`), HEVC (`hvc1`), AV1 (`av01`) の video sample entry を扱えます。AV1 は `av1C` に sequence header OBU を保存し、sample payload は `EncodedLayout::Av1` の低オーバーヘッド OBU として保持します。
+
 - Writer は typestate
   - `Fmp4Writer<Ready>`
   - `Fmp4Writer<SyncRecording>`
@@ -109,6 +111,20 @@ fn main() -> Result<()> {
 
 ```bash
 cargo run -p video-hw-fmp4 --example write_synthetic_fmp4 --features backend-vt
+```
+
+AV1 / NVIDIA で書き出す場合:
+
+```bash
+cargo run -p video-hw-fmp4 --features backend-nvidia --example write_synthetic_fmp4 --release -- --codec av1 --frames 30 --width 320 --height 180 --fps 30 --fragment-frames 10 --output output/synthetic-av1-fmp4.mp4 --require-hardware
+ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=codec_name,width,height,nb_read_frames -of default=noprint_wrappers=1 output/synthetic-av1-fmp4.mp4
+```
+
+backend を固定して確認する場合は `--backend nvidia` / `--backend intel` などを指定できます。Intel AV1 の確認例:
+
+```bash
+cargo run -p video-hw-fmp4 --features 'backend-intel async-session' --example write_synthetic_fmp4 --release -- --backend intel --codec av1 --frames 30 --width 320 --height 180 --fps 30 --fragment-frames 10 --output output/synthetic-intel-av1-fmp4.mp4 --require-hardware
+ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=codec_name,codec_tag_string,width,height,nb_read_frames -of default=noprint_wrappers=1 output/synthetic-intel-av1-fmp4.mp4
 ```
 
 - file read

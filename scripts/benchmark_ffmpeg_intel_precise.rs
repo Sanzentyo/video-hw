@@ -17,11 +17,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 enum Codec {
     #[default]
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -29,6 +30,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -36,6 +38,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
+            Self::Av1 => "output/benchmark-intel-av1-decode-input.av1",
         }
     }
 
@@ -44,11 +47,13 @@ impl Codec {
             return match self {
                 Self::H264 => "h264_qsv",
                 Self::Hevc => "hevc_qsv",
+                Self::Av1 => "av1_qsv",
             };
         }
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -57,11 +62,13 @@ impl Codec {
             return match self {
                 Self::H264 => "h264_qsv",
                 Self::Hevc => "hevc_qsv",
+                Self::Av1 => "av1_qsv",
             };
         }
         match self {
             Self::H264 => "libx264",
             Self::Hevc => "libx265",
+            Self::Av1 => "libaom-av1",
         }
     }
 
@@ -69,6 +76,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 }
@@ -457,6 +465,12 @@ fn main() -> Result<()> {
     writeln!(&mut report, "height: {}", args.height)?;
     writeln!(&mut report, "decode_frames: {decode_frames}")?;
     writeln!(&mut report, "decode_loops: {}", args.decode_loops)?;
+    if args.codec == Codec::Av1 {
+        writeln!(
+            &mut report,
+            "decode_loops_effective: 1 (AV1 OBU input is generated, not byte-repeated)"
+        )?;
+    }
     writeln!(&mut report, "decode_output_mode: {}", args.decode_output_mode)?;
     writeln!(&mut report, "encode_frames: {}", args.frame_count)?;
     writeln!(&mut report, "require_hardware: {}", args.require_hardware)?;
@@ -669,6 +683,12 @@ fn percent_delta(video_hw: f64, ffmpeg: f64) -> f64 {
 
 fn prepare_decode_input(codec: Codec, loops: usize, output_dir: &Path) -> Result<PathBuf> {
     let source = PathBuf::from(codec.sample_input());
+    if codec == Codec::Av1 && !source.exists() {
+        generate_av1_decode_input(&source, output_dir)?;
+    }
+    if codec == Codec::Av1 {
+        return Ok(source);
+    }
     if loops <= 1 {
         return Ok(source);
     }
@@ -698,6 +718,39 @@ fn prepare_decode_input(codec: Codec, loops: usize, output_dir: &Path) -> Result
     fs::write(&expanded, repeated)
         .with_context(|| format!("write expanded decode input: {}", expanded.display()))?;
     Ok(expanded)
+}
+
+fn generate_av1_decode_input(path: &Path, output_dir: &Path) -> Result<()> {
+    fs::create_dir_all(output_dir).context("create output directory for AV1 decode input")?;
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30",
+            "-frames:v",
+            "120",
+            "-c:v",
+            "libaom-av1",
+            "-cpu-used",
+            "8",
+            "-f",
+            "obu",
+            &path.to_string_lossy(),
+        ])
+        .status()
+        .with_context(|| format!("spawn ffmpeg to generate {}", path.display()))?;
+    if !status.success() {
+        bail!(
+            "ffmpeg failed to generate AV1 decode input {}: status={status}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn build_examples(profile: &str, raw_input_pix_fmt: RawInputPixFmt) -> Result<()> {

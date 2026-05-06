@@ -17,10 +17,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -28,6 +29,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -35,6 +37,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
+            Self::Av1 => "output/benchmark-nv-av1-decode-input.av1",
         }
     }
 
@@ -42,6 +45,7 @@ impl Codec {
         match self {
             Self::H264 => "h264_cuvid",
             Self::Hevc => "hevc_cuvid",
+            Self::Av1 => "av1_cuvid",
         }
     }
 
@@ -49,6 +53,15 @@ impl Codec {
         match self {
             Self::H264 => "h264_nvenc",
             Self::Hevc => "hevc_nvenc",
+            Self::Av1 => "av1_nvenc",
+        }
+    }
+
+    fn ffmpeg_muxer(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 }
@@ -287,6 +300,7 @@ fn main() -> Result<()> {
     if args.equal_raw_input {
         write_raw_argb_input(&raw_input, args.width, args.height, args.frame_count)?;
     }
+    ensure_decode_input(&args, &output_dir)?;
 
     let cases = [
         Case::VideoHwDecode,
@@ -780,6 +794,8 @@ fn run_case(
                 "cuda",
                 "-c:v",
                 args.codec.ffmpeg_decode_codec(),
+                "-f",
+                args.codec.ffmpeg_muxer(),
                 "-i",
                 args.codec.sample_input(),
                 "-f",
@@ -789,10 +805,7 @@ fn run_case(
             run_timed_command(cmd, true)
         }
         Case::FfmpegEncode => {
-            let muxer = match args.codec {
-                Codec::H264 => "h264",
-                Codec::Hevc => "hevc",
-            };
+            let muxer = args.codec.ffmpeg_muxer();
             let mut cmd = Command::new("ffmpeg");
             if args.equal_raw_input {
                 cmd.args([
@@ -842,6 +855,57 @@ fn run_case(
             run_timed_command(cmd, true)
         }
     }
+}
+
+fn ensure_decode_input(args: &Args, output_dir: &Path) -> Result<()> {
+    let input = PathBuf::from(args.codec.sample_input());
+    if input.exists() {
+        return Ok(());
+    }
+    if args.codec != Codec::Av1 {
+        bail!("decode sample does not exist: {}", input.display());
+    }
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output directory: {}", output_dir.display()))?;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "testsrc2=size={}x{}:rate=30:duration={}",
+            args.width,
+            args.height,
+            (args.frame_count as f64 / 30.0).max(0.001)
+        ),
+        "-frames:v",
+        &args.frame_count.to_string(),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libaom-av1",
+        "-cpu-used",
+        "8",
+        "-row-mt",
+        "1",
+        "-g",
+        "30",
+        "-f",
+        "obu",
+        &input.to_string_lossy(),
+    ]);
+    let output = cmd.output().context("spawn ffmpeg AV1 sample generator")?;
+    if !output.status.success() {
+        bail!(
+            "failed to generate AV1 decode sample: status={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {

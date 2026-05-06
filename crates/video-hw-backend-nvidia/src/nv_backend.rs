@@ -25,8 +25,17 @@ pub struct AnnexBPacker {
 }
 
 impl AnnexBPacker {
-    fn pack<'a>(&'a mut self, access_unit: &AccessUnit) -> &'a [u8] {
+    fn pack<'a>(&'a mut self, codec: Codec, access_unit: &AccessUnit) -> &'a [u8] {
         self.data.clear();
+        if codec == Codec::Av1 {
+            let total_size: usize = access_unit.nalus.iter().map(Vec::len).sum();
+            self.data
+                .reserve(total_size.saturating_sub(self.data.capacity()));
+            for obu in &access_unit.nalus {
+                self.data.extend_from_slice(obu);
+            }
+            return &self.data;
+        }
         let total_size: usize = access_unit
             .nalus
             .iter()
@@ -224,7 +233,7 @@ impl NvDecoderAdapter {
                 self.bump_pts_90k()
             };
             let pack_start = Instant::now();
-            let packed = self.packer.pack(au);
+            let packed = self.packer.pack(self.config.codec, au);
             let pack_elapsed = pack_start.elapsed();
             timing.pack += pack_elapsed;
             pack_samples.push_duration_ms(pack_elapsed);
@@ -314,11 +323,11 @@ impl NvDecoderAdapter {
 
 impl VideoDecoder for NvDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -561,6 +570,7 @@ impl NvEncoderAdapter {
         if let Some(frame_interval_p) = self.frame_interval_p {
             preset_config.presetCfg.frameIntervalP = frame_interval_p;
         }
+        configure_codec_preset(self.codec, &mut preset_config.presetCfg);
         let frame_interval_p = usize::try_from(preset_config.presetCfg.frameIntervalP).unwrap_or(1);
         let lookahead_depth = usize::from(preset_config.presetCfg.rcParams.lookaheadDepth);
         let pool_size = frame_interval_p
@@ -649,11 +659,11 @@ impl NvEncoderAdapter {
 
 impl VideoEncoder for NvEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -1363,6 +1373,7 @@ impl NvEncodeSession {
         if let Some(frame_interval_p) = frame_interval_p {
             preset_config.presetCfg.frameIntervalP = frame_interval_p;
         }
+        configure_codec_preset(codec, &mut preset_config.presetCfg);
 
         let mut init_params =
             EncoderInitParams::new(encode_guid, self.width as u32, self.height as u32);
@@ -1476,6 +1487,7 @@ fn to_decode_codec(codec: Codec) -> DecodeCodec {
     match codec {
         Codec::H264 => DecodeCodec::H264,
         Codec::Hevc => DecodeCodec::H265,
+        Codec::Av1 => DecodeCodec::Av1,
     }
 }
 
@@ -1483,7 +1495,21 @@ fn to_encode_guid(codec: Codec) -> nvidia_video_codec_sdk::sys::nvEncodeAPI::GUI
     match codec {
         Codec::H264 => nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CODEC_H264_GUID,
         Codec::Hevc => nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CODEC_HEVC_GUID,
+        Codec::Av1 => nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CODEC_AV1_GUID,
     }
+}
+
+fn configure_codec_preset(
+    codec: Codec,
+    config: &mut nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CONFIG,
+) {
+    if codec != Codec::Av1 {
+        return;
+    }
+
+    let av1_config = unsafe { &mut config.encodeCodecConfig.av1Config };
+    av1_config.set_disableSeqHdr(0);
+    av1_config.set_repeatSeqHdr(1);
 }
 
 fn map_encode_error(error: nvidia_video_codec_sdk::EncodeError) -> BackendError {

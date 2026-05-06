@@ -21,6 +21,7 @@ use clap::{Parser, ValueEnum};
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -28,6 +29,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -35,6 +37,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
+            Self::Av1 => "sample-videos/sample-10s.av1",
         }
     }
 
@@ -42,6 +45,7 @@ impl Codec {
         match self {
             Self::H264 => "h264_cuvid",
             Self::Hevc => "hevc_cuvid",
+            Self::Av1 => "av1_cuvid",
         }
     }
 
@@ -49,6 +53,7 @@ impl Codec {
         match self {
             Self::H264 => "h264_nvenc",
             Self::Hevc => "hevc_nvenc",
+            Self::Av1 => "av1_nvenc",
         }
     }
 
@@ -56,6 +61,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 }

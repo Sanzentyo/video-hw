@@ -113,6 +113,7 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
+        "av1" => Ok(Codec::Av1),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
 }
@@ -162,5 +163,6 @@ fn default_decode_input(codec: Codec) -> PathBuf {
     match codec {
         Codec::H264 => PathBuf::from("assets/h264_annexb.ts.h264"),
         Codec::Hevc => PathBuf::from("assets/hevc_annexb.ts.h265"),
+        Codec::Av1 => PathBuf::from("assets/av1.ivf"),
     }
 }

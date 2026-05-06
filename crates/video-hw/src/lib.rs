@@ -1675,7 +1675,17 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
+        (BackendKind::Nvidia, Codec::Av1) => EncodedLayout::Av1,
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         (BackendKind::Nvidia, _) => EncodedLayout::AnnexB,
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        (BackendKind::Intel, Codec::Av1) => EncodedLayout::Av1,
         #[cfg(all(
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")

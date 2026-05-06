@@ -118,11 +118,11 @@ impl IntelDecoderAdapter {
 
 impl VideoDecoder for IntelDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -267,11 +267,11 @@ impl IntelEncoderAdapter {
 
 impl VideoEncoder for IntelEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -1811,6 +1811,7 @@ fn to_onevpl_codec(codec: Codec) -> OneVplCodec {
     match codec {
         Codec::H264 => OneVplCodec::AVC,
         Codec::Hevc => OneVplCodec::HEVC,
+        Codec::Av1 => OneVplCodec::AV1,
     }
 }
 
@@ -1837,7 +1838,7 @@ fn parse_rate_control_method(raw: &str) -> Option<RateControlMethod> {
 fn default_rate_control_method(codec: Codec) -> RateControlMethod {
     match codec {
         Codec::H264 => RateControlMethod::CBR,
-        Codec::Hevc => RateControlMethod::CQP,
+        Codec::Hevc | Codec::Av1 => RateControlMethod::CQP,
     }
 }
 

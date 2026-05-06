@@ -52,6 +52,27 @@ impl StatefulBitstreamAssembler {
         pts_90k: Option<i64>,
     ) -> Result<(Vec<AccessUnit>, ParameterSetCache), BackendError> {
         self.codec = Some(codec);
+        if codec == Codec::Av1 {
+            if chunk.is_empty() {
+                return Ok((Vec::new(), self.parameter_sets.clone()));
+            }
+            if pts_90k.is_some() {
+                return Ok((
+                    vec![AccessUnit {
+                        nalus: vec![chunk.to_vec()],
+                        #[cfg(all(
+                            feature = "backend-nvidia",
+                            any(target_os = "linux", target_os = "windows")
+                        ))]
+                        pts_90k,
+                    }],
+                    self.parameter_sets.clone(),
+                ));
+            }
+            self.pending.extend_from_slice(chunk);
+            let access_units = self.take_complete_av1_temporal_units(false, None);
+            return Ok((access_units, self.parameter_sets.clone()));
+        }
         if !chunk.is_empty() {
             self.pending.extend_from_slice(chunk);
         }
@@ -70,6 +91,12 @@ impl StatefulBitstreamAssembler {
         let codec = self
             .codec
             .ok_or_else(|| BackendError::InvalidInput("codec is not set".to_string()))?;
+        if codec == Codec::Av1 {
+            return Ok((
+                self.take_complete_av1_temporal_units(true, None),
+                self.parameter_sets.clone(),
+            ));
+        }
         let nalus = self.take_complete_nals(true);
         let mut access_units = self.process_nals(codec, nalus, None);
         if self.current_has_vcl && !self.current_nalus.is_empty() {
@@ -77,6 +104,46 @@ impl StatefulBitstreamAssembler {
         }
 
         Ok((access_units, self.parameter_sets.clone()))
+    }
+
+    fn take_complete_av1_temporal_units(
+        &mut self,
+        finalize: bool,
+        pts_90k: Option<i64>,
+    ) -> Vec<AccessUnit> {
+        let parsed = parse_av1_low_overhead_obus(&self.pending, finalize);
+        let mut out = Vec::new();
+        let mut current = Vec::new();
+        let mut current_has_frame = false;
+        let mut emitted_end = 0usize;
+
+        for obu in parsed.obus {
+            if obu.obu_type == AV1_OBU_TEMPORAL_DELIMITER && !current.is_empty() {
+                if current_has_frame {
+                    out.push(av1_access_unit(mem::take(&mut current), pts_90k));
+                } else {
+                    current.clear();
+                }
+                emitted_end = obu.start;
+                current_has_frame = false;
+            }
+            current.extend_from_slice(obu.bytes);
+            current_has_frame |= av1_obu_is_frame_payload(obu.obu_type);
+        }
+
+        if finalize {
+            if !current.is_empty() {
+                out.push(av1_access_unit(current, pts_90k));
+            } else if emitted_end == 0 && !self.pending.is_empty() {
+                out.push(av1_access_unit(mem::take(&mut self.pending), pts_90k));
+                return out;
+            }
+            self.pending.clear();
+        } else if emitted_end > 0 {
+            self.pending.drain(..emitted_end);
+        }
+
+        out
     }
 
     fn process_nals(
@@ -232,6 +299,103 @@ impl StatefulBitstreamAssembler {
     }
 }
 
+#[cfg(test)]
+const AV1_OBU_SEQUENCE_HEADER: u8 = 1;
+const AV1_OBU_TEMPORAL_DELIMITER: u8 = 2;
+const AV1_OBU_FRAME_HEADER: u8 = 3;
+const AV1_OBU_TILE_GROUP: u8 = 4;
+const AV1_OBU_FRAME: u8 = 6;
+
+#[derive(Debug)]
+struct Av1Obu<'a> {
+    obu_type: u8,
+    bytes: &'a [u8],
+    start: usize,
+}
+
+#[derive(Debug, Default)]
+struct Av1ParseResult<'a> {
+    obus: Vec<Av1Obu<'a>>,
+}
+
+fn av1_access_unit(data: Vec<u8>, pts_90k: Option<i64>) -> AccessUnit {
+    AccessUnit {
+        nalus: vec![data],
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        pts_90k,
+    }
+}
+
+fn av1_obu_is_frame_payload(obu_type: u8) -> bool {
+    matches!(
+        obu_type,
+        AV1_OBU_FRAME_HEADER | AV1_OBU_TILE_GROUP | AV1_OBU_FRAME
+    )
+}
+
+fn parse_av1_low_overhead_obus(data: &[u8], finalize: bool) -> Av1ParseResult<'_> {
+    let mut offset = 0usize;
+    let mut obus = Vec::new();
+
+    while offset < data.len() {
+        let Some((obu_type, end)) = parse_one_av1_obu(data, offset) else {
+            if finalize {
+                obus.push(Av1Obu {
+                    obu_type: AV1_OBU_FRAME,
+                    bytes: &data[offset..],
+                    start: offset,
+                });
+            }
+            break;
+        };
+        obus.push(Av1Obu {
+            obu_type,
+            bytes: &data[offset..end],
+            start: offset,
+        });
+        offset = end;
+    }
+
+    Av1ParseResult { obus }
+}
+
+fn parse_one_av1_obu(data: &[u8], offset: usize) -> Option<(u8, usize)> {
+    let header = *data.get(offset)?;
+    let obu_type = (header >> 3) & 0x0f;
+    let has_extension = (header & 0x04) != 0;
+    let has_size_field = (header & 0x02) != 0;
+    let mut cursor = offset.checked_add(1)?;
+    if has_extension {
+        cursor = cursor.checked_add(1)?;
+        data.get(cursor - 1)?;
+    }
+    if !has_size_field {
+        return None;
+    }
+    let (payload_size, leb_len) = read_leb128(&data[cursor..])?;
+    cursor = cursor.checked_add(leb_len)?;
+    let payload_size = usize::try_from(payload_size).ok()?;
+    let end = cursor.checked_add(payload_size)?;
+    if end > data.len() {
+        return None;
+    }
+    Some((obu_type, end))
+}
+
+fn read_leb128(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (i, byte) in data.iter().copied().take(8).enumerate() {
+        value |= u64::from(byte & 0x7f) << (i * 7);
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+    }
+    None
+}
+
 impl ParameterSetCache {
     #[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
     pub fn required_for_codec(&self, codec: Codec) -> Option<Vec<Vec<u8>>> {
@@ -242,6 +406,7 @@ impl ParameterSetCache {
                 self.hevc_sps.clone()?,
                 self.hevc_pps.clone()?,
             ]),
+            Codec::Av1 => Some(Vec::new()),
         }
     }
 
@@ -262,6 +427,7 @@ impl ParameterSetCache {
                 34 => self.hevc_pps = Some(nal.to_vec()),
                 _ => {}
             },
+            Codec::Av1 => {}
         }
     }
 }
@@ -297,6 +463,7 @@ fn is_aud(codec: Codec, nal: &[u8]) -> bool {
     match codec {
         Codec::H264 => (nal[0] & 0x1f) == 9,
         Codec::Hevc => ((nal[0] >> 1) & 0x3f) == 35,
+        Codec::Av1 => false,
     }
 }
 
@@ -307,6 +474,7 @@ fn is_vcl(codec: Codec, nal: &[u8]) -> bool {
     match codec {
         Codec::H264 => matches!(nal[0] & 0x1f, 1 | 2 | 3 | 4 | 5 | 19),
         Codec::Hevc => ((nal[0] >> 1) & 0x3f) <= 31,
+        Codec::Av1 => true,
     }
 }
 
@@ -327,6 +495,23 @@ mod tests {
         push_nal(&[0x65, 0x88, 0x84, 0x21]);
         push_nal(&[0x09, 0xF0]);
         push_nal(&[0x41, 0x9A, 0x22, 0x11]);
+
+        out
+    }
+
+    fn av1_sample_obu_stream() -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut push_obu = |obu_type: u8, payload: &[u8]| {
+            out.push((obu_type << 3) | 0x02);
+            out.push(payload.len() as u8);
+            out.extend_from_slice(payload);
+        };
+
+        push_obu(AV1_OBU_TEMPORAL_DELIMITER, &[]);
+        push_obu(AV1_OBU_SEQUENCE_HEADER, &[0x01, 0x02, 0x03]);
+        push_obu(AV1_OBU_FRAME, &[0x10, 0x11]);
+        push_obu(AV1_OBU_TEMPORAL_DELIMITER, &[]);
+        push_obu(AV1_OBU_FRAME, &[0x20, 0x21]);
 
         out
     }
@@ -364,6 +549,43 @@ mod tests {
 
         let params = cache.required_for_codec(Codec::H264).unwrap();
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn av1_low_overhead_obu_stream_splits_temporal_units() {
+        let data = av1_sample_obu_stream();
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::Av1);
+        let mut emitted = Vec::new();
+
+        for chunk in data.chunks(2) {
+            let (aus, _) = assembler.push_chunk(chunk, Codec::Av1, None).unwrap();
+            emitted.extend(aus);
+        }
+        let (flush_aus, _) = assembler.flush().unwrap();
+        emitted.extend(flush_aus);
+
+        assert_eq!(emitted.len(), 2);
+        assert!(emitted[0].nalus[0].starts_with(&[(AV1_OBU_TEMPORAL_DELIMITER << 3) | 0x02]));
+        assert!(emitted[0].nalus[0].contains(&((AV1_OBU_SEQUENCE_HEADER << 3) | 0x02)));
+        assert!(emitted[1].nalus[0].starts_with(&[(AV1_OBU_TEMPORAL_DELIMITER << 3) | 0x02]));
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    #[test]
+    fn av1_timestamped_chunk_stays_single_access_unit() {
+        let data = av1_sample_obu_stream();
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::Av1);
+
+        let (aus, _) = assembler
+            .push_chunk(&data, Codec::Av1, Some(9_000))
+            .unwrap();
+
+        assert_eq!(aus.len(), 1);
+        assert_eq!(aus[0].nalus[0], data);
+        assert_eq!(aus[0].pts_90k, Some(9_000));
     }
 
     #[cfg(all(

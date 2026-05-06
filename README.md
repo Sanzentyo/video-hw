@@ -87,9 +87,17 @@ $env:NVIDIA_VIDEO_CODEC_SDK_PATH = "C:\Path\To\Video_Codec_SDK\Lib\x64"
 
 `backend-intel` は Intel oneVPL を Rust から扱う `onevpl-rs` を利用します（`intel-onevpl-sys` 経由で oneVPL 公式ヘッダにバインド）。  
 依存宣言は `https://github.com/Sanzentyo/onevpl-rs` を参照し、`rev` 固定で利用しています。  
-現状は H.264 / HEVC の encode/decode をサポートします。`require_hardware=false` は「HW優先で初期化し、失敗時にSWへフォールバック」です。  
+現状は H.264 / HEVC / AV1 の encode/decode をサポートします。`require_hardware=false` は「HW優先で初期化し、失敗時にSWへフォールバック」です。
 SW を明示的に使う場合は `IntelDecoderOptions::force_software=true` / `IntelEncoderOptions::force_software=true`（CLI では `--intel-force-software`）を利用してください。`IntelEncoderOptions::hevc_use_vpp` を `Some(true)` にすると、HEVC encode で VPP 経路（BGRA/YV12 -> NV12）を明示選択できます。  
-Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きできます。未指定時は H.264=CBR、HEVC=CQP を使います（CQP 値は `VIDEO_HW_INTEL_CQP`, default=24）。encode async depth は `VIDEO_HW_INTEL_ASYNC_DEPTH`（1..=16, default=10）で調整できます。HEVC hardware encode は既定で CPU 側 ARGB→NV12 変換 + `IN_SYSTEM_MEMORY` 投入を優先し、旧来の VPP 経路を強制したい場合は `VIDEO_HW_INTEL_HEVC_USE_VPP=1`、low-power を無効化したい場合は `VIDEO_HW_INTEL_HEVC_LOW_POWER=0` を設定してください。HEVC parity を厳密比較する場合は `--equal-raw-input true --raw-input-pix-fmt nv12` を推奨します（ARGB 入力は環境依存の揺らぎで ±10% を外れることがあります）。
+Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|avbr|icq|qvbr`）で上書きできます。未指定時は H.264=CBR、HEVC/AV1=CQP を使います（CQP 値は `VIDEO_HW_INTEL_CQP`, default=24）。encode async depth は `VIDEO_HW_INTEL_ASYNC_DEPTH`（1..=16, default=10）で調整できます。HEVC hardware encode は既定で CPU 側 ARGB→NV12 変換 + `IN_SYSTEM_MEMORY` 投入を優先し、旧来の VPP 経路を強制したい場合は `VIDEO_HW_INTEL_HEVC_USE_VPP=1`、low-power を無効化したい場合は `VIDEO_HW_INTEL_HEVC_LOW_POWER=0` を設定してください。HEVC parity を厳密比較する場合は `--equal-raw-input true --raw-input-pix-fmt nv12` を推奨します（ARGB 入力は環境依存の揺らぎで ±10% を外れることがあります）。
+
+## AV1 対応
+
+- `Codec::Av1` は NVIDIA NVENC/NVDEC と Intel oneVPL の codec mapping に対応しています。
+- NVIDIA の AV1 elementary stream は FFmpeg の `obu` demuxer と同じ低オーバーヘッド OBU として扱います。確認例: `ffprobe -f obu output/nv-av1-smoke-repeat.av1`。
+- `video-hw-fmp4` は `av01` sample entry / `av1C` box を生成・読取できます。AV1 fMP4 の sample payload は `EncodedLayout::Av1` として扱い、reader の `to_annexb()` は互換上の名前のまま OBU payload を返します。
+- NVIDIA parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv --codec av1 --release true` で実行できます。320x180/30 frames の確認では `video-hw decode 0.118-0.120s`、`ffmpeg decode 0.131-0.133s`、`video-hw encode 0.148-0.162s`、`ffmpeg encode 0.164-0.174s` で parity PASS でした。
+- Intel oneVPL parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends intel --codec av1 --release true` で実行できます。320x180/30 encode frames / 640x360/120 decode frames の確認では `video-hw decode 0.406s`、`ffmpeg decode 0.392s`、`video-hw encode 0.425s`、`ffmpeg encode 0.429s` で parity PASS でした。AV1 OBU decode input は H.264/HEVC のように byte-repeat せず、生成済み elementary stream をそのまま使います。
 
 #### onevpl fork 更新時の手順
 

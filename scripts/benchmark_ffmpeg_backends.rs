@@ -49,6 +49,7 @@ impl Backend {
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -56,6 +57,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -63,6 +65,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 
@@ -70,6 +73,7 @@ impl Codec {
         match self {
             Self::H264 => "libx264",
             Self::Hevc => "libx265",
+            Self::Av1 => "libaom-av1",
         }
     }
 
@@ -77,6 +81,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "h265",
+            Self::Av1 => "av1",
         }
     }
 }
@@ -867,6 +872,9 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
                 "log-level=error:keyint=30:min-keyint=30:bframes=0",
             ]);
         }
+        Codec::Av1 => {
+            command.args(["-cpu-used", "8", "-row-mt", "1", "-g", "30"]);
+        }
     }
     command.args([
         "-f",
@@ -1082,6 +1090,7 @@ fn ffmpeg_vulkan_encode_command(args: &Args, adapter_index: usize, null_sink: &P
         match args.codec {
             Codec::H264 => "h264_vulkan",
             Codec::Hevc => "hevc_vulkan",
+            Codec::Av1 => "av1_vulkan",
         },
         "-f",
         args.codec.ffmpeg_demuxer(),

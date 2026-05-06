@@ -221,6 +221,7 @@ impl ParameterSetCache {
                 self.hevc_sps.clone()?,
                 self.hevc_pps.clone()?,
             ]),
+            Codec::Av1 => Some(Vec::new()),
         }
     }
 
@@ -241,6 +242,7 @@ impl ParameterSetCache {
                 34 => self.hevc_pps = Some(nal.to_vec()),
                 _ => {}
             },
+            Codec::Av1 => {}
         }
     }
 }
@@ -276,6 +278,7 @@ fn is_aud(codec: Codec, nal: &[u8]) -> bool {
     match codec {
         Codec::H264 => (nal[0] & 0x1f) == 9,
         Codec::Hevc => ((nal[0] >> 1) & 0x3f) == 35,
+        Codec::Av1 => false,
     }
 }
 
@@ -286,6 +289,7 @@ fn is_vcl(codec: Codec, nal: &[u8]) -> bool {
     match codec {
         Codec::H264 => matches!(nal[0] & 0x1f, 1 | 2 | 3 | 4 | 5 | 19),
         Codec::Hevc => ((nal[0] >> 1) & 0x3f) <= 31,
+        Codec::Av1 => true,
     }
 }
 

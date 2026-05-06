@@ -593,6 +593,9 @@ fn ensure_vk_codec_supported(codec: Codec, operation: &str) -> Result<(), Backen
             };
             Err(BackendError::UnsupportedConfig(message))
         }
+        Codec::Av1 => Err(BackendError::UnsupportedConfig(format!(
+            "Vulkan AV1 {operation} is not implemented in video-hw yet"
+        ))),
     }
 }
 

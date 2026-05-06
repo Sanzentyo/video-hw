@@ -29,8 +29,8 @@ use core_media::{
     format_description::{
         CMFormatDescription, CMFormatDescriptionRef, CMVideoCodecType, CMVideoFormatDescription,
         CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMVideoCodecType_H264,
-        kCMVideoCodecType_HEVC,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMVideoCodecType_AV1,
+        kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
     },
     sample_buffer::{
         CMSampleBuffer, CMSampleBufferGetFormatDescription, CMSampleBufferRef, CMSampleTimingInfo,
@@ -1084,6 +1084,7 @@ fn to_cm_codec_type(codec: Codec) -> CMVideoCodecType {
     match codec {
         Codec::H264 => kCMVideoCodecType_H264,
         Codec::Hevc => kCMVideoCodecType_HEVC,
+        Codec::Av1 => kCMVideoCodecType_AV1,
     }
 }
 
@@ -1091,6 +1092,7 @@ fn codec_label(codec: Codec) -> &'static str {
     match codec {
         Codec::H264 => "h264",
         Codec::Hevc => "hevc",
+        Codec::Av1 => "av1",
     }
 }
 
@@ -1114,6 +1116,9 @@ fn create_format_description(
                     cm_error("CMVideoFormatDescription::from_hevc_parameter_sets", status)
                 })
         }
+        Codec::Av1 => Err(BackendError::UnsupportedConfig(
+            "VideoToolbox AV1 parameter-set format description is not implemented".to_string(),
+        )),
     }
 }
 
@@ -1344,6 +1349,7 @@ fn detect_keyframe_from_avcc_hvcc_payload(codec: Codec, payload: &[u8]) -> Optio
                     saw_slice = true;
                 }
             }
+            Codec::Av1 => return None,
         }
     }
 
@@ -1362,6 +1368,7 @@ fn parameter_sets_from_sample_buffer_ref(
     match codec {
         Codec::H264 => h264_parameter_sets(format_description_ref),
         Codec::Hevc => hevc_parameter_sets(format_description_ref),
+        Codec::Av1 => None,
     }
 }
 

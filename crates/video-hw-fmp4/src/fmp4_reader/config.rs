@@ -269,6 +269,7 @@ impl EncodedSample {
 
     pub fn to_annexb(&self) -> anyhow::Result<Vec<u8>> {
         match self.encoded_layout() {
+            Some(EncodedLayout::Av1) => Ok(self.data.clone()),
             Some(EncodedLayout::Avcc) | Some(EncodedLayout::Hvcc) => {
                 let nal_length_size = sample_entry_nal_length_size(self.sample_entry.as_ref())?;
                 let mut annexb = Vec::new();
@@ -346,6 +347,7 @@ pub(crate) fn sample_entry_codec(sample_entry: Option<&SampleEntry>) -> Option<C
     match sample_entry? {
         SampleEntry::Avc1(_) => Some(Codec::H264),
         SampleEntry::Hev1(_) | SampleEntry::Hvc1(_) => Some(Codec::Hevc),
+        SampleEntry::Av01(_) => Some(Codec::Av1),
         _ => None,
     }
 }
@@ -354,6 +356,7 @@ pub(crate) fn sample_entry_layout(sample_entry: Option<&SampleEntry>) -> Option<
     match sample_entry? {
         SampleEntry::Avc1(_) => Some(EncodedLayout::Avcc),
         SampleEntry::Hev1(_) | SampleEntry::Hvc1(_) => Some(EncodedLayout::Hvcc),
+        SampleEntry::Av01(_) => Some(EncodedLayout::Av1),
         _ => None,
     }
 }
@@ -379,6 +382,7 @@ pub(crate) fn sample_entry_parameter_sets(sample_entry: Option<&SampleEntry>) ->
             .iter()
             .flat_map(|array| array.nalus.iter().cloned())
             .collect(),
+        Some(SampleEntry::Av01(av01)) => vec![av01.av1c_box.config_obus.clone()],
         _ => Vec::new(),
     }
 }
@@ -445,7 +449,10 @@ mod tests {
     use super::*;
     use shiguredo_mp4::{
         Uint,
-        boxes::{Avc1Box, AvccBox, Hvc1Box, HvccBox, HvccNalUintArray, VisualSampleEntryFields},
+        boxes::{
+            Av01Box, Av1cBox, Avc1Box, AvccBox, Hvc1Box, HvccBox, HvccNalUintArray,
+            VisualSampleEntryFields,
+        },
     };
 
     #[test]
@@ -552,6 +559,32 @@ mod tests {
             data: vec![0, 0, 2, 0x26, 0x01],
         };
         assert!(invalid.to_annexb().is_err());
+    }
+
+    #[test]
+    fn av1_helpers_detect_codec_layout_and_obu_payload() {
+        let sample_entry = av1_sample_entry();
+        let data = vec![0x12, 0x00, 0x32, 0x01, 0x80];
+        let sample = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(sample_entry.clone()),
+            data: data.clone(),
+        };
+        assert_eq!(sample.codec(), Some(Codec::Av1));
+        assert_eq!(sample.encoded_layout(), Some(EncodedLayout::Av1));
+        assert_eq!(sample.to_annexb().expect("obu passthrough"), data);
+        assert_eq!(sample.parameter_sets().len(), 1);
+        let track = Fmp4Track {
+            track_id: TrackId(1),
+            kind: TrackKind::Video,
+            duration: 0,
+            timescale: NonZeroU32::new(90_000).expect("non-zero timescale"),
+            sample_entry: Some(sample_entry),
+        };
+        assert_eq!(track.codec(), Some(Codec::Av1));
+        assert_eq!(track.encoded_layout(), Some(EncodedLayout::Av1));
+        assert_eq!(track.parameter_sets().len(), 1);
     }
 
     #[cfg(feature = "serde")]
@@ -699,6 +732,35 @@ mod tests {
                         nalus: vec![vec![0x44, 0x01]],
                     },
                 ],
+            },
+            unknown_boxes: vec![],
+        })
+    }
+
+    fn av1_sample_entry() -> SampleEntry {
+        SampleEntry::Av01(Av01Box {
+            visual: VisualSampleEntryFields {
+                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+                width: 640,
+                height: 360,
+                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+            },
+            av1c_box: Av1cBox {
+                seq_profile: Uint::new(0),
+                seq_level_idx_0: Uint::new(31),
+                seq_tier_0: Uint::new(0),
+                high_bitdepth: Uint::new(0),
+                twelve_bit: Uint::new(0),
+                monochrome: Uint::new(0),
+                chroma_subsampling_x: Uint::new(1),
+                chroma_subsampling_y: Uint::new(1),
+                chroma_sample_position: Uint::new(0),
+                initial_presentation_delay_minus_one: None,
+                config_obus: vec![0x0a, 0x01, 0x00],
             },
             unknown_boxes: vec![],
         })

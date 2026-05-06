@@ -6,6 +6,7 @@ use std::{fmt, fmt::Display};
 pub enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Display for Codec {
@@ -13,6 +14,7 @@ impl Display for Codec {
         match self {
             Self::H264 => f.write_str("h264"),
             Self::Hevc => f.write_str("hevc"),
+            Self::Av1 => f.write_str("av1"),
         }
     }
 }
@@ -82,6 +84,7 @@ pub enum EncodedLayout {
     AnnexB,
     Avcc,
     Hvcc,
+    Av1,
     Opaque,
 }
 
@@ -91,6 +94,7 @@ impl Display for EncodedLayout {
             Self::AnnexB => f.write_str("annexb"),
             Self::Avcc => f.write_str("avcc"),
             Self::Hvcc => f.write_str("hvcc"),
+            Self::Av1 => f.write_str("av1"),
             Self::Opaque => f.write_str("opaque"),
         }
     }

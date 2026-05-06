@@ -11,8 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use shiguredo_mp4::{
     Decode, Encode, Mp4FileTime, TrackKind, Uint,
     boxes::{
-        Avc1Box, AvccBox, FtypBox, Hvc1Box, HvccBox, HvccNalUintArray, MoovBox, SampleEntry,
-        VisualSampleEntryFields,
+        Av01Box, Av1cBox, Avc1Box, AvccBox, FtypBox, Hvc1Box, HvccBox, HvccNalUintArray, MoovBox,
+        SampleEntry, VisualSampleEntryFields,
     },
     mux::{Fmp4SegmentMuxer, Sample, SegmentMuxerOptions},
 };
@@ -303,6 +303,8 @@ struct RecorderState {
     vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
+    av1_sequence_header: Option<Vec<u8>>,
+    av1_config: Option<Av1ConfigSummary>,
     sample_entry: Option<SampleEntry>,
     sample_entry_emitted: bool,
     init_written: bool,
@@ -370,6 +372,8 @@ impl RecorderState {
             vps: None,
             sps: None,
             pps: None,
+            av1_sequence_header: None,
+            av1_config: None,
             sample_entry: None,
             sample_entry_emitted: false,
             init_written: false,
@@ -494,6 +498,11 @@ impl RecorderState {
             (Codec::Hevc, EncodedLayout::Hvcc) => {
                 hvcc_chunk_to_hvcc_sample(&chunk.data, &mut self.vps, &mut self.sps, &mut self.pps)?
             }
+            (Codec::Av1, EncodedLayout::Av1) => av1_chunk_to_av1_sample(
+                &chunk.data,
+                &mut self.av1_sequence_header,
+                &mut self.av1_config,
+            )?,
             (_, layout) => {
                 bail!(
                     "unsupported encoded layout for fMP4 writer: {} (codec={})",
@@ -541,6 +550,19 @@ impl RecorderState {
                     vps,
                     sps,
                     pps,
+                ))
+            }
+            Codec::Av1 => {
+                let (Some(sequence_header), Some(config)) =
+                    (&self.av1_sequence_header, &self.av1_config)
+                else {
+                    return;
+                };
+                Some(create_av1_sample_entry(
+                    self.width_u16,
+                    self.height_u16,
+                    sequence_header,
+                    *config,
                 ))
             }
         };
@@ -779,6 +801,10 @@ impl BackendEncoderSession {
             BackendKind::VideoToolbox => Self::VideoToolbox(Box::new(video_hw::EncodeSession::<
                 VtEncoderAdapter,
             >::new(config))),
+            #[allow(unreachable_patterns)]
+            other => {
+                bail!("encoder backend {other} is not compiled into video-hw-fmp4")
+            }
         };
         Ok(session)
     }
@@ -1006,6 +1032,69 @@ fn create_hevc_sample_entry(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Av1ConfigSummary {
+    seq_profile: u8,
+    seq_level_idx_0: u8,
+    seq_tier_0: u8,
+    high_bitdepth: u8,
+    twelve_bit: u8,
+    monochrome: u8,
+    chroma_subsampling_x: u8,
+    chroma_subsampling_y: u8,
+    chroma_sample_position: u8,
+}
+
+impl Default for Av1ConfigSummary {
+    fn default() -> Self {
+        Self {
+            seq_profile: 0,
+            seq_level_idx_0: 31,
+            seq_tier_0: 0,
+            high_bitdepth: 0,
+            twelve_bit: 0,
+            monochrome: 0,
+            chroma_subsampling_x: 1,
+            chroma_subsampling_y: 1,
+            chroma_sample_position: 0,
+        }
+    }
+}
+
+fn create_av1_sample_entry(
+    width: u16,
+    height: u16,
+    sequence_header: &[u8],
+    config: Av1ConfigSummary,
+) -> SampleEntry {
+    SampleEntry::Av01(Av01Box {
+        visual: VisualSampleEntryFields {
+            data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+            width,
+            height,
+            horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+            vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+            frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+            compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+            depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+        },
+        av1c_box: Av1cBox {
+            seq_profile: Uint::new(config.seq_profile),
+            seq_level_idx_0: Uint::new(config.seq_level_idx_0),
+            seq_tier_0: Uint::new(config.seq_tier_0),
+            high_bitdepth: Uint::new(config.high_bitdepth),
+            twelve_bit: Uint::new(config.twelve_bit),
+            monochrome: Uint::new(config.monochrome),
+            chroma_subsampling_x: Uint::new(config.chroma_subsampling_x),
+            chroma_subsampling_y: Uint::new(config.chroma_subsampling_y),
+            chroma_sample_position: Uint::new(config.chroma_sample_position),
+            initial_presentation_delay_minus_one: None,
+            config_obus: sequence_header.to_vec(),
+        },
+        unknown_boxes: vec![],
+    })
+}
+
 fn annexb_chunk_to_avcc_sample(
     annexb: &[u8],
     sps_out: &mut Option<Vec<u8>>,
@@ -1098,6 +1187,23 @@ fn hvcc_chunk_to_hvcc_sample(
     repack_length_prefixed_nalus(&sample_nalus).map(Some)
 }
 
+fn av1_chunk_to_av1_sample(
+    data: &[u8],
+    sequence_header_out: &mut Option<Vec<u8>>,
+    config_out: &mut Option<Av1ConfigSummary>,
+) -> Result<Option<Vec<u8>>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+    if sequence_header_out.is_none()
+        && let Some((obu, payload)) = find_av1_sequence_header_obu(data)
+    {
+        *sequence_header_out = Some(obu.to_vec());
+        *config_out = Some(parse_av1_sequence_header(payload).unwrap_or_default());
+    }
+    Ok(Some(data.to_vec()))
+}
+
 fn split_annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
     let mut nalus = Vec::new();
     let mut cursor = 0usize;
@@ -1169,6 +1275,152 @@ fn h264_nal_type(nalu: &[u8]) -> u8 {
 }
 fn hevc_nal_type(nalu: &[u8]) -> u8 {
     (nalu[0] >> 1) & 0x3f
+}
+
+fn find_av1_sequence_header_obu(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let (obu_type, payload_start, end) = parse_av1_obu_bounds(data, offset)?;
+        if obu_type == 1 {
+            return Some((&data[offset..end], &data[payload_start..end]));
+        }
+        offset = end;
+    }
+    None
+}
+
+fn parse_av1_obu_bounds(data: &[u8], offset: usize) -> Option<(u8, usize, usize)> {
+    let header = *data.get(offset)?;
+    let obu_type = (header >> 3) & 0x0f;
+    let has_extension = (header & 0x04) != 0;
+    let has_size_field = (header & 0x02) != 0;
+    let mut cursor = offset.checked_add(1)?;
+    if has_extension {
+        cursor = cursor.checked_add(1)?;
+        data.get(cursor - 1)?;
+    }
+    if !has_size_field {
+        return None;
+    }
+    let (payload_size, leb_len) = read_av1_leb128(&data[cursor..])?;
+    cursor = cursor.checked_add(leb_len)?;
+    let payload_start = cursor;
+    let payload_size = usize::try_from(payload_size).ok()?;
+    let end = cursor.checked_add(payload_size)?;
+    if end > data.len() {
+        return None;
+    }
+    Some((obu_type, payload_start, end))
+}
+
+fn read_av1_leb128(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (i, byte) in data.iter().copied().take(8).enumerate() {
+        value |= u64::from(byte & 0x7f) << (i * 7);
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+    }
+    None
+}
+
+fn parse_av1_sequence_header(payload: &[u8]) -> Option<Av1ConfigSummary> {
+    let mut bits = BitReader::new(payload);
+    let seq_profile = bits.read_bits(3)? as u8;
+    let _still_picture = bits.read_bits(1)?;
+    let reduced_still_picture_header = bits.read_bits(1)? != 0;
+    let mut seq_level_idx_0 = 31;
+    let mut seq_tier_0 = 0;
+    if reduced_still_picture_header {
+        seq_level_idx_0 = bits.read_bits(5)? as u8;
+    } else {
+        let timing_info_present_flag = bits.read_bits(1)? != 0;
+        if timing_info_present_flag {
+            let _num_units_in_display_tick = bits.read_bits(32)?;
+            let _time_scale = bits.read_bits(32)?;
+            let equal_picture_interval = bits.read_bits(1)? != 0;
+            if equal_picture_interval {
+                let _num_ticks_per_picture_minus_1 = bits.read_uvlc()?;
+            }
+            let decoder_model_info_present_flag = bits.read_bits(1)? != 0;
+            if decoder_model_info_present_flag {
+                let buffer_delay_length_minus_1 = bits.read_bits(5)?;
+                let _num_units_in_decoding_tick = bits.read_bits(32)?;
+                let _buffer_removal_time_length_minus_1 = bits.read_bits(5)?;
+                let _frame_presentation_time_length_minus_1 = bits.read_bits(5)?;
+                let _ = buffer_delay_length_minus_1;
+            }
+        }
+        let initial_display_delay_present_flag = bits.read_bits(1)? != 0;
+        let operating_points_cnt_minus_1 = bits.read_bits(5)?;
+        for operating_point in 0..=operating_points_cnt_minus_1 {
+            let _operating_point_idc = bits.read_bits(12)?;
+            let seq_level_idx = bits.read_bits(5)? as u8;
+            let seq_tier = if seq_level_idx > 7 {
+                bits.read_bits(1)? as u8
+            } else {
+                0
+            };
+            if initial_display_delay_present_flag {
+                let initial_display_delay_present_for_this_op = bits.read_bits(1)? != 0;
+                if initial_display_delay_present_for_this_op {
+                    let _initial_display_delay_minus_1 = bits.read_bits(4)?;
+                }
+            }
+            if operating_point == 0 {
+                seq_level_idx_0 = seq_level_idx;
+                seq_tier_0 = seq_tier;
+            }
+        }
+    }
+
+    Some(Av1ConfigSummary {
+        seq_profile,
+        seq_level_idx_0,
+        seq_tier_0,
+        ..Av1ConfigSummary::default()
+    })
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u64> {
+        let mut value = 0u64;
+        for _ in 0..count {
+            let byte = *self.data.get(self.bit_offset / 8)?;
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            value = (value << 1) | u64::from(bit);
+            self.bit_offset = self.bit_offset.checked_add(1)?;
+        }
+        Some(value)
+    }
+
+    fn read_uvlc(&mut self) -> Option<u64> {
+        let mut leading_zeroes = 0usize;
+        while self.read_bits(1)? == 0 {
+            leading_zeroes = leading_zeroes.checked_add(1)?;
+        }
+        if leading_zeroes >= 63 {
+            return None;
+        }
+        let suffix = if leading_zeroes == 0 {
+            0
+        } else {
+            self.read_bits(leading_zeroes)?
+        };
+        Some((1u64 << leading_zeroes) - 1 + suffix)
+    }
 }
 
 fn patch_fmp4_init_segment_timing(
