@@ -19,6 +19,13 @@ override this:
 cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs --features "backend-nvidia backend-intel backend-vulkan" -- --backend nvidia --require-hardware
 ```
 
+For generated AV1 fMP4 input, the wrapper can first run
+`write_synthetic_fmp4` and then pass the generated file to the benchmark:
+
+```sh
+cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs --features "backend-nvidia backend-intel backend-vulkan" --generate-codec av1 --generate-backend nvidia --generate-width 320 --generate-height 180 --generate-frames 90 --generate-fragment-frames 30 --generate-require-hardware -- --backend nvidia --require-hardware --frame-count 90
+```
+
 The report is written to:
 
 ```text
@@ -124,3 +131,9 @@ min PSNR in addition to cache behavior.
   no-cache reverse cost at 31.230 s. A 90-frame Intel AV1 run exceeded the
   240-second local timeout, so larger Intel runs should be treated as a stress
   case rather than a default smoke.
+- Wrapper generation smoke:
+  `output/benchmark-fmp4-decode-access-1778070314.md`.
+  The one-command `--generate-codec av1 --generate-backend nvidia` path produced
+  an 8-frame 320x180 AV1 fMP4 and completed all access cases with min PSNR
+  46.045 dB. A 160x90 AV1 smoke generated successfully but failed NVDEC submit
+  with `CUDA_ERROR_UNKNOWN`, so 320x180 remains the documented smoke size.

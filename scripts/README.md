@@ -253,8 +253,15 @@ cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs -- --input sampl
 - `decode_range_iter`、単発 `decode_sample`、`CachedFrameDecoder` を同じ入力で比較する。
 - 逆順 cold access と prefetch 方向差（`reverse_before` / `reverse_after`）も同じレポートで比較する。
 - FFmpeg RGB24 reference に対する max MSE / min PSNR も同じレポートへ記録する。
+- `--generate-codec av1 --generate-backend <backend>` を付けると、先に
+  `write_synthetic_fmp4` で synthetic AV1 fMP4 を生成し、その入力を同じ
+  benchmark に渡す。
 - Windows/Linux の既定 features は `backend-nvidia backend-intel backend-vulkan`、macOS は `backend-vt`。
 - 詳細は `docs/benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md` を参照。
+
+```bash
+cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs --features "backend-nvidia backend-intel backend-vulkan" --generate-codec av1 --generate-backend nvidia --generate-width 320 --generate-height 180 --generate-frames 90 --generate-fragment-frames 30 --generate-require-hardware -- --backend nvidia --require-hardware --frame-count 90
+```
 
 ## 前提
 

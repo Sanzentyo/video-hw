@@ -52,6 +52,10 @@ or better.
     no-cache 31.215s, cached reverse-before 6.879s, cached reverse-after
     31.230s, min PSNR 46.064 dB. The 90-frame Intel run exceeded the local
     240-second timeout.
+  - Wrapper generation smoke `output/benchmark-fmp4-decode-access-1778070314.md`:
+    `scripts/benchmark_fmp4_decode_access.rs --generate-codec av1
+    --generate-backend nvidia` generated an 8-frame 320x180 AV1 fMP4 and ran all
+    access cases with min PSNR 46.045 dB.
 - Vulkan AV1 integrated benchmark:
   - `output/benchmark-backends-av1-1778068460.md`
   - detail: `output/benchmark-vulkan-av1-1778068460.md`
