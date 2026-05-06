@@ -125,7 +125,9 @@ Tasks:
    callback-scoped `VideoDecodeInfoKHR` chains for all frames in command order
    before real command recording consumes them. A command-sequence visitor now
    materializes begin-coding, RESET, per-frame decode, and end-coding data in the
-   order the future recorder will issue Vulkan calls.
+   order the future recorder will issue Vulkan calls; a result-returning record
+   callback wrapper now provides the insertion point for the actual unsafe ash
+   command calls.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

@@ -867,14 +867,34 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         },
                                     )
                                     .is_ok();
+                                let record_summary = upload_plan
+                                    .record_decode_command_sequence(
+                                        &aligned_command,
+                                        vk::VideoSessionKHR::null(),
+                                        vk::VideoSessionParametersKHR::null(),
+                                        vk::Buffer::null(),
+                                        vk::ImageView::null(),
+                                        |_visit| Ok(()),
+                                    )
+                                    .ok();
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, record_summary={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
                                     submit_bundles.len(),
                                     first_decode_info_ready,
                                     decode_info_loop_count,
                                     sequence_ready,
+                                    record_summary
+                                        .as_ref()
+                                        .map(|summary| format!(
+                                            "{}/{}/{}/{}",
+                                            summary.begin_count,
+                                            summary.reset_count,
+                                            summary.decode_count,
+                                            summary.end_count
+                                        ))
+                                        .unwrap_or_else(|| "unavailable".to_string()),
                                     sequence_visits,
                                     sequence_decodes,
                                     sequence_begin_refs,
@@ -1616,6 +1636,7 @@ mod tests {
         assert!(message.contains("first_decode_info=true"));
         assert!(message.contains("decode_info_loop=1"));
         assert!(message.contains("command_sequence=true"));
+        assert!(message.contains("record_summary=1/1/1/1"));
     }
 
     #[test]

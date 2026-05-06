@@ -304,6 +304,43 @@ impl Av1DecodeBitstreamUploadPlan {
 
         Ok(())
     }
+
+    pub(crate) fn record_decode_command_sequence(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+        video_session: vk::VideoSessionKHR,
+        video_session_parameters: vk::VideoSessionParametersKHR,
+        src_buffer: vk::Buffer,
+        image_view: vk::ImageView,
+        mut recorder: impl FnMut(Av1DecodeCommandVisit<'_>) -> Result<(), String>,
+    ) -> Result<Av1DecodeCommandRecordSummary, String> {
+        let mut summary = Av1DecodeCommandRecordSummary::default();
+        self.visit_decode_command_sequence(
+            command,
+            video_session,
+            video_session_parameters,
+            src_buffer,
+            image_view,
+            |visit| {
+                match &visit {
+                    Av1DecodeCommandVisit::BeginCoding(_) => summary.begin_count += 1,
+                    Av1DecodeCommandVisit::ResetCoding(_) => summary.reset_count += 1,
+                    Av1DecodeCommandVisit::DecodeFrame { .. } => summary.decode_count += 1,
+                    Av1DecodeCommandVisit::EndCoding(_) => summary.end_count += 1,
+                }
+                if summary.first_error.is_none()
+                    && let Err(err) = recorder(visit)
+                {
+                    summary.first_error = Some(err);
+                }
+            },
+        )?;
+
+        if let Some(err) = summary.first_error.take() {
+            return Err(err);
+        }
+        Ok(summary)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +393,15 @@ pub(crate) enum Av1DecodeCommandVisit<'a> {
         bundle: &'a Av1DecodeFrameSubmitBundle,
     },
     EndCoding(&'a vk::VideoEndCodingInfoKHR<'a>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Av1DecodeCommandRecordSummary {
+    pub begin_count: usize,
+    pub reset_count: usize,
+    pub decode_count: usize,
+    pub end_count: usize,
+    first_error: Option<String>,
 }
 
 impl Av1DecodeCommandSkeleton {
@@ -3132,6 +3178,37 @@ mod tests {
                 "end:true".to_string(),
             ]
         );
+
+        let mut recorded = Vec::new();
+        let record_summary = plan
+            .record_decode_command_sequence(
+                &command,
+                vk::VideoSessionKHR::null(),
+                vk::VideoSessionParametersKHR::null(),
+                vk::Buffer::null(),
+                vk::ImageView::null(),
+                |visit| {
+                    recorded.push(match visit {
+                        Av1DecodeCommandVisit::BeginCoding(_) => "begin",
+                        Av1DecodeCommandVisit::ResetCoding(_) => "reset",
+                        Av1DecodeCommandVisit::DecodeFrame { .. } => "decode",
+                        Av1DecodeCommandVisit::EndCoding(_) => "end",
+                    });
+                    Ok(())
+                },
+            )
+            .expect("record callback should receive all command steps");
+        assert_eq!(
+            record_summary,
+            Av1DecodeCommandRecordSummary {
+                begin_count: 1,
+                reset_count: 1,
+                decode_count: 2,
+                end_count: 1,
+                first_error: None,
+            }
+        );
+        assert_eq!(recorded, vec!["begin", "reset", "decode", "decode", "end"]);
     }
 
     #[test]

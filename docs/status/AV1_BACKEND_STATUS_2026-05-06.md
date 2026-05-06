@@ -155,7 +155,9 @@ Current implementation progress:
   aligned plan and can walk all planned frames in command order with
   callback-scoped decode-info chains; a command-sequence visitor now materializes
   begin-coding, RESET, per-frame decode-info, and end-coding structs in the same
-  order the future command buffer recorder will consume them;
+  order the future command buffer recorder will consume them; a result-returning
+  record callback wrapper now reports begin/reset/decode/end counts so unsafe
+  ash calls can be inserted without changing the sequencing API;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
