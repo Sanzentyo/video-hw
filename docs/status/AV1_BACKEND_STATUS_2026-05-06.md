@@ -89,6 +89,9 @@ Current implementation progress:
 - AV1 decode submit skeleton extraction now identifies the first frame payload,
   frame-header offset, tile offsets, and tile sizes for frame OBUs and
   frame-header + tile-group OBU pairs;
+- AV1 submit/decode-info skeleton extraction now also has ordered multi-frame
+  variants, so later command recording can iterate all temporal units instead of
+  only probing the first frame;
 - AV1 decode picture-info skeleton now builds key-frame `StdVideoDecodeAV1PictureInfo`,
   reference-name slot defaults, and tile metadata from that submit skeleton;
 - the picture-info skeleton can now materialize `vk::VideoDecodeAV1PictureInfoKHR`
