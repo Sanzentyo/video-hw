@@ -107,6 +107,23 @@ pub(crate) struct Av1DecodeCommandSkeleton {
     pub frames: Vec<Av1DecodeFrameCommandSkeleton>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Av1DecodeRecordStep {
+    BeginCoding {
+        reference_slot_count: usize,
+    },
+    ResetCoding,
+    DecodeFrame {
+        frame_index: usize,
+        temporal_unit_index: usize,
+        setup_slot_index: i32,
+        src_buffer_offset: u64,
+        src_buffer_range: u64,
+        tile_count: usize,
+    },
+    EndCoding,
+}
+
 impl Av1DecodeCommandSkeleton {
     pub(crate) fn coded_extent(&self) -> vk::Extent2D {
         vk::Extent2D {
@@ -218,6 +235,28 @@ impl Av1DecodeCommandSkeleton {
 
     pub(crate) fn vk_end_coding_info(&self) -> vk::VideoEndCodingInfoKHR<'static> {
         vk::VideoEndCodingInfoKHR::default()
+    }
+
+    pub(crate) fn record_steps(&self) -> Vec<Av1DecodeRecordStep> {
+        let mut steps = Vec::with_capacity(self.frames.len() + 3);
+        steps.push(Av1DecodeRecordStep::BeginCoding {
+            reference_slot_count: self.begin_slots.len(),
+        });
+        steps.push(Av1DecodeRecordStep::ResetCoding);
+        steps.extend(
+            self.frames
+                .iter()
+                .map(|frame| Av1DecodeRecordStep::DecodeFrame {
+                    frame_index: frame.frame_index,
+                    temporal_unit_index: frame.temporal_unit_index,
+                    setup_slot_index: frame.setup_slot_index,
+                    src_buffer_offset: frame.src_buffer_offset,
+                    src_buffer_range: frame.src_buffer_range,
+                    tile_count: frame.tile_count,
+                }),
+        );
+        steps.push(Av1DecodeRecordStep::EndCoding);
+        steps
     }
 }
 
@@ -2457,6 +2496,41 @@ mod tests {
 
         let end_coding_info = command.vk_end_coding_info();
         assert!(end_coding_info.flags.is_empty());
+
+        assert_eq!(
+            command.record_steps(),
+            vec![
+                Av1DecodeRecordStep::BeginCoding {
+                    reference_slot_count: 2,
+                },
+                Av1DecodeRecordStep::ResetCoding,
+                Av1DecodeRecordStep::DecodeFrame {
+                    frame_index: 0,
+                    temporal_unit_index: 0,
+                    setup_slot_index: 0,
+                    src_buffer_offset: command.frames[0].src_buffer_offset,
+                    src_buffer_range: 1,
+                    tile_count: 1,
+                },
+                Av1DecodeRecordStep::DecodeFrame {
+                    frame_index: 1,
+                    temporal_unit_index: 1,
+                    setup_slot_index: 1,
+                    src_buffer_offset: command.frames[1].src_buffer_offset,
+                    src_buffer_range: 2,
+                    tile_count: 1,
+                },
+                Av1DecodeRecordStep::DecodeFrame {
+                    frame_index: 2,
+                    temporal_unit_index: 2,
+                    setup_slot_index: 0,
+                    src_buffer_offset: command.frames[2].src_buffer_offset,
+                    src_buffer_range: 3,
+                    tile_count: 1,
+                },
+                Av1DecodeRecordStep::EndCoding,
+            ]
+        );
     }
 
     #[test]

@@ -751,8 +751,9 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             .unwrap_or_default();
                         let reset_control = command.vk_reset_coding_control_info();
                         let end_coding_info = command.vk_end_coding_info();
+                        let record_steps = command.record_steps();
                         format!(
-                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, begin_reference_slots={}, vk_begin_refs={}, reset={}, end_flags_empty={}, slots={})",
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, begin_reference_slots={}, vk_begin_refs={}, reset={}, end_flags_empty={}, record_steps={}, slots={})",
                             command.frames.len(),
                             command.coded_width,
                             command.coded_height,
@@ -762,6 +763,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                             begin_coding_info.reference_slot_count,
                             reset_control.flags.contains(vk::VideoCodingControlFlagsKHR::RESET),
                             end_coding_info.flags.is_empty(),
+                            record_steps.len(),
                             command
                                 .frames
                                 .iter()

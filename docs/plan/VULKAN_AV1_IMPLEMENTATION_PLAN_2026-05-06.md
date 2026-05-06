@@ -111,7 +111,8 @@ Tasks:
    now modeled, including AV1 DPB slot info and Vulkan reference-slot chains.
    `VideoBeginCodingInfoKHR` and the mandatory first RESET control info are now
    modeled, along with default `VideoEndCodingInfoKHR`. Vulkan command
-   recording remains.
+   recording order is now modeled as begin, RESET, decode frames, end; actual
+   command buffer calls remain.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
