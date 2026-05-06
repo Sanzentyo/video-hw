@@ -133,6 +133,8 @@ Current implementation progress:
   `vk::VideoEndCodingInfoKHR` used to close a future AV1 decode command scope;
 - pure recording-step scaffolding now fixes the expected command order as
   begin-coding, RESET control, one decode step per frame, and end-coding;
+- frame-level picture resource scaffolding now maps each planned decode frame
+  to the destination array layer selected by its setup DPB slot;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

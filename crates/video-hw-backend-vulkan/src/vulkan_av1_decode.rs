@@ -148,6 +148,40 @@ impl Av1DecodeCommandSkeleton {
             .collect()
     }
 
+    pub(crate) fn frame_picture_resources<'a>(
+        &self,
+        image_view: vk::ImageView,
+    ) -> Result<Vec<vk::VideoPictureResourceInfoKHR<'a>>, String> {
+        self.frames
+            .iter()
+            .map(|frame| {
+                let setup_slot_index = u32::try_from(frame.setup_slot_index)
+                    .map_err(|_| "AV1 frame setup slot index is negative".to_string())?;
+                let slot = self
+                    .begin_slots
+                    .iter()
+                    .find(|slot| slot.slot_index == frame.setup_slot_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "AV1 frame {} references unavailable setup slot {}",
+                            frame.frame_index, frame.setup_slot_index
+                        )
+                    })?;
+                if slot.base_array_layer != setup_slot_index {
+                    return Err(format!(
+                        "AV1 setup slot/base layer mismatch: slot={}, base_layer={}",
+                        frame.setup_slot_index, slot.base_array_layer
+                    ));
+                }
+                Ok(vk::VideoPictureResourceInfoKHR::default()
+                    .coded_offset(vk::Offset2D { x: 0, y: 0 })
+                    .coded_extent(self.coded_extent())
+                    .base_array_layer(slot.base_array_layer)
+                    .image_view_binding(image_view))
+            })
+            .collect()
+    }
+
     pub(crate) fn begin_std_reference_infos(&self) -> Vec<StdVideoDecodeAV1ReferenceInfo> {
         vec![key_frame_std_reference_info_for_order_hint(0); self.begin_slots.len()]
     }
@@ -2437,6 +2471,16 @@ mod tests {
         assert_eq!(begin_resources[0].base_array_layer, 0);
         assert_eq!(begin_resources[1].base_array_layer, 1);
         assert_eq!(begin_resources[1].image_view_binding, vk::ImageView::null());
+
+        let frame_resources = command
+            .frame_picture_resources(vk::ImageView::null())
+            .expect("frame setup slots should map to picture resources");
+        assert_eq!(frame_resources.len(), 3);
+        assert_eq!(frame_resources[0].base_array_layer, 0);
+        assert_eq!(frame_resources[1].base_array_layer, 1);
+        assert_eq!(frame_resources[2].base_array_layer, 0);
+        assert_eq!(frame_resources[2].coded_extent.width, 320);
+        assert_eq!(frame_resources[2].coded_extent.height, 180);
 
         let begin_reference_infos = command.begin_std_reference_infos();
         assert_eq!(begin_reference_infos.len(), 2);

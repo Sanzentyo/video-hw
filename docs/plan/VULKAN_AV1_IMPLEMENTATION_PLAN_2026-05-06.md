@@ -112,7 +112,8 @@ Tasks:
    `VideoBeginCodingInfoKHR` and the mandatory first RESET control info are now
    modeled, along with default `VideoEndCodingInfoKHR`. Vulkan command
    recording order is now modeled as begin, RESET, decode frames, end; actual
-   command buffer calls remain.
+   command buffer calls remain. Frame-level destination picture resources are
+   now mapped from the planned setup DPB slots.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
