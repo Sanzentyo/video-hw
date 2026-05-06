@@ -131,7 +131,8 @@ Tasks:
    order the future recorder will issue Vulkan calls; a result-returning record
    callback wrapper now provides the insertion point for the actual unsafe ash
    command calls and validates begin/reset/decode/end counts against the planned
-   frames.
+   frames. Real-bitstream probing now also creates, binds, uploads, and destroys
+   a `VIDEO_DECODE_SRC_KHR` source buffer from the aligned upload plan.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

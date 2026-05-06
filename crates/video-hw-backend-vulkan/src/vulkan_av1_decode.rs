@@ -48,6 +48,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub session_memory_total_size: u64,
     pub session_memory_max_alignment: u64,
     pub session_memory_bound_count: usize,
+    pub bitstream_upload_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -888,6 +889,7 @@ pub(crate) fn probe_av1_decode_session_parameters_for_bitstream(
     let result = probe_av1_decode_session_parameters_for_bitstream_with_instance(
         &entry,
         &instance,
+        bitstream,
         &std_sequence_header,
         coded_width,
         coded_height,
@@ -1830,6 +1832,7 @@ fn probe_av1_decode_session_parameters(
 fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
     entry: &ash::Entry,
     instance: &ash::Instance,
+    bitstream: &[u8],
     std_sequence_header: &StdVideoAV1SequenceHeader,
     coded_width: u32,
     coded_height: u32,
@@ -1890,19 +1893,42 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                 continue;
             }
         };
-        let result = create_and_destroy_av1_decode_session_parameters_with_header(
+        let upload_plan = match build_av1_aligned_decode_bitstream_upload_plan(
+            bitstream,
+            snapshot.min_bitstream_buffer_offset_alignment,
+            snapshot.min_bitstream_buffer_size_alignment,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => {
+                probe_errors.push(err);
+                // SAFETY: The device is no longer used after this point.
+                unsafe {
+                    device.destroy_device(None);
+                }
+                continue;
+            }
+        };
+        let upload_result = create_and_destroy_av1_decode_source_buffer(
             instance,
             &device,
-            Av1DecodeSessionParameterProbeConfig {
-                physical_device,
-                queue_family_index,
-                capability_snapshot: &snapshot,
-                picture_format,
-                coded_width,
-                coded_height,
-                std_sequence_header,
-            },
+            physical_device,
+            &upload_plan.bytes,
         );
+        let result = upload_result.and_then(|()| {
+            create_and_destroy_av1_decode_session_parameters_with_header(
+                instance,
+                &device,
+                Av1DecodeSessionParameterProbeConfig {
+                    physical_device,
+                    queue_family_index,
+                    capability_snapshot: &snapshot,
+                    picture_format,
+                    coded_width,
+                    coded_height,
+                    std_sequence_header,
+                },
+            )
+        });
         // SAFETY: The device is no longer used after this point.
         unsafe {
             device.destroy_device(None);
@@ -1921,6 +1947,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session_memory_total_size: summary.memory_total_size,
                     session_memory_max_alignment: summary.memory_max_alignment,
                     session_memory_bound_count: summary.memory_bound_count,
+                    bitstream_upload_bytes: upload_plan.bytes.len(),
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2223,6 +2250,93 @@ fn select_av1_decode_memory_type_index(
             ((memory_type_bits & mask) != 0 && memory_type.property_flags.contains(required))
                 .then_some(index_u32)
         })
+}
+
+fn create_and_destroy_av1_decode_source_buffer(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("AV1 decode source buffer upload requires non-empty bytes".to_string());
+    }
+
+    let buffer_size =
+        u64::try_from(bytes.len()).map_err(|_| "AV1 source upload size exceeds u64")?;
+    let create_info = vk::BufferCreateInfo::default()
+        .size(buffer_size)
+        .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    // SAFETY: Buffer create info contains only POD values.
+    let buffer = unsafe { device.create_buffer(&create_info, None) }
+        .map_err(|err| format!("vkCreateBuffer for AV1 decode source failed: {err}"))?;
+
+    let upload_result = (|| -> Result<vk::DeviceMemory, String> {
+        // SAFETY: `buffer` was created by this device.
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        // SAFETY: `physical_device` belongs to `instance`; this only reads memory metadata.
+        let memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let memory_type_index = select_av1_decode_memory_type_index(
+            &memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or_else(|| {
+            format!(
+                "no HOST_VISIBLE|HOST_COHERENT memory type for AV1 decode source buffer (bits=0x{:X})",
+                requirements.memory_type_bits
+            )
+        })?;
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size.max(1))
+            .memory_type_index(memory_type_index);
+        // SAFETY: Allocation info is derived from Vulkan memory requirements.
+        let memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|err| format!("vkAllocateMemory for AV1 decode source failed: {err}"))?;
+        // SAFETY: Buffer and memory were created by this device and offset 0 satisfies alignment
+        // by construction for a fresh allocation.
+        if let Err(err) = unsafe { device.bind_buffer_memory(buffer, memory, 0) } {
+            // SAFETY: `memory` was allocated above and has not been bound successfully.
+            unsafe { device.free_memory(memory, None) };
+            return Err(format!(
+                "vkBindBufferMemory for AV1 decode source failed: {err}"
+            ));
+        }
+        // SAFETY: Memory is HOST_VISIBLE|HOST_COHERENT and the mapped range fits the allocation.
+        let mapped =
+            unsafe { device.map_memory(memory, 0, buffer_size, vk::MemoryMapFlags::empty()) };
+        let mapped = match mapped {
+            Ok(mapped) => mapped,
+            Err(err) => {
+                // SAFETY: `memory` was allocated above and is no longer used after map failure.
+                unsafe { device.free_memory(memory, None) };
+                return Err(format!("vkMapMemory for AV1 decode source failed: {err}"));
+            }
+        };
+        // SAFETY: `mapped` points to at least `bytes.len()` writable bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
+            device.unmap_memory(memory);
+        }
+        Ok(memory)
+    })();
+
+    if let Ok(memory) = upload_result {
+        // SAFETY: The buffer is no longer used after this probe step.
+        unsafe {
+            device.destroy_buffer(buffer, None);
+            device.free_memory(memory, None);
+        }
+        Ok(())
+    } else {
+        // SAFETY: The buffer was created above and is no longer used.
+        unsafe {
+            device.destroy_buffer(buffer, None);
+        }
+        upload_result.map(|_| ())
+    }
 }
 
 fn create_av1_decode_session_parameters(

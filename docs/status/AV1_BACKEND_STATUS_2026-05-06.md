@@ -93,6 +93,9 @@ Current implementation progress:
   `vkGetVideoSessionMemoryRequirementsKHR` and reports requirement count, total
   size, and maximum alignment, then allocates, binds, and frees the required
   session memory before creating session parameters;
+- real-bitstream AV1 probing now builds a capability-aligned source upload plan,
+  creates a `VIDEO_DECODE_SRC_KHR` buffer, binds HOST_VISIBLE|HOST_COHERENT
+  memory, uploads the compact bitstream bytes, and destroys the buffer/memory;
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;
