@@ -318,7 +318,7 @@ Current implementation progress:
   `VK_KHR_video_encode_av1`, `video_encode_av1`, `VideoEncodeAV1*`, or
   `ENCODE_AV1` bindings. The reproducible binding check is
   `scripts/check_vulkan_av1_encode_bindings.rs`; latest report
-  `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md`
+  `output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778079390.md`
   records decode symbols present and encode symbols absent. Vulkan AV1 encode
   therefore needs a binding stack update or local generated bindings before
   implementation can start safely.
@@ -408,7 +408,7 @@ Latest Vulkan AV1 scaffold verification:
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_encode_bindings.rs`
-  (`output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778070521.md`,
+  (`output/vulkan-av1-encode-bindings/vulkan-av1-encode-bindings-1778079390.md`,
   `encode_bindings_present=false`)
 - `cargo +nightly -Zscript scripts/inspect_av1_frame_types.rs --frames 8 --gop-size 1 --expect-inter-frame false`
   (`output/av1-frame-types/av1-frame-types-1778071015345679600.md`,
