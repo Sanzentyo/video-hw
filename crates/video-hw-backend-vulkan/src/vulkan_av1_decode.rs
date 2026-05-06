@@ -161,20 +161,6 @@ impl Av1ParsedFrameHeaderSummary {
     fn is_key_frame(self) -> bool {
         self.frame_type == 0 && !self.show_existing_frame
     }
-
-    fn diagnostic(self) -> String {
-        format!(
-            "frame_type={}, show_existing_frame={}, show_frame={}, order_hint={}, primary_ref_frame={}, refresh_frame_flags=0x{:02x}, ref_frame_idx={:?}, tile_payload_offset={}",
-            self.frame_type,
-            self.show_existing_frame,
-            self.show_frame,
-            self.order_hint,
-            self.primary_ref_frame,
-            self.refresh_frame_flags,
-            self.ref_frame_idx,
-            self.tile_payload_offset
-        )
-    }
 }
 
 impl Av1DecodePictureInfoSkeleton {
@@ -383,6 +369,7 @@ pub(crate) struct Av1DecodeFrameCommandSkeleton {
     pub frame_index: usize,
     pub temporal_unit_index: usize,
     pub setup_slot_index: i32,
+    pub reference_slot_indices: Vec<i32>,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
     pub tile_count: usize,
@@ -501,6 +488,7 @@ impl Av1DecodeBitstreamUploadPlan {
                 temporal_unit_index: record.temporal_unit_index,
                 decode_info_index: record.decode_info_index,
                 setup_slot_index: record.setup_slot_index,
+                reference_slot_indices: record.reference_slot_indices,
                 dst_base_array_layer: record.dst_base_array_layer,
                 src_buffer_offset: record.src_buffer_offset,
                 src_buffer_range: record.src_buffer_range,
@@ -554,12 +542,24 @@ impl Av1DecodeBitstreamUploadPlan {
             &setup_picture_resource,
             &mut setup_dpb_info,
         );
-        let vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
+        let reference_picture_resources = decode
+            .reference_picture_resources(picture_views.reference, &bundle.reference_slot_indices)?;
+        let reference_std_infos = decode.reference_std_infos(&bundle.reference_slot_indices);
+        let mut reference_dpb_infos = decode.reference_dpb_slot_infos(&reference_std_infos);
+        let reference_slots = decode.reference_slots(
+            &bundle.reference_slot_indices,
+            &reference_picture_resources,
+            &mut reference_dpb_infos,
+        )?;
+        let mut vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
             src_buffer,
             dst_picture_resource,
             &setup_reference_slot,
             &mut av1_picture_info,
         );
+        if !reference_slots.is_empty() {
+            vk_decode_info = vk_decode_info.reference_slots(&reference_slots);
+        }
 
         Ok(f(&vk_decode_info, &bundle))
     }
@@ -673,6 +673,7 @@ pub(crate) struct Av1DecodeFrameRecordBundle {
     pub temporal_unit_index: usize,
     pub decode_info_index: usize,
     pub setup_slot_index: i32,
+    pub reference_slot_indices: Vec<i32>,
     pub dst_base_array_layer: u32,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
@@ -685,6 +686,7 @@ pub(crate) struct Av1DecodeFrameSubmitBundle {
     pub temporal_unit_index: usize,
     pub decode_info_index: usize,
     pub setup_slot_index: i32,
+    pub reference_slot_indices: Vec<i32>,
     pub dst_base_array_layer: u32,
     pub src_buffer_offset: u64,
     pub src_buffer_range: u64,
@@ -702,6 +704,7 @@ pub(crate) enum Av1DecodeRecordStep {
         frame_index: usize,
         temporal_unit_index: usize,
         setup_slot_index: i32,
+        reference_slot_count: usize,
         src_buffer_offset: u64,
         src_buffer_range: u64,
         tile_count: usize,
@@ -922,6 +925,7 @@ impl Av1DecodeCommandSkeleton {
                     temporal_unit_index: frame.temporal_unit_index,
                     decode_info_index,
                     setup_slot_index: frame.setup_slot_index,
+                    reference_slot_indices: frame.reference_slot_indices.clone(),
                     dst_base_array_layer: slot.base_array_layer,
                     src_buffer_offset: frame.src_buffer_offset,
                     src_buffer_range: frame.src_buffer_range,
@@ -975,21 +979,7 @@ impl Av1DecodeCommandSkeleton {
             ));
         }
 
-        let mut slots = Vec::with_capacity(self.begin_slots.len());
-        for ((_slot, picture_resource), dpb_slot_info) in self
-            .begin_slots
-            .iter()
-            .zip(picture_resources.iter())
-            .zip(dpb_slot_infos.iter_mut())
-        {
-            slots.push(
-                vk::VideoReferenceSlotInfoKHR::default()
-                    .slot_index(-1)
-                    .picture_resource(picture_resource)
-                    .push_next(dpb_slot_info),
-            );
-        }
-        Ok(slots)
+        Ok(Vec::new())
     }
 
     pub(crate) fn vk_begin_coding_info<'a>(
@@ -998,14 +988,6 @@ impl Av1DecodeCommandSkeleton {
         video_session_parameters: vk::VideoSessionParametersKHR,
         reference_slots: &'a [vk::VideoReferenceSlotInfoKHR<'a>],
     ) -> Result<vk::VideoBeginCodingInfoKHR<'a>, String> {
-        if reference_slots.len() != self.begin_slots.len() {
-            return Err(format!(
-                "AV1 begin reference slot count mismatch: reference_slots={}, slots={}",
-                reference_slots.len(),
-                self.begin_slots.len()
-            ));
-        }
-
         Ok(vk::VideoBeginCodingInfoKHR::default()
             .video_session(video_session)
             .video_session_parameters(video_session_parameters)
@@ -1023,7 +1005,7 @@ impl Av1DecodeCommandSkeleton {
     pub(crate) fn record_steps(&self) -> Vec<Av1DecodeRecordStep> {
         let mut steps = Vec::with_capacity(self.frames.len() + 3);
         steps.push(Av1DecodeRecordStep::BeginCoding {
-            reference_slot_count: self.begin_slots.len(),
+            reference_slot_count: 0,
         });
         steps.push(Av1DecodeRecordStep::ResetCoding);
         steps.extend(
@@ -1033,6 +1015,7 @@ impl Av1DecodeCommandSkeleton {
                     frame_index: frame.frame_index,
                     temporal_unit_index: frame.temporal_unit_index,
                     setup_slot_index: frame.setup_slot_index,
+                    reference_slot_count: frame.reference_slot_indices.len(),
                     src_buffer_offset: frame.src_buffer_offset,
                     src_buffer_range: frame.src_buffer_range,
                     tile_count: frame.tile_count,
@@ -1065,6 +1048,87 @@ impl Av1DecodeInfoSkeleton {
             .coded_extent(self.coded_extent())
             .base_array_layer(base_array_layer)
             .image_view_binding(image_view)
+    }
+
+    pub(crate) fn reference_slot_indices(&self) -> Vec<i32> {
+        let mut indices = Vec::new();
+        for slot_index in self.picture_info.reference_name_slot_indices {
+            if slot_index >= 0 && !indices.contains(&slot_index) {
+                indices.push(slot_index);
+            }
+        }
+        indices
+    }
+
+    pub(crate) fn reference_picture_resources<'a>(
+        &self,
+        image_view: vk::ImageView,
+        reference_slot_indices: &[i32],
+    ) -> Result<Vec<vk::VideoPictureResourceInfoKHR<'a>>, String> {
+        reference_slot_indices
+            .iter()
+            .map(|slot_index| {
+                let base_array_layer = u32::try_from(*slot_index)
+                    .map_err(|_| format!("AV1 reference slot index is negative: {slot_index}"))?;
+                Ok(self.dst_picture_resource(image_view, base_array_layer))
+            })
+            .collect()
+    }
+
+    pub(crate) fn reference_std_infos(
+        &self,
+        reference_slot_indices: &[i32],
+    ) -> Vec<StdVideoDecodeAV1ReferenceInfo> {
+        reference_slot_indices
+            .iter()
+            .map(|_| key_frame_std_reference_info_for_order_hint(0))
+            .collect()
+    }
+
+    pub(crate) fn reference_dpb_slot_infos<'a>(
+        &self,
+        reference_infos: &'a [StdVideoDecodeAV1ReferenceInfo],
+    ) -> Vec<vk::VideoDecodeAV1DpbSlotInfoKHR<'a>> {
+        reference_infos
+            .iter()
+            .map(|reference_info| {
+                vk::VideoDecodeAV1DpbSlotInfoKHR::default().std_reference_info(reference_info)
+            })
+            .collect()
+    }
+
+    pub(crate) fn reference_slots<'a>(
+        &self,
+        reference_slot_indices: &[i32],
+        picture_resources: &'a [vk::VideoPictureResourceInfoKHR<'a>],
+        dpb_slot_infos: &'a mut [vk::VideoDecodeAV1DpbSlotInfoKHR<'a>],
+    ) -> Result<Vec<vk::VideoReferenceSlotInfoKHR<'a>>, String> {
+        if picture_resources.len() != reference_slot_indices.len() {
+            return Err(format!(
+                "AV1 reference picture resource count mismatch: resources={}, slots={}",
+                picture_resources.len(),
+                reference_slot_indices.len()
+            ));
+        }
+        if dpb_slot_infos.len() != reference_slot_indices.len() {
+            return Err(format!(
+                "AV1 reference DPB info count mismatch: dpb_infos={}, slots={}",
+                dpb_slot_infos.len(),
+                reference_slot_indices.len()
+            ));
+        }
+
+        Ok(reference_slot_indices
+            .iter()
+            .zip(picture_resources.iter())
+            .zip(dpb_slot_infos.iter_mut())
+            .map(|((slot_index, picture_resource), dpb_slot_info)| {
+                vk::VideoReferenceSlotInfoKHR::default()
+                    .slot_index(*slot_index)
+                    .picture_resource(picture_resource)
+                    .push_next(dpb_slot_info)
+            })
+            .collect())
     }
 
     pub(crate) fn vk_decode_info<'a>(
@@ -1612,7 +1676,7 @@ pub(crate) fn build_av1_decode_info_skeletons(
     let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
     let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
 
-    build_av1_decode_submit_skeletons(bitstream)?
+    let mut decodes = build_av1_decode_submit_skeletons(bitstream)?
         .into_iter()
         .map(|submit| {
             build_av1_decode_info_skeleton_from_submit(
@@ -1622,7 +1686,54 @@ pub(crate) fn build_av1_decode_info_skeletons(
                 submit,
             )
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    apply_av1_reference_name_slot_replay(&mut decodes)?;
+    Ok(decodes)
+}
+
+fn apply_av1_reference_name_slot_replay(
+    decodes: &mut [Av1DecodeInfoSkeleton],
+) -> Result<(), String> {
+    let mut reference_frame_slots: [Option<i32>; 8] = [None; 8];
+
+    for (frame_index, decode) in decodes.iter_mut().enumerate() {
+        let setup_slot_index = i32::try_from(frame_index)
+            .map_err(|_| "AV1 replay frame index exceeds i32 slot range".to_string())?;
+        if let Some(summary) = decode.picture_info.frame_header_summary {
+            if summary.is_key_frame() {
+                decode.picture_info.reference_name_slot_indices = [-1; 7];
+            } else {
+                for (name_index, ref_frame_idx) in summary.ref_frame_idx.iter().enumerate() {
+                    let ref_frame_idx = usize::try_from(*ref_frame_idx).map_err(|_| {
+                        format!("AV1 ref_frame_idx[{name_index}] is negative: {ref_frame_idx}")
+                    })?;
+                    let slot = reference_frame_slots.get(ref_frame_idx).copied().flatten();
+                    decode.picture_info.reference_name_slot_indices[name_index] =
+                        slot.ok_or_else(|| {
+                            format!(
+                                "AV1 reference frame state {ref_frame_idx} is unavailable for reference name {name_index}"
+                            )
+                        })?;
+                }
+            }
+
+            for (ref_index, reference_frame_slot) in reference_frame_slots.iter_mut().enumerate() {
+                if (summary.refresh_frame_flags & (1_u8 << ref_index)) != 0 {
+                    *reference_frame_slot = Some(setup_slot_index);
+                }
+            }
+        } else if decode
+            .picture_info
+            .frame_header_summary
+            .is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame)
+        {
+            reference_frame_slots.fill(Some(setup_slot_index));
+        }
+
+        decode.setup_reference_info = av1_std_reference_info(&decode.picture_info);
+    }
+
+    Ok(())
 }
 
 fn build_av1_decode_info_skeleton_from_submit(
@@ -1738,16 +1849,6 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
     decodes: &[Av1DecodeInfoSkeleton],
     max_dpb_slots: u32,
 ) -> Result<Av1DecodeCommandSkeleton, String> {
-    if let Some(summary) = decodes
-        .iter()
-        .filter_map(|decode| decode.picture_info.frame_header_summary)
-        .find(|summary| !summary.is_key_frame())
-    {
-        return Err(format!(
-            "AV1 inter-frame reference-slot replay is not implemented yet: {}",
-            summary.diagnostic()
-        ));
-    }
     if max_dpb_slots == 0 {
         return Err("AV1 decode command skeleton requires at least one DPB slot".to_string());
     }
@@ -1757,7 +1858,24 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
         .first()
         .ok_or_else(|| "missing AV1 frames for decode command skeleton".to_string())?;
 
-    let planned_slot_count = decodes.len().min(max_dpb_slots).max(1);
+    let required_reference_slot_count = decodes
+        .iter()
+        .flat_map(Av1DecodeInfoSkeleton::reference_slot_indices)
+        .filter_map(|slot_index| usize::try_from(slot_index).ok())
+        .map(|slot_index| slot_index.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let planned_slot_count = decodes
+        .len()
+        .max(required_reference_slot_count)
+        .min(max_dpb_slots)
+        .max(1);
+    if required_reference_slot_count > planned_slot_count {
+        return Err(format!(
+            "AV1 reference slot index exceeds available DPB slots: required={}, available={}",
+            required_reference_slot_count, planned_slot_count
+        ));
+    }
     let begin_slots = (0..planned_slot_count)
         .map(|slot| {
             let slot_index = i32::try_from(slot)
@@ -1781,6 +1899,7 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
                 frame_index,
                 temporal_unit_index: decode.temporal_unit_index,
                 setup_slot_index,
+                reference_slot_indices: decode.reference_slot_indices(),
                 src_buffer_offset: decode.src_buffer_offset,
                 src_buffer_range: decode.src_buffer_range,
                 tile_count: decode.tile_count(),
@@ -2165,7 +2284,7 @@ fn build_av1_frame_obu_submit_skeleton(
     }
     Ok(Av1DecodeSubmitSkeleton {
         temporal_unit_index: frame_record.temporal_unit_index,
-        frame_header_offset: tile_offset,
+        frame_header_offset,
         tile_offsets: vec![tile_offset],
         tile_sizes: vec![tile_size],
         use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
@@ -2341,7 +2460,7 @@ fn parse_av1_key_frame_obu_header(
         StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST
     };
     let reduced_tx_set = bits.read_bool("reduced_tx_set")?;
-    bits.align_to_next_byte_with_zero_bits("frame_header_obu_byte_alignment")?;
+    bits.align_to_next_byte("frame_header_obu_byte_alignment")?;
     Ok(Av1ParsedKeyFrameHeader {
         tile_payload_offset: bits.byte_offset(),
         disable_cdf_update,
@@ -4979,11 +5098,9 @@ impl<'a> BitReader<'a> {
         self.bit_offset.div_ceil(8)
     }
 
-    fn align_to_next_byte_with_zero_bits(&mut self, field_name: &str) -> Result<(), String> {
+    fn align_to_next_byte(&mut self, field_name: &str) -> Result<(), String> {
         while !self.bit_offset.is_multiple_of(8) {
-            if self.read_bool(field_name)? {
-                return Err(format!("{field_name} expected zero alignment bit"));
-            }
+            let _ = self.read_bool(field_name)?;
         }
         Ok(())
     }
@@ -5500,7 +5617,7 @@ mod tests {
     }
 
     #[test]
-    fn picture_info_skeleton_maps_inter_frame_header_summary_before_replay_gap() {
+    fn picture_info_skeleton_maps_inter_frame_header_summary_into_reference_command() {
         let summary = Av1ParsedFrameHeaderSummary {
             frame_type: 1,
             show_existing_frame: false,
@@ -5543,10 +5660,14 @@ mod tests {
             setup_reference_info: av1_std_reference_info(&picture),
             picture_info: picture,
         };
-        let err = build_av1_key_frame_decode_command_skeleton_from_decodes(&[decode], 8)
-            .expect_err("inter-frame reference-slot replay should remain gated");
-        assert!(err.contains("AV1 inter-frame reference-slot replay is not implemented"));
-        assert!(err.contains("primary_ref_frame=6"));
+        let command = build_av1_key_frame_decode_command_skeleton_from_decodes(&[decode], 8)
+            .expect("inter-frame references should build a command skeleton");
+        assert_eq!(command.begin_slots.len(), 7);
+        assert_eq!(command.frames.len(), 1);
+        assert_eq!(
+            command.frames[0].reference_slot_indices,
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
     }
 
     #[test]
@@ -5796,6 +5917,7 @@ mod tests {
                     temporal_unit_index: 0,
                     decode_info_index: 0,
                     setup_slot_index: 0,
+                    reference_slot_indices: vec![],
                     dst_base_array_layer: 0,
                     src_buffer_offset: command.frames[0].src_buffer_offset,
                     src_buffer_range: 1,
@@ -5806,6 +5928,7 @@ mod tests {
                     temporal_unit_index: 1,
                     decode_info_index: 1,
                     setup_slot_index: 1,
+                    reference_slot_indices: vec![],
                     dst_base_array_layer: 1,
                     src_buffer_offset: command.frames[1].src_buffer_offset,
                     src_buffer_range: 2,
@@ -5816,6 +5939,7 @@ mod tests {
                     temporal_unit_index: 2,
                     decode_info_index: 2,
                     setup_slot_index: 0,
+                    reference_slot_indices: vec![],
                     dst_base_array_layer: 0,
                     src_buffer_offset: command.frames[2].src_buffer_offset,
                     src_buffer_range: 3,
@@ -5834,26 +5958,10 @@ mod tests {
         let mut begin_dpb_infos = command
             .begin_dpb_slot_infos(&begin_reference_infos)
             .expect("matching begin reference infos should produce DPB slot infos");
-        let begin_dpb_info_ptrs = begin_dpb_infos
-            .iter()
-            .map(|info| info as *const vk::VideoDecodeAV1DpbSlotInfoKHR<'_>)
-            .collect::<Vec<_>>();
         let begin_reference_slots = command
             .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
             .expect("matching begin resources and DPB infos should produce reference slots");
-        assert_eq!(begin_reference_slots.len(), 2);
-        assert_eq!(begin_reference_slots[0].slot_index, -1);
-        assert_eq!(begin_reference_slots[1].slot_index, -1);
-        assert_eq!(
-            begin_reference_slots[0].p_picture_resource,
-            &raw const begin_resources[0]
-        );
-        assert_eq!(
-            begin_reference_slots[1]
-                .p_next
-                .cast::<vk::VideoDecodeAV1DpbSlotInfoKHR<'_>>(),
-            begin_dpb_info_ptrs[1]
-        );
+        assert!(begin_reference_slots.is_empty());
 
         let begin_coding_info = command
             .vk_begin_coding_info(
@@ -5867,11 +5975,7 @@ mod tests {
             begin_coding_info.video_session_parameters,
             vk::VideoSessionParametersKHR::null()
         );
-        assert_eq!(begin_coding_info.reference_slot_count, 2);
-        assert_eq!(
-            begin_coding_info.p_reference_slots,
-            begin_reference_slots.as_ptr()
-        );
+        assert_eq!(begin_coding_info.reference_slot_count, 0);
 
         let reset_control = command.vk_reset_coding_control_info();
         assert!(
@@ -5887,13 +5991,14 @@ mod tests {
             command.record_steps(),
             vec![
                 Av1DecodeRecordStep::BeginCoding {
-                    reference_slot_count: 2,
+                    reference_slot_count: 0,
                 },
                 Av1DecodeRecordStep::ResetCoding,
                 Av1DecodeRecordStep::DecodeFrame {
                     frame_index: 0,
                     temporal_unit_index: 0,
                     setup_slot_index: 0,
+                    reference_slot_count: 0,
                     src_buffer_offset: command.frames[0].src_buffer_offset,
                     src_buffer_range: 1,
                     tile_count: 1,
@@ -5902,6 +6007,7 @@ mod tests {
                     frame_index: 1,
                     temporal_unit_index: 1,
                     setup_slot_index: 1,
+                    reference_slot_count: 0,
                     src_buffer_offset: command.frames[1].src_buffer_offset,
                     src_buffer_range: 2,
                     tile_count: 1,
@@ -5910,6 +6016,7 @@ mod tests {
                     frame_index: 2,
                     temporal_unit_index: 2,
                     setup_slot_index: 0,
+                    reference_slot_count: 0,
                     src_buffer_offset: command.frames[2].src_buffer_offset,
                     src_buffer_range: 3,
                     tile_count: 1,
@@ -5974,6 +6081,7 @@ mod tests {
                     temporal_unit_index: 0,
                     decode_info_index: 0,
                     setup_slot_index: 0,
+                    reference_slot_indices: vec![],
                     dst_base_array_layer: 0,
                     src_buffer_offset: 0,
                     src_buffer_range: 8,
@@ -5985,6 +6093,7 @@ mod tests {
                     temporal_unit_index: 1,
                     decode_info_index: 1,
                     setup_slot_index: 1,
+                    reference_slot_indices: vec![],
                     dst_base_array_layer: 1,
                     src_buffer_offset: 16,
                     src_buffer_range: 8,
@@ -6119,7 +6228,7 @@ mod tests {
         assert_eq!(
             visits,
             vec![
-                "begin:2".to_string(),
+                "begin:0".to_string(),
                 "reset:true".to_string(),
                 "decode:0:0:0".to_string(),
                 "decode:1:16:1".to_string(),
@@ -6236,6 +6345,7 @@ mod tests {
                 frame_index: 0,
                 temporal_unit_index: 0,
                 setup_slot_index: 1,
+                reference_slot_indices: vec![],
                 src_buffer_offset: 12,
                 src_buffer_range: 3,
                 tile_count: 1,
@@ -6262,6 +6372,7 @@ mod tests {
                 frame_index: 0,
                 temporal_unit_index: 0,
                 setup_slot_index: 1,
+                reference_slot_indices: vec![],
                 src_buffer_offset: 12,
                 src_buffer_range: 3,
                 tile_count: 1,
@@ -6276,21 +6387,22 @@ mod tests {
     }
 
     #[test]
-    fn begin_coding_info_rejects_mismatched_reference_slot_counts() {
+    fn begin_coding_info_accepts_empty_reference_slots_after_reset() {
         let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
         bitstream.extend_from_slice(&make_obu(6, &[0x11]));
         let command = build_av1_key_frame_decode_command_skeleton(&bitstream, 2)
             .expect("single frame should produce a command skeleton");
 
-        let err = command
+        let begin = command
             .vk_begin_coding_info(
                 vk::VideoSessionKHR::null(),
                 vk::VideoSessionParametersKHR::null(),
                 &[],
             )
-            .expect_err("reference slot count mismatch should be rejected");
+            .expect("reset decode scope should start without active reference slots");
 
-        assert!(err.contains("begin reference slot count mismatch"));
+        assert_eq!(begin.reference_slot_count, 0);
+        assert_eq!(begin.reference_slot_count, 0);
     }
 
     #[test]

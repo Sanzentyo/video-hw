@@ -365,6 +365,20 @@ Latest Vulkan AV1 scaffold verification:
   `refresh_frame_flags=0x02`, `ref_frame_idx=[0, 0, 0, 0, 0, 0, 0]`, and
   `tile_payload_offset=15`, confirming that the next missing layer is
   inter-frame reference-slot mapping plus DPB replay.
+- Follow-up reference replay work now removes that explicit inter-frame command
+  skeleton gate, carries per-frame reference slot lists into
+  `VideoDecodeInfoKHR::referenceSlots`, keeps begin-coding active references
+  empty after RESET, and adds a first-pass AV1 reference-frame-state replay that
+  maps `ref_frame_idx` through `refresh_frame_flags` before filling Vulkan
+  `referenceNameSlotIndices`. The same pass also preserves Frame OBU header
+  bytes in the submitted source range instead of starting the range at tile
+  payload. Unit and clippy gates pass, but live PSNR still fails for normal
+  non-reduced key-frame streams: `output/vulkan-av1-psnr/vulkan-av1-psnr-1778073517030.md`
+  (`--frames 1 --gop-size 2`, `psnr_y_min=12.5300`) and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778073517033.md`
+  (`--frames 2 --gop-size 2`, `psnr_y_min=12.5300`). This shows the remaining
+  blocker is full AV1 frame-header/std-picture parity before GOP replay can be
+  accepted by PSNR.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)

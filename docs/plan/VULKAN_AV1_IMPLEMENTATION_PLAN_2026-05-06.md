@@ -257,6 +257,16 @@ Acceptance:
   writes FAIL markdown reports even when decode or PSNR setup fails before
   per-frame PSNR can be computed, including the stderr tail that reports the
   first unsupported `frame_type=1`.
+- First-pass reference-frame replay is now present in the decode skeleton path:
+  parsed `ref_frame_idx` values are resolved through an 8-entry AV1 reference
+  frame state that is updated by `refresh_frame_flags`, command recording
+  carries the resulting reference slots into each `VideoDecodeInfoKHR`, and
+  begin-coding starts with zero active references after RESET. This advances the
+  failure from "inter-frame reference-slot replay is not implemented" to live
+  submit/readback with bad pixels. Current live gates still fail at
+  `psnr_y_min=12.5300` for `--frames 1 --gop-size 2` and
+  `--frames 2 --gop-size 2`, so the next implementation task is full
+  non-reduced frame-header/std-picture parity, not merely slot plumbing.
 - The same gate now covers fragmented MP4 input:
   `--input-format fmp4 --gop-size 1` passes at `psnr_y_min=inf`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), while
