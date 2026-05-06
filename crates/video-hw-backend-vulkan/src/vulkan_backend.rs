@@ -1272,6 +1272,23 @@ mod tests {
     }
 
     #[test]
+    fn ensure_vk_codec_supported_rejects_av1_with_actionable_message() {
+        for operation in ["decode", "encode"] {
+            let err = ensure_vk_codec_supported(Codec::Av1, operation)
+                .expect_err("AV1 must be rejected until Vulkan AV1 path is implemented");
+            match err {
+                BackendError::UnsupportedConfig(message) => {
+                    assert!(
+                        message.contains(&format!("Vulkan AV1 {operation} is not implemented")),
+                        "expected Vulkan AV1 implementation message: {message}"
+                    );
+                }
+                other => panic!("unexpected AV1 check error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn hevc_encode_blocker_message_with_config_surfaces_base_message() {
         let message = hevc_encode_blocker_message_with_config(1920, 1080, 30);
         assert!(message.contains("Vulkan HEVC encode initialization failed"));
@@ -1280,6 +1297,14 @@ mod tests {
     #[test]
     fn hevc_capability_report_never_claims_hardware_acceleration() {
         let report = vulkan_capability_report(Codec::Hevc);
+        assert!(!report.decode_supported);
+        assert!(!report.encode_supported);
+        assert!(!report.hardware_acceleration);
+    }
+
+    #[test]
+    fn av1_capability_report_never_claims_hardware_acceleration() {
+        let report = vulkan_capability_report(Codec::Av1);
         assert!(!report.decode_supported);
         assert!(!report.encode_supported);
         assert!(!report.hardware_acceleration);
