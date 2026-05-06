@@ -180,13 +180,14 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan -
 - Windows/Linux では `nv,intel,vulkan`、macOS では `vt` が既定。
 - NV/Intel/VT は子レポートの parity / verification 結果も統合statusへ反映する。
 - Vulkan は `vulkaninfo --summary` と `list_vulkan_adapters` の結果を名前/IDで対応付け、adapter ごとに `video-hw` decode/encode と FFmpeg Vulkan decode/encode を記録する。
-- Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
-- Vulkan AV1 は video-hw では未実装。runner は `UnsupportedConfig` として失敗理由を統合レポートに残し、同じ adapter の FFmpeg `av1_vulkan` encode/decode 可否も併記する。
+- Vulkan decode は `--width` / `--height` / `--frame-count` に合わせた Annex-B / OBU 入力を FFmpeg software encoder（H.264=`libx264`, HEVC=`libx265`, AV1=`libaom-av1`）で `output/benchmark-vulkan-decode-input-...` に生成し、`video-hw` と FFmpeg Vulkan の両方へ同じ入力を渡す。decode throughput の分母はこの `--frame-count` と一致する。
+- Vulkan AV1 decode は現状 keyframe-only OBU 入力（生成時 `-g 1 -lag-in-frames 0`）を測定対象にする。NVIDIA では `video-hw decode` と FFmpeg Vulkan decode を同じ入力で比較し、unsupported adapter の失敗理由も同じ report に残す。Vulkan AV1 encode は現行 `ash` binding が `VK_KHR_video_encode_av1` を公開していないため `unavailable` として記録する。
 - VideoToolbox AV1 は video-hw では未実装。macOS で `--backends vt --codec av1` を指定した場合、VT precise script は AV1 未実装を明示した FAIL report を生成し、統合 runner は parity 対象として成功扱いにしない。
 - FFmpeg Vulkan の adapter 指定は `-init_hw_device vulkan:<index>` を使う。Windows hybrid GPU 環境では `vulkan=vk:<index>` が指定した物理デバイスを選ばず、NVIDIA encode ケースが Intel 側へ流れることがあった。
 - `cargo run -p video-hw --features backend-vulkan --example list_vulkan_adapters` で `video-hw` / `vk-video` 側に見えている Vulkan adapter を確認できる。
 - `ffmpeg-only` Vulkan adapter のHEVC decodeでは、runnerが `VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX=<index>` を設定して direct ash HEVC decode bootstrap も試す。これは `--vulkan-adapter-index` の既存意味を変えず、Intel decode-only capability の切り分けに使う。
 - adapter ごとに失敗理由も report に残すため、複数 GPU 環境では `--allow-failures true` で全候補を走査する。
+- FFmpeg Vulkan encode 比較は encoded bitstream muxer ではなく null muxer に流す。AV1 OBU muxer の DTS 制約で encode自体とは無関係に失敗するケースを避け、encoder throughput を測るため。
 - Vulkan HEVC encode は NVIDIA adapter 上で実験的な IDR-only production path を測定できる。runner は FFmpeg `hevc_vulkan` で同サイズの parameter/header sample を生成し、名前/vendor/device idで対応したFFmpeg Vulkan adapter番号を使って `VIDEO_HW_VULKAN_HEVC_ENCODE_PARAMETER_SAMPLE_PATH` を自動設定する。現状は1回の `flush` 内で Vulkan video session / session parameters を再利用し、warmup後の統合benchmarkではFFmpeg Vulkan HEVC encode以上のthroughputを確認済み。長寿命encoder sessionと参照フレーム/GOP encodeは未実装。失敗adapterや非公開adapterも report に残す。診断用には `cargo +nightly -Zscript scripts/check_vulkan_hevc_encode_probe.rs --adapter-index <n>`、または `cargo test -p video-hw-backend-vulkan --features backend-vulkan live_hevc_encode_session_bootstrap_reports_submit_feedback -- --ignored --nocapture` を明示実行する。
 
 ### 11.1) Vulkan AV1 command record probe

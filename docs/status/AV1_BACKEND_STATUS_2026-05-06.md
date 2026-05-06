@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, extracts sequence-header coded extent, builds a reduced-still `StdVideoAV1SequenceHeader`, builds relative decode-info source ranges, and now plans aligned bitstream upload ranges for `vkCmdDecodeVideoKHR`; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated keyframe-only AV1 OBU/fMP4 decode through submit/readback on NVIDIA; PSNR gates pass against FFmpeg software reference. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode partial, encode blocked |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -41,18 +41,28 @@ or better.
 - AV1 fMP4 smoke files:
   - `output/synthetic-av1-fmp4.mp4`
   - `output/synthetic-intel-av1-fmp4.mp4`
+- Vulkan AV1 integrated benchmark:
+  - `output/benchmark-backends-av1-1778067552.md`
+  - detail: `output/benchmark-vulkan-av1-1778067552.md`
+  - NVIDIA: video-hw Vulkan AV1 decode 0.146s / 54.792 fps vs FFmpeg Vulkan decode 0.320s / 24.966 fps for 8 generated keyframe-only frames at 320x180
+  - NVIDIA FFmpeg `av1_vulkan` encode 0.316s / 25.347 fps; video-hw Vulkan AV1 encode is `unavailable` because current ash bindings do not expose `VK_KHR_video_encode_av1`
+  - Intel Vulkan: FFmpeg AV1 decode exits with Windows access violation `0xc0000005`; FFmpeg `av1_vulkan` encode reports `Function not implemented`
 
 ## Vulkan AV1 Status
 
-Vulkan AV1 is intentionally not reported as supported by video-hw yet. The
-integrated benchmark records explicit unsupported errors:
+Vulkan AV1 is still not a full backend-support claim. The implemented decode
+scope is generated keyframe-only AV1 OBU and fMP4 (`av01`) input on the NVIDIA
+Vulkan Video path. The integrated benchmark now measures that path and records
+unsupported or failing adapter rows explicitly:
 
-- `output/benchmark-vulkan-av1-1778051619.md`
-- `output/benchmark-backends-av1-1778051619.md`
+- `output/benchmark-vulkan-av1-1778067552.md`
+- `output/benchmark-backends-av1-1778067552.md`
 
 Observed FFmpeg behavior on this Windows host:
 
-- NVIDIA adapter: FFmpeg `av1_vulkan` encode/decode can run.
+- NVIDIA adapter: FFmpeg `av1_vulkan` encode/decode can run. The integrated
+  benchmark uses null muxer output for FFmpeg encode so AV1 OBU muxer timestamp
+  constraints do not mask encoder throughput.
 - Intel adapter: FFmpeg sees `VK_KHR_video_decode_av1`, reports AV1 decode
   capabilities, and initializes the Vulkan decoder, but a short AV1 decode smoke
   terminates with Windows access-violation exit `-1073741819`; encode is still
@@ -225,11 +235,12 @@ Current implementation progress:
   for `G8_B8R8_2PLANE_420_UNORM`, including odd-dimension chroma rounding and
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
-- Vulkan AV1 capability is still false because FFmpeg-reference PSNR is not
-  passing yet: `scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0` records the
-  current one-frame generated-OBU result as `psnr_y_min=12.9600` after fixing
-  the explicit submit path and proving the readback copy overwrites a sentinel
-  buffer. Follow-up parity work now also gives AV1 session parameters an 8-bit
+- Vulkan AV1 capability is still conservative because the implemented scope is
+  generated keyframe-only decode and does not yet include inter-frame/GOP replay
+  or encode. Earlier FFmpeg-reference PSNR work recorded a one-frame
+  generated-OBU result as `psnr_y_min=12.9600` after fixing the explicit submit
+  path and proving the readback copy overwrites a sentinel buffer. Follow-up
+  parity work now also gives AV1 session parameters an 8-bit
   4:2:0 color config and matches FFmpeg's inactive begin-coding reference-slot
   shape for the current reconstruction. Follow-up FFmpeg parity work now also
   passes a zeroed `StdVideoAV1TimingInfo`, uses FFmpeg's `[1, 1, 1]`
@@ -286,6 +297,9 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 0 --repeat 1 --frame-count 8 --width 320 --height 180 --release false --allow-failures true`
+  (`output/benchmark-backends-av1-1778067552.md`,
+  `output/benchmark-vulkan-av1-1778067552.md`)
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
@@ -308,11 +322,11 @@ format description creation, encoded packet layout, fMP4 integration, FFmpeg
 
 ## Next Concrete Work
 
-1. Continue comparing FFmpeg's populated `StdVideoDecodeAV1PictureInfo`/
-   `StdVideoAV1SequenceHeader` fields against video-hw's generated structs; the
-   first key-frame parser pass did not improve PSNR.
-2. Keep the one-frame `decode_to_yuv` path passing while adding multi-frame
-   key-frame-only coverage.
+1. Add inter-frame/GOP replay support and targeted decode-order tests/benches;
+   the current Vulkan AV1 path is validated only for generated keyframe-only
+   streams.
+2. Keep OBU and fMP4 8-frame PSNR gates passing while expanding parser coverage
+   beyond the generated `libaom-av1 -g 1` fixture.
 3. Update Vulkan bindings before adding AV1 encode, then enable encode only for
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also

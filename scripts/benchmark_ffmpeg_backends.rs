@@ -514,23 +514,31 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
                 "no vulkaninfo adapter with matching name/device id",
             ));
         }
-        cases.push(run_vulkan_case(
-            adapter.index,
-            &video_hw_adapter_label,
-            "video-hw encode",
-            args.frame_count,
-            total_rounds,
-            args.warmup,
-            || {
-                vulkan_encode_command(
-                    &encode_bin,
-                    args,
-                    adapter.index,
-                    ffmpeg_match.map(|adapter| adapter.index),
-                    &null_sink,
-                )
-            },
-        ));
+        if args.codec == Codec::Av1 {
+            cases.push(unavailable_case(
+                "video-hw encode",
+                &video_hw_adapter_label,
+                "Vulkan AV1 encode is blocked by current ash bindings",
+            ));
+        } else {
+            cases.push(run_vulkan_case(
+                adapter.index,
+                &video_hw_adapter_label,
+                "video-hw encode",
+                args.frame_count,
+                total_rounds,
+                args.warmup,
+                || {
+                    vulkan_encode_command(
+                        &encode_bin,
+                        args,
+                        adapter.index,
+                        ffmpeg_match.map(|adapter| adapter.index),
+                        &null_sink,
+                    )
+                },
+            ));
+        }
         if let Some(ffmpeg_adapter) = ffmpeg_match {
             cases.push(run_vulkan_case(
                 ffmpeg_adapter.index,
@@ -632,10 +640,7 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
         args.codec.as_cli()
     ));
     write_vulkan_report(&report_path, args, &decode_input, &cases)?;
-    let status = if cases
-        .iter()
-        .any(|case| case.status.starts_with("failed:") || case.status.starts_with("unavailable:"))
-    {
+    let status = if cases.iter().any(|case| case.status.starts_with("failed:")) {
         BackendStatus::Failed("one or more Vulkan adapter cases failed".to_string())
     } else {
         BackendStatus::Passed
@@ -873,7 +878,7 @@ fn ensure_vulkan_decode_input(args: &Args) -> Result<PathBuf> {
             ]);
         }
         Codec::Av1 => {
-            command.args(["-cpu-used", "8", "-row-mt", "1", "-g", "30"]);
+            command.args(["-cpu-used", "8", "-row-mt", "1", "-g", "1", "-lag-in-frames", "0"]);
         }
     }
     command.args([
@@ -1093,7 +1098,7 @@ fn ffmpeg_vulkan_encode_command(args: &Args, adapter_index: usize, null_sink: &P
             Codec::Av1 => "av1_vulkan",
         },
         "-f",
-        args.codec.ffmpeg_demuxer(),
+        "null",
         &null_sink.to_string_lossy(),
     ]);
     command

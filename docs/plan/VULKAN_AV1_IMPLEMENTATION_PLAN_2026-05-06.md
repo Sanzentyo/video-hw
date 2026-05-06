@@ -10,10 +10,16 @@ plan covers the missing work tracked in
 ## Current Boundary
 
 - NVIDIA and Intel oneVPL AV1 are implemented and verified.
-- Vulkan AV1 currently returns explicit `UnsupportedConfig`.
+- Vulkan AV1 decode now supports the generated keyframe-only OBU/fMP4 scope on
+  NVIDIA and is still not a full capability claim for arbitrary AV1 streams.
 - Vulkan AV1 decode prerequisite probing and low-overhead OBU inspection are now
   implemented in `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`.
-- FFmpeg `av1_vulkan` works on the NVIDIA adapter in this Windows environment.
+- FFmpeg `av1_vulkan` decode and encode work on the NVIDIA adapter in this
+  Windows environment when encode is sent to a null muxer for throughput
+  measurement.
+- FFmpeg Vulkan AV1 decode on the Intel adapter still exits with Windows access
+  violation `0xc0000005`; Intel AV1 is usable through QSV on this host, not
+  through the Vulkan Video path.
 - Intel Vulkan AV1 encode is not available here because FFmpeg also fails on the
   Intel adapter without the required encode queue/path.
 
@@ -40,8 +46,9 @@ Tasks:
    `vk::VideoCodecOperationFlagsKHR::DECODE_AV1` and
    `vk::VideoDecodeAV1ProfileInfoKHR`. Done.
 4. Query `vk::VideoDecodeAV1CapabilitiesKHR` and output formats. Done.
-5. Keep `CapabilityReport` false until submit/readback is proven by the
-   bootstrap probe, matching the existing Vulkan HEVC safety pattern.
+5. Keep `CapabilityReport` conservative until the supported decode scope is
+   broader than generated keyframe-only streams, matching the existing Vulkan
+   HEVC safety pattern.
 
 Relevant ash binding names already available:
 
@@ -230,6 +237,10 @@ Acceptance:
 - `scripts/check_vulkan_av1_psnr.rs` records the current FFmpeg-reference
   decode PSNR and passes generated keyframe-only gates at
   `--min-psnr-y 60` for both OBU and fMP4 input.
+- Current verified reports:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md` and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`, both with
+  `psnr_y_min=inf` over 8 generated keyframe-only frames.
 
 ### Phase 5: Integrated Benchmark
 
@@ -246,6 +257,14 @@ Acceptance:
 - integrated AV1 report has a passing Vulkan NVIDIA decode row;
 - failure rows remain explicit for unsupported adapters;
 - docs/status is updated with exact report paths and fps/seconds.
+
+Current verified report:
+
+- `output/benchmark-backends-av1-1778067552.md`
+- `output/benchmark-vulkan-av1-1778067552.md`
+- NVIDIA: video-hw Vulkan AV1 decode 54.792 fps vs FFmpeg Vulkan decode
+  24.966 fps for 8 generated keyframe-only 320x180 frames.
+- Intel: FFmpeg Vulkan AV1 decode/encode failures remain explicit report rows.
 
 ## Encode Scope
 
@@ -289,9 +308,11 @@ Run on a host with Vulkan AV1 hardware:
 cargo fmt --all --check
 cargo test -p video-hw-backend-vulkan --features backend-vulkan av1
 cargo check -p video-hw --features backend-vulkan --examples
-cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends vulkan --release true --require-hardware true
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --min-psnr-y 60
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --verify --allow-failures true
 ```
 
-Do not update `CapabilityReport` to claim Vulkan AV1 support until these gates
-pass and the status document records the exact report paths.
+Do not claim full Vulkan AV1 support until these gates pass for the broadened
+stream scope, inter-frame/GOP replay is covered, and the status document records
+the exact report paths.
