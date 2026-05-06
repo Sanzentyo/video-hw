@@ -83,6 +83,10 @@ Tasks:
    - OBUs without size fields if the submit path cannot packetize them safely;
    - missing sequence header before first frame. Done for decode-info skeleton
      extraction, including late sequence-header rejection.
+   - normal non-reduced streams whose frame header cannot be safely split from
+     tile data. `show_existing_frame` and inter-frame `frame_type=1` now fail
+     before submit skeleton construction instead of being interpreted as tile
+     payload.
 5. Unit tests:
    - sequence header extraction;
    - temporal delimiter + sequence header + frame split;

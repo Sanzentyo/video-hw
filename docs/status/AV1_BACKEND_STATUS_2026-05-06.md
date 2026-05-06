@@ -93,6 +93,9 @@ Current implementation progress:
   rejected explicitly before OBU parsing;
 - decode-info skeleton extraction now rejects streams where the sequence header
   appears after the first frame payload, rather than accepting a late header;
+- generated-keyframe submit extraction now also rejects normal non-reduced AV1
+  frame headers that the current parser cannot safely split, such as
+  `show_existing_frame`, instead of treating those bytes as tile payload;
 - sequence-header parsing now extracts reduced-still-picture coded width/height,
   core sequence flags, and maps them into an ash `StdVideoAV1SequenceHeader`
   skeleton for the later session-parameter builder;
@@ -291,6 +294,8 @@ Latest Vulkan AV1 scaffold verification:
 
 - `cargo fmt --all --check`
 - `cargo test -p video-hw-backend-vulkan --features backend-vulkan av1`
+  includes `decode_submit_skeleton_rejects_show_existing_frame_obu`, which
+  guards the unsupported-frame-header rejection path added in `d0ee5e9`.
 - `cargo check -p video-hw-backend-vulkan --features backend-vulkan`
 - `cargo clippy -p video-hw-backend-vulkan --features backend-vulkan --all-targets`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --skip-build --readback`
