@@ -1367,12 +1367,12 @@ fn submit_sample(
     if let Some(pts) = pts_90k {
         collect.pts_to_sample.insert(pts.0, sample_id);
     }
-    let annexb = sample
-        .to_annexb()
-        .with_context(|| format!("failed to convert sample {sample_id} to Annex-B"))?;
+    let payload = sample
+        .to_decode_payload()
+        .with_context(|| format!("failed to prepare sample {sample_id} decoder payload"))?;
     loop {
         match session.submit(BitstreamInput::AnnexBChunk {
-            chunk: annexb.clone(),
+            chunk: payload.clone(),
             pts_90k,
         }) {
             Ok(()) => break,

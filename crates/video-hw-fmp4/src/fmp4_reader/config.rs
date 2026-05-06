@@ -267,6 +267,23 @@ impl EncodedSample {
         sample_entry_parameter_sets(self.sample_entry.as_ref())
     }
 
+    pub fn to_decode_payload(&self) -> anyhow::Result<Vec<u8>> {
+        match self.encoded_layout() {
+            Some(EncodedLayout::Av1) if self.meta.keyframe => {
+                let parameter_sets = self.parameter_sets();
+                let parameter_sets_len = parameter_sets.iter().map(Vec::len).sum::<usize>();
+                let mut payload = Vec::with_capacity(parameter_sets_len + self.data.len());
+                for parameter_set in parameter_sets {
+                    payload.extend_from_slice(&parameter_set);
+                }
+                payload.extend_from_slice(&self.data);
+                Ok(payload)
+            }
+            Some(EncodedLayout::Av1) => Ok(self.data.clone()),
+            _ => self.to_annexb(),
+        }
+    }
+
     pub fn to_annexb(&self) -> anyhow::Result<Vec<u8>> {
         match self.encoded_layout() {
             Some(EncodedLayout::Av1) => Ok(self.data.clone()),
@@ -574,6 +591,10 @@ mod tests {
         assert_eq!(sample.codec(), Some(Codec::Av1));
         assert_eq!(sample.encoded_layout(), Some(EncodedLayout::Av1));
         assert_eq!(sample.to_annexb().expect("obu passthrough"), data);
+        assert_eq!(
+            sample.to_decode_payload().expect("keyframe decode payload"),
+            vec![0x0a, 0x01, 0x00, 0x12, 0x00, 0x32, 0x01, 0x80]
+        );
         assert_eq!(sample.parameter_sets().len(), 1);
         let track = Fmp4Track {
             track_id: TrackId(1),
@@ -585,6 +606,30 @@ mod tests {
         assert_eq!(track.codec(), Some(Codec::Av1));
         assert_eq!(track.encoded_layout(), Some(EncodedLayout::Av1));
         assert_eq!(track.parameter_sets().len(), 1);
+    }
+
+    #[test]
+    fn av1_decode_payload_prepends_config_obus_only_for_keyframes() {
+        let sample_entry = av1_sample_entry();
+        let data = vec![0x32, 0x01, 0x80];
+        let keyframe = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(sample_entry.clone()),
+            data: data.clone(),
+        };
+        assert_eq!(
+            keyframe.to_decode_payload().expect("keyframe payload"),
+            vec![0x0a, 0x01, 0x00, 0x32, 0x01, 0x80]
+        );
+
+        let delta = EncodedSample {
+            meta: test_meta(false),
+            kind: TrackKind::Video,
+            sample_entry: Some(sample_entry),
+            data: data.clone(),
+        };
+        assert_eq!(delta.to_decode_payload().expect("delta payload"), data);
     }
 
     #[cfg(feature = "serde")]
