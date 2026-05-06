@@ -123,7 +123,9 @@ Tasks:
    aligned upload plan can now validate each command frame's source range
    against the compact buffer, produce per-frame submit bundles, and materialize
    callback-scoped `VideoDecodeInfoKHR` chains for all frames in command order
-   before real command recording consumes them.
+   before real command recording consumes them. A command-sequence visitor now
+   materializes begin-coding, RESET, per-frame decode, and end-coding data in the
+   order the future recorder will issue Vulkan calls.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 

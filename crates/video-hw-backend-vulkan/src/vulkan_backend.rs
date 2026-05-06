@@ -14,12 +14,12 @@ use crate::{
     DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
     VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
-        Av1DecodePrerequisiteProbe, build_av1_aligned_key_frame_decode_command_skeleton,
-        build_av1_decode_info_skeleton, build_av1_decode_info_skeletons,
-        build_av1_decode_picture_info_skeleton, build_av1_decode_submit_skeleton,
-        build_av1_key_frame_decode_command_skeleton, extract_av1_std_sequence_header,
-        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
-        probe_av1_decode_session_parameters_for_bitstream,
+        Av1DecodeCommandVisit, Av1DecodePrerequisiteProbe,
+        build_av1_aligned_key_frame_decode_command_skeleton, build_av1_decode_info_skeleton,
+        build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
+        build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
+        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
+        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -825,13 +825,62 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                     )
                                     .map(|indices| indices.len())
                                     .unwrap_or_default();
+                                let mut sequence_visits = 0usize;
+                                let mut sequence_decodes = 0usize;
+                                let mut sequence_begin_refs = 0u32;
+                                let mut sequence_reset = false;
+                                let mut sequence_first_decode_offset = 0u64;
+                                let mut sequence_end_empty = false;
+                                let sequence_ready = upload_plan
+                                    .visit_decode_command_sequence(
+                                        &aligned_command,
+                                        vk::VideoSessionKHR::null(),
+                                        vk::VideoSessionParametersKHR::null(),
+                                        vk::Buffer::null(),
+                                        vk::ImageView::null(),
+                                        |visit| {
+                                            sequence_visits += 1;
+                                            match visit {
+                                                Av1DecodeCommandVisit::BeginCoding(info) => {
+                                                    sequence_begin_refs =
+                                                        info.reference_slot_count;
+                                                }
+                                                Av1DecodeCommandVisit::ResetCoding(info) => {
+                                                    sequence_reset = info.flags.contains(
+                                                        vk::VideoCodingControlFlagsKHR::RESET,
+                                                    );
+                                                }
+                                                Av1DecodeCommandVisit::DecodeFrame {
+                                                    decode_info,
+                                                    bundle,
+                                                } => {
+                                                    sequence_decodes += 1;
+                                                    if bundle.frame_index == 0 {
+                                                        sequence_first_decode_offset =
+                                                            decode_info.src_buffer_offset;
+                                                    }
+                                                }
+                                                Av1DecodeCommandVisit::EndCoding(info) => {
+                                                    sequence_end_empty = info.flags.is_empty();
+                                                }
+                                            }
+                                        },
+                                    )
+                                    .is_ok();
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
                                     submit_bundles.len(),
                                     first_decode_info_ready,
                                     decode_info_loop_count,
+                                    sequence_ready,
+                                    sequence_visits,
+                                    sequence_decodes,
+                                    sequence_begin_refs,
+                                    sequence_reset,
+                                    sequence_first_decode_offset,
+                                    sequence_end_empty,
                                     offset_alignment,
                                     size_alignment,
                                     alignment_source,
@@ -1566,6 +1615,7 @@ mod tests {
         assert!(message.contains("aligned_upload=ready"));
         assert!(message.contains("first_decode_info=true"));
         assert!(message.contains("decode_info_loop=1"));
+        assert!(message.contains("command_sequence=true"));
     }
 
     #[test]

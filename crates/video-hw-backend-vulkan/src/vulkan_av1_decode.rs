@@ -259,6 +259,51 @@ impl Av1DecodeBitstreamUploadPlan {
         }
         Ok(results)
     }
+
+    pub(crate) fn visit_decode_command_sequence(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+        video_session: vk::VideoSessionKHR,
+        video_session_parameters: vk::VideoSessionParametersKHR,
+        src_buffer: vk::Buffer,
+        image_view: vk::ImageView,
+        mut visit: impl FnMut(Av1DecodeCommandVisit<'_>),
+    ) -> Result<(), String> {
+        let begin_resources = command.begin_picture_resources(image_view);
+        let begin_reference_infos = command.begin_std_reference_infos();
+        let mut begin_dpb_infos = command.begin_dpb_slot_infos(&begin_reference_infos)?;
+        let begin_reference_slots =
+            command.begin_reference_slots(&begin_resources, &mut begin_dpb_infos)?;
+        let begin_coding_info = command.vk_begin_coding_info(
+            video_session,
+            video_session_parameters,
+            &begin_reference_slots,
+        )?;
+        visit(Av1DecodeCommandVisit::BeginCoding(&begin_coding_info));
+
+        let reset_control = command.vk_reset_coding_control_info();
+        visit(Av1DecodeCommandVisit::ResetCoding(&reset_control));
+
+        for frame in &command.frames {
+            self.with_frame_decode_info(
+                command,
+                frame.frame_index,
+                src_buffer,
+                image_view,
+                |decode_info, bundle| {
+                    visit(Av1DecodeCommandVisit::DecodeFrame {
+                        decode_info,
+                        bundle,
+                    });
+                },
+            )?;
+        }
+
+        let end_coding_info = command.vk_end_coding_info();
+        visit(Av1DecodeCommandVisit::EndCoding(&end_coding_info));
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +346,16 @@ pub(crate) enum Av1DecodeRecordStep {
         tile_count: usize,
     },
     EndCoding,
+}
+
+pub(crate) enum Av1DecodeCommandVisit<'a> {
+    BeginCoding(&'a vk::VideoBeginCodingInfoKHR<'a>),
+    ResetCoding(&'a vk::VideoCodingControlInfoKHR<'a>),
+    DecodeFrame {
+        decode_info: &'a vk::VideoDecodeInfoKHR<'a>,
+        bundle: &'a Av1DecodeFrameSubmitBundle,
+    },
+    EndCoding(&'a vk::VideoEndCodingInfoKHR<'a>),
 }
 
 impl Av1DecodeCommandSkeleton {
@@ -3032,6 +3087,51 @@ mod tests {
             )
             .expect("all frame decode infos should materialize in command order");
         assert_eq!(loop_summaries, vec![(0, 0, 0, 0), (1, 1, 16, 1)]);
+
+        let mut visits = Vec::new();
+        plan.visit_decode_command_sequence(
+            &command,
+            vk::VideoSessionKHR::null(),
+            vk::VideoSessionParametersKHR::null(),
+            vk::Buffer::null(),
+            vk::ImageView::null(),
+            |visit| match visit {
+                Av1DecodeCommandVisit::BeginCoding(info) => {
+                    visits.push(format!("begin:{}", info.reference_slot_count));
+                }
+                Av1DecodeCommandVisit::ResetCoding(info) => {
+                    visits.push(format!(
+                        "reset:{}",
+                        info.flags.contains(vk::VideoCodingControlFlagsKHR::RESET)
+                    ));
+                }
+                Av1DecodeCommandVisit::DecodeFrame {
+                    decode_info,
+                    bundle,
+                } => {
+                    visits.push(format!(
+                        "decode:{}:{}:{}",
+                        bundle.frame_index,
+                        decode_info.src_buffer_offset,
+                        decode_info.dst_picture_resource.base_array_layer
+                    ));
+                }
+                Av1DecodeCommandVisit::EndCoding(info) => {
+                    visits.push(format!("end:{}", info.flags.is_empty()));
+                }
+            },
+        )
+        .expect("command sequence visitor should materialize command info in order");
+        assert_eq!(
+            visits,
+            vec![
+                "begin:2".to_string(),
+                "reset:true".to_string(),
+                "decode:0:0:0".to_string(),
+                "decode:1:16:1".to_string(),
+                "end:true".to_string(),
+            ]
+        );
     }
 
     #[test]

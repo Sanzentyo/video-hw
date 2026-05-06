@@ -153,7 +153,9 @@ Current implementation progress:
   upload byte range together; blocker diagnostics now also materialize the first
   frame's `VideoDecodeInfoKHR`/AV1 picture-info/setup-slot chain from the
   aligned plan and can walk all planned frames in command order with
-  callback-scoped decode-info chains;
+  callback-scoped decode-info chains; a command-sequence visitor now materializes
+  begin-coding, RESET, per-frame decode-info, and end-coding structs in the same
+  order the future command buffer recorder will consume them;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
