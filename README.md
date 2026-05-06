@@ -98,6 +98,7 @@ Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|
 - `video-hw-fmp4` は `av01` sample entry / `av1C` box を生成・読取できます。AV1 fMP4 の sample payload は `EncodedLayout::Av1` として扱い、reader の `to_annexb()` は互換上の名前のまま OBU payload を返します。
 - NVIDIA parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv --codec av1 --release true` で実行できます。320x180/30 frames の確認では `video-hw decode 0.118-0.120s`、`ffmpeg decode 0.131-0.133s`、`video-hw encode 0.148-0.162s`、`ffmpeg encode 0.164-0.174s` で parity PASS でした。
 - Intel oneVPL parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends intel --codec av1 --release true` で実行できます。320x180/30 encode frames / 640x360/120 decode frames の確認では `video-hw decode 0.406s`、`ffmpeg decode 0.392s`、`video-hw encode 0.425s`、`ffmpeg encode 0.429s` で parity PASS でした。AV1 OBU decode input は H.264/HEVC のように byte-repeat せず、生成済み elementary stream をそのまま使います。
+- AV1 の MSE/PSNR smoke は `cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --release true` で実行できます。320x180/30 frames の確認では NVIDIA encode PSNR-Y avg 60.43 dB / decode PSNR-Y min 50.54 dB、Intel encode PSNR-Y avg 55.62 dB でした。Intel AV1 hardware decode は metadata decode 30 frames を確認していますが、この環境では pixel payload read が空になり RGB/NV12 出力 PSNR は未取得です。
 
 #### onevpl fork 更新時の手順
 

@@ -80,14 +80,16 @@ cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --release --warmup 2 --repeat 9
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec av1 --release --warmup 1 --repeat 3
 ```
 
 - 生成レポート: `output/benchmark-intel-precise-<codec>-<epoch>.md`
 - `video-hw` は `backend=intel` で実行し、`--require-hardware <true|false>` で HW 固定 / fallback 許可を切り替え可能
-- `ffmpeg` は `h264_qsv` / `hevc_qsv` を使用
+- `ffmpeg` は `h264_qsv` / `hevc_qsv` / `av1_qsv` を使用
 - レポートに encode/decode の平均スループット差分（ffmpeg 比、±10% 判定）を出力
 - encode の厳密比較は `--equal-raw-input` を推奨（`video-hw` / `ffmpeg` に同一 raw ARGB 入力を供給）
 - HEVC で parity を詰める場合は `--equal-raw-input --raw-input-pix-fmt nv12` を推奨（直近 report 1773584282 で decode/encode とも ±10% 内）
+- AV1 decode input は生成済み OBU elementary stream を使い、H.264/HEVC のような byte-repeat は行わない
 - 既定で `--grouped-cases=true`（caseごとに warmup/measure をまとめて実行）になっており、round-robin より計測ばらつきを抑えやすい
 - 既定値は `--warmup 2` / `--repeat 7` / `--decode-loops 10`（短窓ノイズを抑えて parity 判定を安定化）
 - `--settle-ms <N>` で各計測の間に待機を入れて、熱/スケジューリング揺れを緩和できる
@@ -95,6 +97,17 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc -
 - encode 側チューニングは環境変数 `VIDEO_HW_INTEL_RATE_CONTROL` / `VIDEO_HW_INTEL_CQP` / `VIDEO_HW_INTEL_ASYNC_DEPTH` / `VIDEO_HW_INTEL_HEVC_USE_VPP` / `VIDEO_HW_INTEL_HEVC_LOW_POWER` で調整できる（未指定時は H.264=CBR、HEVC=CQP、CQP=24、async_depth=10、HEVCはCPU NV12投入を優先、low-power は有効）
 - runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録したままレポート生成を継続
 - `--allow-case-failures --verify` 併用時、失敗ケースで出力が欠けた検証対象は `skipped` としてレポートに記録する
+
+### 6.1) AV1 MSE/PSNR smoke
+
+```bash
+cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --release true
+```
+
+- 生成レポート: `output/av1-psnr/av1-psnr-<epoch>.md`
+- FFmpeg `testsrc2` から raw ARGB 入力を生成し、`video-hw` AV1 encode 出力を FFmpeg reference と MSE/PSNR 比較する
+- decode pixel PSNR は `video-hw decode_to_yuv --output-mode rgb24` と FFmpeg RGB24 reference を比較する
+- Intel AV1 hardware decode はこの環境では metadata decode は通る一方、RGB/NV12 pixel payload read が空になるため、script は Intel decode PSNR を skipped として metadata frame count を記録する
 
 ### 7) Intel oneVPL fallback セットアップ（Windows CLI）
 
