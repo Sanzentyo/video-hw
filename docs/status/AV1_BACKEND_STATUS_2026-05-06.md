@@ -229,9 +229,11 @@ Current implementation progress:
   passing yet: `scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0` records the
   current one-frame generated-OBU result as `psnr_y_min=12.9600` after fixing
   the explicit submit path and proving the readback copy overwrites a sentinel
-  buffer. The output is still neutral NV12-like rather than the FFmpeg reference,
-  so the AV1 picture/session modeling is not yet bit-exact enough to claim
-  decode support;
+  buffer. Follow-up parity work now also gives AV1 session parameters an 8-bit
+  4:2:0 color config and matches FFmpeg's inactive begin-coding reference-slot
+  shape for the current reconstruction, but the PSNR value is unchanged. The
+  output is still neutral NV12-like rather than the FFmpeg reference, so the AV1
+  picture/session modeling is not yet bit-exact enough to claim decode support;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 

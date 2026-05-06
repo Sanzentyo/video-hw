@@ -4,14 +4,19 @@ use std::sync::OnceLock;
 
 use ash::vk;
 use ash::vk::native::{
-    StdVideoAV1CDEF, StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE,
+    StdVideoAV1CDEF, StdVideoAV1ChromaSamplePosition_STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_UNKNOWN,
+    StdVideoAV1ColorConfig, StdVideoAV1ColorConfigFlags,
+    StdVideoAV1ColorPrimaries_STD_VIDEO_AV1_COLOR_PRIMARIES_BT_UNSPECIFIED,
+    StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE,
     StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY, StdVideoAV1GlobalMotion,
     StdVideoAV1InterpolationFilter_STD_VIDEO_AV1_INTERPOLATION_FILTER_SWITCHABLE,
     StdVideoAV1LoopFilter, StdVideoAV1LoopFilterFlags, StdVideoAV1LoopRestoration,
+    StdVideoAV1MatrixCoefficients_STD_VIDEO_AV1_MATRIX_COEFFICIENTS_UNSPECIFIED,
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH, StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN,
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1Quantization,
     StdVideoAV1QuantizationFlags, StdVideoAV1Segmentation, StdVideoAV1SequenceHeader,
     StdVideoAV1SequenceHeaderFlags, StdVideoAV1TileInfo, StdVideoAV1TileInfoFlags,
+    StdVideoAV1TransferCharacteristics_STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_UNSPECIFIED,
     StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST,
     StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT, StdVideoDecodeAV1PictureInfo,
     StdVideoDecodeAV1PictureInfoFlags, StdVideoDecodeAV1ReferenceInfo,
@@ -905,7 +910,7 @@ impl Av1DecodeCommandSkeleton {
         }
 
         let mut slots = Vec::with_capacity(self.begin_slots.len());
-        for ((slot, picture_resource), dpb_slot_info) in self
+        for ((_slot, picture_resource), dpb_slot_info) in self
             .begin_slots
             .iter()
             .zip(picture_resources.iter())
@@ -913,7 +918,7 @@ impl Av1DecodeCommandSkeleton {
         {
             slots.push(
                 vk::VideoReferenceSlotInfoKHR::default()
-                    .slot_index(slot.slot_index)
+                    .slot_index(-1)
                     .picture_resource(picture_resource)
                     .push_next(dpb_slot_info),
             );
@@ -1573,7 +1578,8 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
         .first()
         .ok_or_else(|| "missing AV1 frames for decode command skeleton".to_string())?;
 
-    let begin_slots = (0..max_dpb_slots)
+    let planned_slot_count = decodes.len().min(max_dpb_slots).max(1);
+    let begin_slots = (0..planned_slot_count)
         .map(|slot| {
             let slot_index = i32::try_from(slot)
                 .map_err(|_| "AV1 begin-coding slot index exceeds i32 range".to_string())?;
@@ -3783,9 +3789,12 @@ fn create_av1_decode_session_parameters(
     video_session: vk::VideoSessionKHR,
     std_sequence_header: &StdVideoAV1SequenceHeader,
 ) -> Result<vk::VideoSessionParametersKHR, String> {
+    let color_config = default_av1_main_420_8bit_color_config();
+    let mut std_sequence_header = *std_sequence_header;
+    std_sequence_header.pColorConfig = &color_config;
     let mut decode_av1_session_parameters =
         vk::VideoDecodeAV1SessionParametersCreateInfoKHR::default()
-            .std_sequence_header(std_sequence_header);
+            .std_sequence_header(&std_sequence_header);
     let create_info = vk::VideoSessionParametersCreateInfoKHR::default()
         .video_session(video_session)
         .video_session_parameters_template(vk::VideoSessionParametersKHR::null())
@@ -3808,6 +3817,26 @@ fn create_av1_decode_session_parameters(
     }
 
     Ok(video_session_parameters)
+}
+
+fn default_av1_main_420_8bit_color_config() -> StdVideoAV1ColorConfig {
+    StdVideoAV1ColorConfig {
+        flags: StdVideoAV1ColorConfigFlags {
+            _bitfield_align_1: [],
+            _bitfield_1: StdVideoAV1ColorConfigFlags::new_bitfield_1(0, 0, 0, 0, 0),
+        },
+        BitDepth: 8,
+        subsampling_x: 1,
+        subsampling_y: 1,
+        reserved1: 0,
+        color_primaries: StdVideoAV1ColorPrimaries_STD_VIDEO_AV1_COLOR_PRIMARIES_BT_UNSPECIFIED,
+        transfer_characteristics:
+            StdVideoAV1TransferCharacteristics_STD_VIDEO_AV1_TRANSFER_CHARACTERISTICS_UNSPECIFIED,
+        matrix_coefficients:
+            StdVideoAV1MatrixCoefficients_STD_VIDEO_AV1_MATRIX_COEFFICIENTS_UNSPECIFIED,
+        chroma_sample_position:
+            StdVideoAV1ChromaSamplePosition_STD_VIDEO_AV1_CHROMA_SAMPLE_POSITION_UNKNOWN,
+    }
 }
 
 fn destroy_av1_decode_session_resource(
@@ -5018,8 +5047,8 @@ mod tests {
             .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
             .expect("matching begin resources and DPB infos should produce reference slots");
         assert_eq!(begin_reference_slots.len(), 2);
-        assert_eq!(begin_reference_slots[0].slot_index, 0);
-        assert_eq!(begin_reference_slots[1].slot_index, 1);
+        assert_eq!(begin_reference_slots[0].slot_index, -1);
+        assert_eq!(begin_reference_slots[1].slot_index, -1);
         assert_eq!(
             begin_reference_slots[0].p_picture_resource,
             &raw const begin_resources[0]

@@ -193,8 +193,11 @@ Tasks:
    one-frame key-frame OBU inputs. PSNR is still low. The current parser pass
    separates Frame OBU header bytes from tile payload bytes and feeds observed
    quantizer, loop-filter, CDEF, tx-mode, picture flags, and sequence feature
-   flags into the std structs, but the generated-OBU PSNR gate remains at
-   `psnr_y_min=12.9600`, so more FFmpeg/std-struct parity work is required.
+   flags into the std structs. Session parameters now include an 8-bit 4:2:0
+   `StdVideoAV1ColorConfig`, and begin-coding reference slots now bind the
+   current reconstruction resource as inactive (`slotIndex = -1`) like FFmpeg.
+   The generated-OBU PSNR gate remains at `psnr_y_min=12.9600`, so more
+   FFmpeg/std-struct parity work is required.
 5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
    the one-frame explicit Vulkan AV1 path.
 
