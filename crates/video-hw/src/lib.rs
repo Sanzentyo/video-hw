@@ -850,25 +850,7 @@ impl<D: VideoDecoder> DecodeSession<D> {
     }
 
     pub fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
-        let (annexb, pts_90k) = match input {
-            BitstreamInput::AnnexBChunk { chunk, pts_90k } => (chunk, pts_90k.map(|v| v.0)),
-            BitstreamInput::AccessUnitRawNal {
-                codec: _,
-                nalus,
-                pts_90k,
-            } => (
-                pack_access_unit_nalus_to_annexb(&nalus),
-                pts_90k.map(|v| v.0),
-            ),
-            BitstreamInput::LengthPrefixedSample {
-                codec: _,
-                sample,
-                pts_90k,
-            } => (
-                unpack_length_prefixed_sample_to_annexb(&sample)?,
-                pts_90k.map(|v| v.0),
-            ),
-        };
+        let (annexb, pts_90k) = normalize_bitstream_input(input)?;
         let outputs = self
             .decoder_inner
             .push_bitstream_chunk(&annexb, pts_90k)?
@@ -1288,6 +1270,35 @@ impl EncoderBackend for VulkanEncoderAdapter {
             config.require_hardware,
             config.backend_options,
         )
+    }
+}
+
+fn normalize_bitstream_input(
+    input: BitstreamInput,
+) -> Result<(Vec<u8>, Option<i64>), BackendError> {
+    match input {
+        BitstreamInput::AnnexBChunk { chunk, pts_90k } => Ok((chunk, pts_90k.map(|v| v.0))),
+        BitstreamInput::AccessUnitRawNal {
+            codec: _,
+            nalus,
+            pts_90k,
+        } => Ok((
+            pack_access_unit_nalus_to_annexb(&nalus),
+            pts_90k.map(|v| v.0),
+        )),
+        BitstreamInput::LengthPrefixedSample {
+            codec: Codec::Av1,
+            sample,
+            pts_90k,
+        } => Ok((sample, pts_90k.map(|v| v.0))),
+        BitstreamInput::LengthPrefixedSample {
+            codec: _,
+            sample,
+            pts_90k,
+        } => Ok((
+            unpack_length_prefixed_sample_to_annexb(&sample)?,
+            pts_90k.map(|v| v.0),
+        )),
     }
 }
 
@@ -1902,6 +1913,20 @@ mod tests {
                 0, 0, 0, 1, 0x68, 0xEE, 0x3C
             ]
         );
+    }
+
+    #[test]
+    fn av1_length_prefixed_sample_is_forwarded_as_obu_payload() {
+        let sample = vec![0x12, 0x00, 0x0a, 0x0b, 0x14, 0x00, 0x24];
+        let (chunk, pts) = normalize_bitstream_input(BitstreamInput::LengthPrefixedSample {
+            codec: Codec::Av1,
+            sample: sample.clone(),
+            pts_90k: Some(Timestamp90k(1234)),
+        })
+        .expect("AV1 MP4 sample should be forwarded as OBU payload");
+
+        assert_eq!(chunk, sample);
+        assert_eq!(pts, Some(1234));
     }
 
     #[test]

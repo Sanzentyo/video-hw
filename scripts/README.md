@@ -214,13 +214,14 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --readback --ge
 ### 11.2) Vulkan AV1 PSNR check
 
 ```bash
-cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 40
-cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60
 ```
 
 - 生成レポート: `output/vulkan-av1-psnr/vulkan-av1-psnr-<epoch>.md`
 - 既定では FFmpeg `libaom-av1` で1フレームの AV1 low-overhead OBU を生成し、`decode_to_yuv --backend vulkan --codec av1 --output-mode nv12` の出力を FFmpeg software decode の NV12 と raw-vs-raw で比較する。
-- 現状の `--min-psnr-y 40` は FAIL する。2026-05-06 の Windows 環境では `--min-psnr-y 0` で実行確認し、`psnr_y_min=12.9600`。command buffer submit と readback copy は通っているが、出力は neutral NV12 に近く、AV1 picture info が実frame headerを十分に反映していないため decode parity は未達。
+- `--input-format fmp4` は FFmpeg fragmented MP4 (`av01`) を生成し、`decode_to_yuv --input-format mp4` 経由で同じ PSNR 比較を行う。FFmpeg 生成時は `delay_moov` を使い、`av1C` に sequence header OBU が入った fMP4 を作る。
+- 2026-05-06 の Windows/NVIDIA 環境では OBU と fMP4 のどちらも `--min-psnr-y 60` で PASS し、`psnr_y_min=inf`。
 
 ### 12) fMP4 decode access pattern benchmark
 

@@ -213,7 +213,10 @@ Tasks:
    result-status query; NVIDIA returns `decode_query_status_raw=Some(1)` for the
    generated OBU probe. The one-frame generated-OBU PSNR gate now passes at
    `--min-psnr-y 60` with `psnr_y_min=inf`, matching the FFmpeg software
-   reference Y plane exactly for that case.
+   reference Y plane exactly for that case. The fMP4 path now also forwards AV1
+   MP4 samples as OBU payload, prepends `av1C.config_obus` for keyframes, and
+   passes the generated one-frame `av01` fragmented-MP4 PSNR gate at
+   `--min-psnr-y 60` when the fixture is generated with `delay_moov`.
 5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
    the one-frame explicit Vulkan AV1 path.
 
@@ -224,7 +227,7 @@ Acceptance:
 - `--output-mode nv12` and `--output-mode rgb24` return non-empty payloads.
 - `scripts/check_vulkan_av1_psnr.rs` records the current FFmpeg-reference
   decode PSNR and passes the generated one-frame key-frame gate at
-  `--min-psnr-y 60`.
+  `--min-psnr-y 60` for both OBU and fMP4 input.
 
 ### Phase 5: Integrated Benchmark
 

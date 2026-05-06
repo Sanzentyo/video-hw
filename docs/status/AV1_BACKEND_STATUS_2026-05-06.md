@@ -250,7 +250,11 @@ Current implementation progress:
   identity matrix values (`gm_params[2]` and `[5]` set to `1 << 16`) rather than
   all-zero params. With these changes the generated-OBU Vulkan AV1 path now
   matches the FFmpeg software-reference Y plane exactly for the one-frame
-  key-frame case (`psnr_y_min=inf`).
+  key-frame case (`psnr_y_min=inf`). The `decode_to_yuv --input-format mp4`
+  path now treats AV1 `LengthPrefixedSample` input as OBU payload instead of
+  NAL-length-prefixed data, prepends `av1C.config_obus` for keyframes, and the
+  fMP4 PSNR gate also passes at `psnr_y_min=inf` when the generated MP4 uses
+  `delay_moov` so the `av1C` box contains the sequence header OBU.
   An opt-in
   `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic now wraps the decode command
   in a `VK_QUERY_TYPE_RESULT_STATUS_ONLY_KHR` query; on NVIDIA the current
@@ -275,7 +279,10 @@ Latest Vulkan AV1 scaffold verification:
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0`
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60`
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778066496982.md`,
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778066894446.md`,
+  `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778066894448.md`,
   `psnr_y_min=inf`)
 
 The detailed implementation plan is

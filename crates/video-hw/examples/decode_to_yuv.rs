@@ -207,12 +207,12 @@ fn decode_mp4(
             .get(start..end)
             .context("sample data range outside file")?;
 
-        // For keyframes, prepend parameter sets (SPS/PPS for H.264, VPS/SPS/PPS for H.265)
-        // as length-prefixed NALs so the decoder can initialize its codec context.
+        // For keyframes, prepend codec configuration from the sample entry so the
+        // decoder can initialize its codec context.
         let sample_bytes: Vec<u8> = if sample.keyframe {
             let mut buf = current_sample_entry
                 .as_ref()
-                .map(parameter_sets_as_length_prefixed)
+                .map(codec_config_for_sample)
                 .unwrap_or_default();
             buf.extend_from_slice(raw_sample);
             buf
@@ -263,13 +263,14 @@ fn feed_demuxer(demuxer: &mut shiguredo_mp4::demux::Fmp4FileDemuxer, bytes: &[u8
     Ok(())
 }
 
-/// Build length-prefixed NAL units for all parameter sets stored in a sample entry.
+/// Build decoder-ready codec configuration stored in a sample entry.
 ///
 /// For H.264 (`avc1`): SPS then PPS from the AVCC box.  
 /// For H.265 (`hev1`/`hvc1`): every NAL array in the HVCC box.  
-/// The resulting bytes are suitable for prepending to an AVCC/HVCC-format sample before
+/// For AV1 (`av01`): the `av1C` config OBUs as-is.
+/// The resulting bytes are suitable for prepending to a compressed sample before
 /// passing it to [`BitstreamInput::LengthPrefixedSample`].
-fn parameter_sets_as_length_prefixed(entry: &SampleEntry) -> Vec<u8> {
+fn codec_config_for_sample(entry: &SampleEntry) -> Vec<u8> {
     fn append_nalu(out: &mut Vec<u8>, nalu: &[u8]) {
         let len = u32::try_from(nalu.len()).unwrap_or(u32::MAX);
         out.extend_from_slice(&len.to_be_bytes());
@@ -299,6 +300,9 @@ fn parameter_sets_as_length_prefixed(entry: &SampleEntry) -> Vec<u8> {
                     append_nalu(&mut out, nalu);
                 }
             }
+        }
+        SampleEntry::Av01(av01) => {
+            out.extend_from_slice(&av01.av1c_box.config_obus);
         }
         _ => {}
     }

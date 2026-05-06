@@ -19,6 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 #[derive(Debug)]
 struct Args {
     input: Option<PathBuf>,
+    input_format: Av1InputFormat,
     output_dir: PathBuf,
     ffmpeg: PathBuf,
     width: u32,
@@ -27,6 +28,12 @@ struct Args {
     fps: u32,
     min_psnr_y: f64,
     skip_build: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Av1InputFormat {
+    Obu,
+    Fmp4,
 }
 
 #[derive(Debug)]
@@ -44,8 +51,14 @@ fn main() -> Result<()> {
     let input = match &args.input {
         Some(path) => absolute_path(path)?,
         None => {
-            let generated = args.output_dir.join(format!("vulkan-av1-psnr-{run_id}.obu"));
-            generate_ffmpeg_av1_obu(&args, &generated)?;
+            let extension = match args.input_format {
+                Av1InputFormat::Obu => "obu",
+                Av1InputFormat::Fmp4 => "mp4",
+            };
+            let generated = args
+                .output_dir
+                .join(format!("vulkan-av1-psnr-{run_id}.{extension}"));
+            generate_ffmpeg_av1_input(&args, &generated)?;
             absolute_path(&generated)?
         }
     };
@@ -97,6 +110,7 @@ fn main() -> Result<()> {
 
 fn parse_args() -> Result<Args> {
     let mut input = None;
+    let mut input_format = Av1InputFormat::Obu;
     let mut output_dir = PathBuf::from("output/vulkan-av1-psnr");
     let mut ffmpeg = env::var("FFMPEG_PATH")
         .map(PathBuf::from)
@@ -111,6 +125,9 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--input" => input = Some(PathBuf::from(next_value(&mut iter, "--input")?)),
+            "--input-format" | "--container" => {
+                input_format = parse_input_format(&next_value(&mut iter, "--input-format")?)?
+            }
             "--output-dir" => output_dir = PathBuf::from(next_value(&mut iter, "--output-dir")?),
             "--ffmpeg" => ffmpeg = PathBuf::from(next_value(&mut iter, "--ffmpeg")?),
             "--width" => width = next_value(&mut iter, "--width")?.parse()?,
@@ -121,7 +138,7 @@ fn parse_args() -> Result<Args> {
             "--skip-build" => skip_build = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input OBU] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--min-psnr-y DB] [--skip-build]"
+                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--min-psnr-y DB] [--skip-build]"
                 );
                 std::process::exit(0);
             }
@@ -133,6 +150,7 @@ fn parse_args() -> Result<Args> {
     }
     Ok(Args {
         input,
+        input_format,
         output_dir,
         ffmpeg,
         width,
@@ -144,14 +162,22 @@ fn parse_args() -> Result<Args> {
     })
 }
 
+fn parse_input_format(raw: &str) -> Result<Av1InputFormat> {
+    match raw.to_ascii_lowercase().as_str() {
+        "obu" | "annexb" => Ok(Av1InputFormat::Obu),
+        "mp4" | "fmp4" => Ok(Av1InputFormat::Fmp4),
+        other => Err(anyhow!("unsupported input format {other}")),
+    }
+}
+
 fn next_value(iter: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
     iter.next().with_context(|| format!("{name} requires a value"))
 }
 
-fn generate_ffmpeg_av1_obu(args: &Args, output: &Path) -> Result<()> {
+fn generate_ffmpeg_av1_input(args: &Args, output: &Path) -> Result<()> {
     let source = format!("testsrc2=size={}x{}:rate={}", args.width, args.height, args.fps);
-    run(
-        Command::new(&args.ffmpeg).args([
+    let mut command = Command::new(&args.ffmpeg);
+    command.args([
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -171,16 +197,34 @@ fn generate_ffmpeg_av1_obu(args: &Args, output: &Path) -> Result<()> {
             "1",
             "-lag-in-frames",
             "0",
+    ]);
+    match args.input_format {
+        Av1InputFormat::Obu => {
+            command.args([
             "-f",
             "obu",
             &output.display().to_string(),
-        ]),
-        "generate FFmpeg AV1 OBU input",
-    )
+            ]);
+        }
+        Av1InputFormat::Fmp4 => {
+            command.args([
+                "-movflags",
+                "+frag_keyframe+empty_moov+delay_moov+default_base_moof",
+                "-f",
+                "mp4",
+                &output.display().to_string(),
+            ]);
+        }
+    }
+    run(&mut command, "generate FFmpeg AV1 input")
 }
 
 fn decode_with_vulkan(args: &Args, input: &Path, output: &Path) -> Result<()> {
     let executable = decode_to_yuv_executable();
+    let input_format = match args.input_format {
+        Av1InputFormat::Obu => "annexb",
+        Av1InputFormat::Fmp4 => "mp4",
+    };
     run(
         Command::new(executable).args([
             "--backend",
@@ -189,6 +233,8 @@ fn decode_with_vulkan(args: &Args, input: &Path, output: &Path) -> Result<()> {
             "av1",
             "--input",
             &input.display().to_string(),
+            "--input-format",
+            input_format,
             "--output-mode",
             "nv12",
             "--output",
@@ -288,8 +334,9 @@ fn write_report(args: &Args, input: &Path, summary: &PsnrSummary, report: &Path)
         "FAIL"
     };
     let body = format!(
-        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n",
+        "# Vulkan AV1 PSNR\n\nStatus: {status}\n\ninput: `{}`\n\ninput_format: `{:?}`\n\nframes: `{}`\n\nsize: `{}x{}`\n\npsnr_y_avg: `{:.4}`\n\npsnr_y_min: `{:.4}`\n\nthreshold: `{:.4}`\n",
         input.display(),
+        args.input_format,
         summary.frames,
         args.width,
         args.height,
