@@ -443,10 +443,17 @@ Latest Vulkan AV1 scaffold verification:
   `scripts/check_vulkan_av1_psnr.rs` for each `video-hw` Vulkan adapter using
   the same generated benchmark input and the same `decode_to_yuv` binary that
   the benchmark measured, then records a `video-hw PSNR verify` row.
-  Smoke report `output/benchmark-vulkan-av1-1778076509.md` includes a passing
-  NVIDIA `video-hw PSNR verify` row; the generated PSNR report is
-  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076508703.md`
-  (`--frames 4 --gop-size 30 --vulkan-adapter-index 0`, `psnr_y_min=inf`).
+  Fresh 320x180 generated-GOP30 reports:
+  `output/benchmark-backends-av1-1778076588.md` /
+  `output/benchmark-vulkan-av1-1778076588.md` for OBU input and
+  `output/benchmark-backends-av1-1778076603.md` /
+  `output/benchmark-vulkan-av1-1778076603.md` for fMP4 input. NVIDIA OBU decode
+  is 54.968 fps vs FFmpeg Vulkan decode 25.879 fps; NVIDIA fMP4 decode is
+  54.097 fps vs FFmpeg Vulkan decode 25.779 fps. Both reports include passing
+  `video-hw PSNR verify` rows; generated PSNR reports are
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076585814.md` and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778076599799.md`
+  (`--frames 8 --gop-size 30 --vulkan-adapter-index 0`, `psnr_y_min=inf`).
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068068960.md`,
   `psnr_y_min=inf`)
