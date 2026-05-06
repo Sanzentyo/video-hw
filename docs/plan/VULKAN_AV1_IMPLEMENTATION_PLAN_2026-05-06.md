@@ -69,7 +69,8 @@ Tasks:
    color/timing and non-reduced header coverage remains.
 3. Split temporal units / frame OBUs into access units suitable for Vulkan
    submit. Ordered multi-frame submit/decode-info skeleton extraction is now
-   covered for temporal-delimiter-separated frame OBUs.
+   covered for temporal-delimiter-separated frame OBUs, and multiple tile-group
+   OBUs following one frame header are grouped into one submit skeleton.
 4. Reject unsupported input forms explicitly:
    - IVF container bytes passed as elementary stream;
    - OBUs without size fields if the submit path cannot packetize them safely;

@@ -92,6 +92,9 @@ Current implementation progress:
 - AV1 submit/decode-info skeleton extraction now also has ordered multi-frame
   variants, so later command recording can iterate all temporal units instead of
   only probing the first frame;
+- frame-header + tile-group submit extraction now groups multiple tile-group
+  OBUs from the same temporal unit into a single AV1 picture-info tile list
+  instead of treating each tile group as a separate frame;
 - AV1 decode picture-info skeleton now builds key-frame `StdVideoDecodeAV1PictureInfo`,
   reference-name slot defaults, and tile metadata from that submit skeleton;
 - the picture-info skeleton can now materialize `vk::VideoDecodeAV1PictureInfoKHR`

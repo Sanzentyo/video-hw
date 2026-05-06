@@ -331,29 +331,34 @@ pub(crate) fn build_av1_decode_submit_skeletons(
 ) -> Result<Vec<Av1DecodeSubmitSkeleton>, String> {
     let records = parse_av1_low_overhead_obus(bitstream)?;
     let mut submits = Vec::new();
+    let mut consumed_tile_groups = vec![false; records.len()];
 
-    for frame_record in records
-        .iter()
-        .filter(|record| matches!(record.obu_type, Av1ObuType::Frame | Av1ObuType::TileGroup))
-    {
-        let submit = match frame_record.obu_type {
-            Av1ObuType::Frame => build_av1_frame_obu_submit_skeleton(frame_record),
-            Av1ObuType::TileGroup => {
-                let frame_header = records.iter().rev().find(|record| {
-                    record.temporal_unit_index == frame_record.temporal_unit_index
-                        && record.obu_type == Av1ObuType::FrameHeader
-                        && record.obu_range.start < frame_record.obu_range.start
-                });
-                let Some(frame_header) = frame_header else {
-                    return Err(
-                        "AV1 tile-group OBU is missing a preceding frame-header OBU".to_string()
-                    );
-                };
-                build_av1_tile_group_submit_skeleton(frame_header, frame_record)
+    for (index, record) in records.iter().enumerate() {
+        match record.obu_type {
+            Av1ObuType::Frame => submits.push(build_av1_frame_obu_submit_skeleton(record)?),
+            Av1ObuType::FrameHeader => {
+                let tile_groups: Vec<(usize, &Av1ObuRecord)> = records
+                    .iter()
+                    .enumerate()
+                    .skip(index + 1)
+                    .take_while(|(_, next)| next.temporal_unit_index == record.temporal_unit_index)
+                    .take_while(|(_, next)| next.obu_type != Av1ObuType::FrameHeader)
+                    .filter(|(_, next)| next.obu_type == Av1ObuType::TileGroup)
+                    .collect();
+                if !tile_groups.is_empty() {
+                    for (tile_index, _) in &tile_groups {
+                        consumed_tile_groups[*tile_index] = true;
+                    }
+                    submits.push(build_av1_tile_group_submit_skeleton(record, &tile_groups)?);
+                }
             }
-            _ => unreachable!("frame records are filtered to frame payload OBUs"),
-        }?;
-        submits.push(submit);
+            Av1ObuType::TileGroup if !consumed_tile_groups[index] => {
+                return Err(
+                    "AV1 tile-group OBU is missing a preceding frame-header OBU".to_string()
+                );
+            }
+            _ => {}
+        }
     }
 
     if submits.is_empty() {
@@ -578,22 +583,30 @@ fn build_av1_frame_obu_submit_skeleton(
 
 fn build_av1_tile_group_submit_skeleton(
     frame_header_record: &Av1ObuRecord,
-    tile_group_record: &Av1ObuRecord,
+    tile_group_records: &[(usize, &Av1ObuRecord)],
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_header_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
-    let tile_offset = u32::try_from(tile_group_record.payload_range.start)
-        .map_err(|_| "AV1 tile offset exceeds u32 range".to_string())?;
-    let tile_size = u32::try_from(tile_group_record.payload_range.len())
-        .map_err(|_| "AV1 tile group payload size exceeds u32 range".to_string())?;
-    if tile_size == 0 {
-        return Err("AV1 tile-group OBU payload is empty".to_string());
+
+    let mut tile_offsets = Vec::with_capacity(tile_group_records.len());
+    let mut tile_sizes = Vec::with_capacity(tile_group_records.len());
+    for (_, tile_group_record) in tile_group_records {
+        let tile_offset = u32::try_from(tile_group_record.payload_range.start)
+            .map_err(|_| "AV1 tile offset exceeds u32 range".to_string())?;
+        let tile_size = u32::try_from(tile_group_record.payload_range.len())
+            .map_err(|_| "AV1 tile group payload size exceeds u32 range".to_string())?;
+        if tile_size == 0 {
+            return Err("AV1 tile-group OBU payload is empty".to_string());
+        }
+        tile_offsets.push(tile_offset);
+        tile_sizes.push(tile_size);
     }
+
     Ok(Av1DecodeSubmitSkeleton {
-        temporal_unit_index: tile_group_record.temporal_unit_index,
+        temporal_unit_index: frame_header_record.temporal_unit_index,
         frame_header_offset,
-        tile_offsets: vec![tile_offset],
-        tile_sizes: vec![tile_size],
+        tile_offsets,
+        tile_sizes,
     })
 }
 
@@ -1871,6 +1884,34 @@ mod tests {
             vec![(tile_group_obu_start + 2) as u32]
         );
         assert_eq!(skeleton.tile_sizes, vec![3]);
+    }
+
+    #[test]
+    fn decode_submit_skeleton_groups_multiple_tile_group_obus() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        let frame_header_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(3, &[0x10, 0x11]));
+        let first_tile_group_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(4, &[0x20, 0x21]));
+        let second_tile_group_obu_start = bitstream.len();
+        bitstream.extend_from_slice(&make_obu(4, &[0x30, 0x31, 0x32]));
+
+        let skeletons = build_av1_decode_submit_skeletons(&bitstream)
+            .expect("multiple tile groups should produce one submit skeleton");
+
+        assert_eq!(skeletons.len(), 1);
+        assert_eq!(
+            skeletons[0].frame_header_offset as usize,
+            frame_header_obu_start + 2
+        );
+        assert_eq!(
+            skeletons[0].tile_offsets,
+            vec![
+                (first_tile_group_obu_start + 2) as u32,
+                (second_tile_group_obu_start + 2) as u32
+            ]
+        );
+        assert_eq!(skeletons[0].tile_sizes, vec![2, 3]);
     }
 
     #[test]
