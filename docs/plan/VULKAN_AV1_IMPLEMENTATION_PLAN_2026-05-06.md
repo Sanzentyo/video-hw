@@ -38,8 +38,8 @@ Tasks:
    `VK_KHR_video_decode_av1`. Done.
 3. Build `vk::VideoProfileInfoKHR` with
    `vk::VideoCodecOperationFlagsKHR::DECODE_AV1` and
-   `vk::VideoDecodeAV1ProfileInfoKHR`.
-4. Query `vk::VideoDecodeAV1CapabilitiesKHR` and output formats.
+   `vk::VideoDecodeAV1ProfileInfoKHR`. Done.
+4. Query `vk::VideoDecodeAV1CapabilitiesKHR` and output formats. Done.
 5. Keep `CapabilityReport` false until submit/readback is proven by the
    bootstrap probe, matching the existing Vulkan HEVC safety pattern.
 

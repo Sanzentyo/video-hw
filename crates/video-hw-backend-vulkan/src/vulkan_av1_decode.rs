@@ -82,6 +82,18 @@ struct Av1AdapterDecodeSupport {
     decode_queue_family_index: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+struct Av1DecodeCapabilitySnapshot {
+    min_coded_width: u32,
+    min_coded_height: u32,
+    max_coded_width: u32,
+    max_coded_height: u32,
+    max_dpb_slots: u32,
+    max_active_reference_pictures: u32,
+    max_level: ash::vk::native::StdVideoAV1Level,
+    decode_output_formats: Vec<vk::Format>,
+}
+
 impl Av1DecodeExtensionFlags {
     fn supports_av1_decode(self) -> bool {
         self.has_video_queue && self.has_video_decode_queue && self.has_video_decode_av1
@@ -270,6 +282,18 @@ fn run_av1_decode_probe() -> Av1DecodePrerequisiteProbe {
             if support.extensions.supports_av1_decode()
                 && let Some(queue_family_index) = support.decode_queue_family_index
             {
+                match query_av1_decode_capability_snapshot(&entry, &instance, physical_device) {
+                    Ok(snapshot) => {
+                        if let Err(err) = validate_av1_decode_capability_snapshot(&snapshot) {
+                            device_init_errors.push(err);
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        device_init_errors.push(err);
+                        continue;
+                    }
+                }
                 match try_initialize_av1_decode_device(
                     &instance,
                     physical_device,
@@ -340,6 +364,151 @@ fn query_av1_adapter_decode_support(
         extensions: flags,
         decode_queue_family_index,
     })
+}
+
+fn query_av1_decode_capability_snapshot(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<Av1DecodeCapabilitySnapshot, String> {
+    let video_queue = ash::khr::video_queue::Instance::new(entry, instance);
+    let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
+        .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
+        .film_grain_support(false);
+    let mut decode_usage = vk::VideoDecodeUsageInfoKHR::default()
+        .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+    let profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_AV1)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .push_next(&mut decode_av1_profile)
+        .push_next(&mut decode_usage);
+
+    let mut decode_capabilities = vk::VideoDecodeCapabilitiesKHR::default();
+    let mut decode_av1_capabilities = vk::VideoDecodeAV1CapabilitiesKHR::default();
+    let mut capabilities = vk::VideoCapabilitiesKHR::default()
+        .push_next(&mut decode_av1_capabilities)
+        .push_next(&mut decode_capabilities);
+
+    // SAFETY: All chained structs are stack-allocated and live for the call.
+    let result = unsafe {
+        (video_queue.fp().get_physical_device_video_capabilities_khr)(
+            physical_device,
+            &profile,
+            &mut capabilities,
+        )
+    };
+    if result != vk::Result::SUCCESS {
+        return Err(format!(
+            "AV1 decode video capabilities query failed: {result:?}"
+        ));
+    }
+
+    let decode_output_formats =
+        query_av1_decode_output_formats(&video_queue, physical_device, profile)?;
+
+    Ok(Av1DecodeCapabilitySnapshot {
+        min_coded_width: capabilities.min_coded_extent.width,
+        min_coded_height: capabilities.min_coded_extent.height,
+        max_coded_width: capabilities.max_coded_extent.width,
+        max_coded_height: capabilities.max_coded_extent.height,
+        max_dpb_slots: capabilities.max_dpb_slots,
+        max_active_reference_pictures: capabilities.max_active_reference_pictures,
+        max_level: decode_av1_capabilities.max_level,
+        decode_output_formats,
+    })
+}
+
+fn validate_av1_decode_capability_snapshot(
+    snapshot: &Av1DecodeCapabilitySnapshot,
+) -> Result<(), String> {
+    if snapshot.decode_output_formats.is_empty() {
+        return Err("AV1 decode capability query returned no output formats".to_string());
+    }
+    if snapshot.max_coded_width < snapshot.min_coded_width
+        || snapshot.max_coded_height < snapshot.min_coded_height
+    {
+        return Err(format!(
+            "AV1 decode capability query returned invalid coded extent range: min={}x{}, max={}x{}",
+            snapshot.min_coded_width,
+            snapshot.min_coded_height,
+            snapshot.max_coded_width,
+            snapshot.max_coded_height
+        ));
+    }
+    if snapshot.max_dpb_slots == 0 {
+        return Err("AV1 decode capability query returned max_dpb_slots=0".to_string());
+    }
+    if snapshot.max_active_reference_pictures > snapshot.max_dpb_slots {
+        return Err(format!(
+            "AV1 decode capability query returned max_active_reference_pictures={} greater than max_dpb_slots={}",
+            snapshot.max_active_reference_pictures, snapshot.max_dpb_slots
+        ));
+    }
+    let _max_level = snapshot.max_level;
+    Ok(())
+}
+
+fn query_av1_decode_output_formats(
+    video_queue: &ash::khr::video_queue::Instance,
+    physical_device: vk::PhysicalDevice,
+    profile: vk::VideoProfileInfoKHR<'_>,
+) -> Result<Vec<vk::Format>, String> {
+    let profiles = [profile];
+    let mut profile_list = vk::VideoProfileListInfoKHR::default().profiles(&profiles);
+    let format_info = vk::PhysicalDeviceVideoFormatInfoKHR::default()
+        .image_usage(
+            vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+        )
+        .push_next(&mut profile_list);
+
+    let mut property_count = 0_u32;
+    // SAFETY: Count query only writes the property count.
+    let count_result = unsafe {
+        (video_queue
+            .fp()
+            .get_physical_device_video_format_properties_khr)(
+            physical_device,
+            &format_info,
+            &mut property_count,
+            std::ptr::null_mut(),
+        )
+    };
+    if count_result != vk::Result::SUCCESS {
+        return Err(format!(
+            "AV1 decode video format count query failed: {count_result:?}"
+        ));
+    }
+    if property_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut properties = vec![vk::VideoFormatPropertiesKHR::default(); property_count as usize];
+    // SAFETY: `properties` has capacity for the count returned above.
+    let query_result = unsafe {
+        (video_queue
+            .fp()
+            .get_physical_device_video_format_properties_khr)(
+            physical_device,
+            &format_info,
+            &mut property_count,
+            properties.as_mut_ptr(),
+        )
+    };
+    if query_result != vk::Result::SUCCESS {
+        return Err(format!(
+            "AV1 decode video format query failed: {query_result:?}"
+        ));
+    }
+
+    properties.truncate(property_count as usize);
+    Ok(properties
+        .into_iter()
+        .map(|property| property.format)
+        .collect())
 }
 
 fn query_video_codec_queue_family_index(
@@ -774,6 +943,34 @@ mod tests {
             vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
         );
         assert_eq!(queue_family_index, Some(1));
+    }
+
+    #[test]
+    fn capability_snapshot_validation_requires_output_format_and_dpb_slots() {
+        let mut snapshot = Av1DecodeCapabilitySnapshot {
+            min_coded_width: 16,
+            min_coded_height: 16,
+            max_coded_width: 4096,
+            max_coded_height: 2160,
+            max_dpb_slots: 4,
+            max_active_reference_pictures: 3,
+            max_level: ash::vk::native::StdVideoAV1Level_STD_VIDEO_AV1_LEVEL_4_0,
+            decode_output_formats: Vec::new(),
+        };
+        let err = validate_av1_decode_capability_snapshot(&snapshot)
+            .expect_err("empty output format list should be rejected");
+        assert!(err.contains("no output formats"));
+
+        snapshot
+            .decode_output_formats
+            .push(vk::Format::G8_B8R8_2PLANE_420_UNORM);
+        validate_av1_decode_capability_snapshot(&snapshot)
+            .expect("valid AV1 decode capability snapshot should pass");
+
+        snapshot.max_dpb_slots = 0;
+        let err = validate_av1_decode_capability_snapshot(&snapshot)
+            .expect_err("zero DPB slots should be rejected");
+        assert!(err.contains("max_dpb_slots=0"));
     }
 
     #[test]

@@ -77,6 +77,9 @@ Current implementation progress:
 - `extract_av1_std_sequence_header` exposes that mapping from a low-overhead AV1
   bitstream so session parameter creation can consume a Vulkan std header
   without depending on parser internals;
+- the AV1 decode prerequisite probe now builds the Vulkan AV1 decode profile,
+  queries `VideoCapabilitiesKHR` / `VideoDecodeAV1CapabilitiesKHR`, and requires
+  at least one decode output format before reporting prerequisites as ready;
 - Vulkan AV1 capability is still false because session parameter creation,
   decode submit, readback, PSNR, and benchmark gates are not implemented;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
