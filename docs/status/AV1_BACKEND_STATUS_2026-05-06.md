@@ -274,6 +274,12 @@ Current implementation progress:
   generated-OBU readback probe reports `decode_query_status_raw=Some(1)`;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
+  `cargo info ash` currently reports the same latest version
+  (`0.38.0+1.3.281`), and local registry inspection finds
+  `VK_KHR_video_decode_av1` / `VideoDecodeAV1*` bindings but no
+  `VK_KHR_video_encode_av1`, `video_encode_av1`, `VideoEncodeAV1*`, or
+  `ENCODE_AV1` bindings. Vulkan AV1 encode therefore needs a binding stack
+  update or local generated bindings before implementation can start safely.
 
 Latest Vulkan AV1 scaffold verification:
 

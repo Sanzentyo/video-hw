@@ -304,7 +304,10 @@ Acceptance:
 
 Current binding blocker: `ash 0.38.0+1.3.281` exposes
 `VK_KHR_video_decode_av1` bindings but not `VK_KHR_video_encode_av1`. Update the
-Vulkan binding stack before starting this section.
+Vulkan binding stack before starting this section. As of the latest local
+check, `cargo info ash` still reports `0.38.0+1.3.281` as the crates.io version,
+and registry source inspection finds decode AV1 bindings but no
+`video_encode_av1` / `VideoEncodeAV1*` / `ENCODE_AV1` symbols.
 
 ## Non-Goals For First Merge
 
