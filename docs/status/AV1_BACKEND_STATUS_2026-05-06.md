@@ -99,6 +99,9 @@ Current implementation progress:
 - AV1 command scaffolding now derives a decode output/DPB image plan from the
   command skeleton, including selected format, coded extent, DPB array layers,
   and `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR|TRANSFER_SRC` usage;
+- real-bitstream AV1 probing now creates that decode output/DPB image with an
+  AV1 `VideoProfileListInfoKHR`, binds image memory, creates a 2D-array image
+  view, and destroys the probe resources;
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;

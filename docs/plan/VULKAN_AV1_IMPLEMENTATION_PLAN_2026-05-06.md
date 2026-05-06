@@ -99,8 +99,9 @@ Tasks:
 3. Allocate output and DPB images from the formats accepted by the AV1 profile.
    Decode image creation is now planned from the command skeleton using the
    selected format, coded extent, DPB array-layer count, and
-   `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR|TRANSFER_SRC` usage; actual image
-   allocation/binding remains.
+   `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR|TRANSFER_SRC` usage. Real-bitstream
+   probing now creates the image with an AV1 `VideoProfileListInfoKHR`, binds
+   memory, creates a 2D-array view, and destroys the probe resources.
 4. Build a skeleton submit probe that records begin/control/end without frame
    decode, then a submit execution probe for a single key frame. Bitstream
    submit skeleton extraction now covers frame-header offset and tile

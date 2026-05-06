@@ -49,6 +49,7 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
     pub session_memory_max_alignment: u64,
     pub session_memory_bound_count: usize,
     pub bitstream_upload_bytes: usize,
+    pub decode_image_layers: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1962,7 +1963,26 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
             physical_device,
             &upload_plan.bytes,
         );
+        let image_plan = match build_av1_key_frame_decode_command_skeleton_from_decodes(
+            &upload_plan.decodes,
+            snapshot.max_dpb_slots,
+        )
+        .and_then(|command| command.decode_image_plan(picture_format))
+        {
+            Ok(plan) => plan,
+            Err(err) => {
+                probe_errors.push(err);
+                // SAFETY: The device is no longer used after this point.
+                unsafe {
+                    device.destroy_device(None);
+                }
+                continue;
+            }
+        };
+        let image_result =
+            create_and_destroy_av1_decode_image(instance, &device, physical_device, &image_plan);
         let result = upload_result.and_then(|()| {
+            image_result?;
             create_and_destroy_av1_decode_session_parameters_with_header(
                 instance,
                 &device,
@@ -1996,6 +2016,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     session_memory_max_alignment: summary.memory_max_alignment,
                     session_memory_bound_count: summary.memory_bound_count,
                     bitstream_upload_bytes: upload_plan.bytes.len(),
+                    decode_image_layers: image_plan.array_layers,
                 });
             }
             Err(err) => probe_errors.push(err),
@@ -2384,6 +2405,125 @@ fn create_and_destroy_av1_decode_source_buffer(
             device.destroy_buffer(buffer, None);
         }
         upload_result.map(|_| ())
+    }
+}
+
+fn create_and_destroy_av1_decode_image(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    plan: &Av1DecodeImagePlan,
+) -> Result<(), String> {
+    let mut decode_av1_profile = vk::VideoDecodeAV1ProfileInfoKHR::default()
+        .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
+        .film_grain_support(false);
+    let mut decode_usage = vk::VideoDecodeUsageInfoKHR::default()
+        .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT);
+    let image_profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_AV1)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .push_next(&mut decode_av1_profile)
+        .push_next(&mut decode_usage);
+    let image_profiles = [image_profile];
+    let mut profile_list = vk::VideoProfileListInfoKHR::default().profiles(&image_profiles);
+    let image_create_info = vk::ImageCreateInfo {
+        p_next: (&mut profile_list as *mut vk::VideoProfileListInfoKHR<'_>).cast(),
+        ..vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(plan.format)
+            .extent(vk::Extent3D {
+                width: plan.extent.width,
+                height: plan.extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(plan.array_layers)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(plan.usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+    };
+    // SAFETY: Image create info references a live profile list and device is valid.
+    let image = unsafe { device.create_image(&image_create_info, None) }
+        .map_err(|err| format!("vkCreateImage for AV1 decode image failed: {err}"))?;
+
+    let result = (|| -> Result<(vk::DeviceMemory, vk::ImageView), String> {
+        // SAFETY: `image` was created by this device.
+        let requirements = unsafe { device.get_image_memory_requirements(image) };
+        // SAFETY: `physical_device` belongs to `instance`; this only reads memory metadata.
+        let memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let memory_type_index = select_av1_decode_memory_type_index(
+            &memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .or_else(|| {
+            select_av1_decode_memory_type_index(
+                &memory_properties,
+                requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::empty(),
+            )
+        })
+        .ok_or_else(|| {
+            format!(
+                "no compatible memory type for AV1 decode image (bits=0x{:X})",
+                requirements.memory_type_bits
+            )
+        })?;
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size.max(1))
+            .memory_type_index(memory_type_index);
+        // SAFETY: Allocation info is derived from Vulkan image memory requirements.
+        let memory = unsafe { device.allocate_memory(&allocate_info, None) }
+            .map_err(|err| format!("vkAllocateMemory for AV1 decode image failed: {err}"))?;
+        if let Err(err) = unsafe { device.bind_image_memory(image, memory, 0) } {
+            // SAFETY: `memory` was allocated above and has not been bound successfully.
+            unsafe { device.free_memory(memory, None) };
+            return Err(format!(
+                "vkBindImageMemory for AV1 decode image failed: {err}"
+            ));
+        }
+        let view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+            .format(plan.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: plan.array_layers,
+            });
+        // SAFETY: Image view create info references a valid image and subresource range.
+        let view = unsafe { device.create_image_view(&view_create_info, None) }.map_err(|err| {
+            // SAFETY: `memory` was allocated and bound above and is no longer used after failure.
+            unsafe { device.free_memory(memory, None) };
+            format!("vkCreateImageView for AV1 decode image failed: {err}")
+        })?;
+        Ok((memory, view))
+    })();
+
+    match result {
+        Ok((memory, view)) => {
+            // SAFETY: The created resources are probe-local and no longer used.
+            unsafe {
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                device.free_memory(memory, None);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // SAFETY: The image was created above and is no longer used.
+            unsafe {
+                device.destroy_image(image, None);
+            }
+            Err(err)
+        }
     }
 }
 
