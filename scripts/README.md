@@ -58,6 +58,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --re
 ```bash
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --release --warmup 2 --repeat 9
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --release --warmup 2 --repeat 9
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --release --warmup 1 --repeat 3 --verify
 ```
 
 - 生成レポート: `output/benchmark-vt-precise-<codec>-<epoch>.md`
@@ -65,15 +66,17 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --re
 - `--equal-raw-input` で `video-hw` / `ffmpeg` encode に同一 raw ARGB 入力を供給する。
 - `--include-internal-metrics` で `VIDEO_HW_VT_METRICS=1` を有効化し、
   `Internal Metrics (video-hw)` セクションを NV 精密レポートと同形式で出力する。
+- AV1 は `libaom-av1` で生成した fMP4 `av01` input を使う decode-only 比較。`video-hw decode_to_yuv --input-format mp4 --backend vt --codec av1` と FFmpeg `-hwaccel videotoolbox` decode を同じ入力で測る。AV1 encode は未実装のため測定対象外。
 
 ### 5) VideoToolbox 精密ベンチ定常運用（直列実行）
 
 ```bash
 cargo +nightly -Zscript scripts/run_vt_precise_suite.rs
+cargo +nightly -Zscript scripts/run_vt_precise_suite.rs --include-av1
 ```
 
 - 既定は `warmup=1`, `repeat=3`, `verify=true`, `equal-raw-input=true`, `include-internal-metrics=true`
-- H264 と HEVC を同時ではなく順番に実行する
+- H264 と HEVC を同時ではなく順番に実行する。`--include-av1` で AV1 fMP4 decode-only 比較も追加する。
 
 ### 6) Intel 精密ベンチ（反復 + 統計）
 

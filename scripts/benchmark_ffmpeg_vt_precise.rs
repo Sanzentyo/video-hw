@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -37,7 +37,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
-            Self::Av1 => "output/benchmark-vt-av1-decode-input.av1",
+            Self::Av1 => "output/benchmark-vt-av1-decode-input.mp4",
         }
     }
 
@@ -58,7 +58,7 @@ impl Codec {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Case {
     VideoHwDecode,
     VideoHwEncode,
@@ -185,7 +185,11 @@ impl Stats {
         let mean = sorted.iter().sum::<f64>() / count as f64;
         let variance = sorted.iter().map(|x| (*x - mean).powi(2)).sum::<f64>() / count as f64;
         let stddev = variance.sqrt();
-        let cv_percent = if mean > 0.0 { (stddev / mean) * 100.0 } else { 0.0 };
+        let cv_percent = if mean > 0.0 {
+            (stddev / mean) * 100.0
+        } else {
+            0.0
+        };
 
         Self {
             min: *sorted.first().unwrap_or(&0.0),
@@ -211,7 +215,9 @@ fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
         return 0.0;
     }
     let n = sorted.len();
-    let rank = ((percentile / 100.0) * n as f64).ceil().clamp(1.0, n as f64) as usize;
+    let rank = ((percentile / 100.0) * n as f64)
+        .ceil()
+        .clamp(1.0, n as f64) as usize;
     sorted[rank - 1]
 }
 
@@ -225,21 +231,25 @@ fn main() -> Result<()> {
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
     }
-    if args.codec == Codec::Av1 {
-        write_unsupported_av1_report(&args)?;
-        return Ok(());
-    }
-
     let profile = if args.release { "release" } else { "debug" };
     let output_dir = PathBuf::from("output");
     fs::create_dir_all(&output_dir).context("create output directory")?;
 
     build_examples(profile)?;
 
-    let decode_bin = example_bin_path(profile, "decode_annexb");
+    if args.codec == Codec::Av1 {
+        generate_av1_fmp4_decode_input(&args, Path::new(args.codec.sample_input()))?;
+    }
+
+    let decode_bin = if args.codec == Codec::Av1 {
+        example_bin_path(profile, "decode_to_yuv")
+    } else {
+        example_bin_path(profile, "decode_annexb")
+    };
     let encode_bin = example_bin_path(profile, "encode_synthetic");
     let encode_raw_bin = example_bin_path(profile, "encode_raw_argb");
-    let video_hw_output = output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
+    let video_hw_output =
+        output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-vt-{}-precise.bin", args.codec.as_cli()));
     let raw_input = output_dir.join(format!(
         "benchmark-input-argb-{}x{}-{}f.raw",
@@ -251,12 +261,16 @@ fn main() -> Result<()> {
         write_raw_argb_input(&raw_input, args.width, args.height, args.frame_count)?;
     }
 
-    let cases = [
-        Case::VideoHwDecode,
-        Case::VideoHwEncode,
-        Case::FfmpegDecode,
-        Case::FfmpegEncode,
-    ];
+    let cases: Vec<Case> = if args.codec == Codec::Av1 {
+        vec![Case::VideoHwDecode, Case::FfmpegDecode]
+    } else {
+        vec![
+            Case::VideoHwDecode,
+            Case::VideoHwEncode,
+            Case::FfmpegDecode,
+            Case::FfmpegEncode,
+        ]
+    };
     let mut samples = cases
         .iter()
         .copied()
@@ -285,13 +299,9 @@ fn main() -> Result<()> {
             )?;
             println!("  {:<16} {:.3}s", case.label(), run.seconds);
             if !is_warmup {
-                let idx = match case {
-                    Case::VideoHwDecode => 0,
-                    Case::VideoHwEncode => 1,
-                    Case::FfmpegDecode => 2,
-                    Case::FfmpegEncode => 3,
-                };
-                samples[idx].push(run.seconds);
+                if let Some(case_samples) = samples.iter_mut().find(|s| s.case == *case) {
+                    case_samples.push(run.seconds);
+                }
                 if let Some(metrics) = run.metrics {
                     match metrics {
                         InternalMetrics::Decode {
@@ -369,7 +379,18 @@ fn main() -> Result<()> {
     writeln!(&mut report, "height: {}", args.height)?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(&mut report, "verify: {}", args.verify)?;
-    writeln!(&mut report, "internal_metrics: {}", args.include_internal_metrics)?;
+    writeln!(
+        &mut report,
+        "internal_metrics: {}",
+        args.include_internal_metrics
+    )?;
+    if args.codec == Codec::Av1 {
+        writeln!(
+            &mut report,
+            "av1_note: decode-only; VideoToolbox AV1 encode remains unsupported"
+        )?;
+        writeln!(&mut report, "decode_input: {}", args.codec.sample_input())?;
+    }
     writeln!(&mut report)?;
     writeln!(
         &mut report,
@@ -505,16 +526,44 @@ fn main() -> Result<()> {
         }
     }
 
-    if args.verify {
+    if args.verify && args.codec == Codec::Av1 {
         writeln!(&mut report)?;
         writeln!(&mut report, "## Verification")?;
-        convert_length_prefixed_to_annexb(&video_hw_output, &video_hw_verify_input)
-            .with_context(|| {
+        let bytes = fs::metadata(&video_hw_output).map(|m| m.len()).unwrap_or(0);
+        let expected_min = args
+            .width
+            .saturating_mul(args.height)
+            .saturating_mul(3)
+            .saturating_div(2)
+            .saturating_mul(args.frame_count.saturating_div(10).max(1));
+        writeln!(
+            &mut report,
+            "- video-hw decode raw bytes: {bytes} (expected_min={expected_min})"
+        )?;
+        if bytes < expected_min as u64 {
+            bail!("video-hw AV1 decode output is smaller than expected");
+        }
+        let summary = ffprobe_summary(
+            Path::new(args.codec.sample_input()),
+            args.codec,
+            args.frame_count,
+        )?;
+        writeln!(
+            &mut report,
+            "- input: codec={}, {}x{}, frames={}",
+            summary.codec_name, summary.width, summary.height, summary.nb_read_frames
+        )?;
+    } else if args.verify {
+        writeln!(&mut report)?;
+        writeln!(&mut report, "## Verification")?;
+        convert_length_prefixed_to_annexb(&video_hw_output, &video_hw_verify_input).with_context(
+            || {
                 format!(
                     "convert video-hw output to annexb: {}",
                     video_hw_output.display()
                 )
-            })?;
+            },
+        )?;
         match ffprobe_summary(&video_hw_verify_input, args.codec, args.frame_count) {
             Ok(summary) => {
                 if let Err(err) = run_ffmpeg_decode_verify(&video_hw_verify_input, null_sink) {
@@ -558,39 +607,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn write_unsupported_av1_report(args: &Args) -> Result<()> {
-    let output_dir = PathBuf::from("output");
-    fs::create_dir_all(&output_dir).context("create output directory")?;
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before UNIX_EPOCH")?
-        .as_secs();
-    let report_path = output_dir.join(format!("benchmark-vt-precise-av1-{now_secs}.md"));
-
-    let mut report = String::new();
-    writeln!(&mut report, "# VT Precise Benchmark Report")?;
-    writeln!(&mut report, "epoch_seconds: {now_secs}")?;
-    writeln!(&mut report, "codec: av1")?;
-    writeln!(&mut report, "warmup: {}", args.warmup)?;
-    writeln!(&mut report, "repeat: {}", args.repeat)?;
-    writeln!(&mut report, "width: {}", args.width)?;
-    writeln!(&mut report, "height: {}", args.height)?;
-    writeln!(&mut report)?;
-    writeln!(
-        &mut report,
-        "- Overall: FAIL (VideoToolbox AV1 encode/decode is not implemented in video-hw yet)"
-    )?;
-
-    fs::write(&report_path, report)
-        .with_context(|| format!("write report: {}", report_path.display()))?;
-    println!("saved report: {}", report_path.display());
-    Ok(())
-}
-
 fn build_examples(profile: &str) -> Result<()> {
-    let mut args = vec!["build", "--examples", "--features", "backend-vt", "--profile", profile];
+    let mut args = vec![
+        "build",
+        "--examples",
+        "--features",
+        "backend-vt",
+        "--profile",
+        profile,
+    ];
     if profile == "release" {
-        args = vec!["build", "--examples", "--features", "backend-vt", "--release"];
+        args = vec![
+            "build",
+            "--examples",
+            "--features",
+            "backend-vt",
+            "--release",
+        ];
     }
     run_command("cargo", &args, &[])?;
     Ok(())
@@ -618,16 +651,35 @@ fn run_case(
     match case {
         Case::VideoHwDecode => {
             let mut cmd = Command::new(decode_bin);
-            cmd.args([
-                "--backend",
-                "vt",
-                "--codec",
-                args.codec.as_cli(),
-                "--input",
-                args.codec.sample_input(),
-                "--chunk-bytes",
-                &args.chunk_bytes.to_string(),
-            ]);
+            if args.codec == Codec::Av1 {
+                cmd.args([
+                    "--backend",
+                    "vt",
+                    "--codec",
+                    "av1",
+                    "--input",
+                    args.codec.sample_input(),
+                    "--input-format",
+                    "mp4",
+                    "--output-mode",
+                    "nv12",
+                    "--output",
+                    &video_hw_output.to_string_lossy(),
+                    "--fps",
+                    "30",
+                ]);
+            } else {
+                cmd.args([
+                    "--backend",
+                    "vt",
+                    "--codec",
+                    args.codec.as_cli(),
+                    "--input",
+                    args.codec.sample_input(),
+                    "--chunk-bytes",
+                    &args.chunk_bytes.to_string(),
+                ]);
+            }
             if args.include_internal_metrics {
                 cmd.env("VIDEO_HW_VT_METRICS", "1");
             }
@@ -746,7 +798,54 @@ fn run_case(
     }
 }
 
-fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
+fn generate_av1_fmp4_decode_input(args: &Args, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create input dir: {}", parent.display()))?;
+    }
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={}x{}:rate=30", args.width, args.height),
+            "-frames:v",
+            &args.frame_count.to_string(),
+            "-c:v",
+            "libaom-av1",
+            "-cpu-used",
+            "8",
+            "-g",
+            "30",
+            "-lag-in-frames",
+            "0",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            &path.to_string_lossy(),
+        ])
+        .output()
+        .with_context(|| format!("generate AV1 fMP4 input: {}", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "ffmpeg AV1 fMP4 input generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn write_raw_argb_input(
+    path: &Path,
+    width: usize,
+    height: usize,
+    frame_count: usize,
+) -> Result<()> {
     let frame_size = width
         .checked_mul(height)
         .and_then(|px| px.checked_mul(4))
@@ -874,9 +973,7 @@ fn run_timed_command(mut cmd: Command) -> Result<CaseRun> {
     cmd.stderr(Stdio::piped());
 
     let start = Instant::now();
-    let output = cmd
-        .output()
-        .context("spawn command for benchmark case")?;
+    let output = cmd.output().context("spawn command for benchmark case")?;
     let elapsed = start.elapsed().as_secs_f64();
 
     if !output.status.success() {

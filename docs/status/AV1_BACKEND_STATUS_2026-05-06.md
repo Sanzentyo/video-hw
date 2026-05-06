@@ -538,6 +538,10 @@ Current safeguards and evidence:
 - `video-hw-fmp4` attaches VT AV1 decode options from `av01` sample entries;
 - `decode_to_yuv --input-format mp4` lazily creates VT AV1 sessions after the
   first `av01` sample entry is available;
+- `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --verify` now generates
+  an AV1 fMP4 input and records decode-only video-hw VT vs FFmpeg VT results;
+  `scripts/run_vt_precise_suite.rs --include-av1` includes that AV1 pass in the
+  serial VT suite;
 - `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`
   passes on the cross target;
 - macOS-target full example/fMP4 checks from this Windows host are blocked by a

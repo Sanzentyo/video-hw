@@ -10,11 +10,11 @@ clap = { version = "4.5", features = ["derive"] }
 
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(about = "Run VT precise benchmark suite serially (h264 + hevc)")]
+#[command(about = "Run VT precise benchmark suite serially")]
 struct Args {
     #[arg(long, default_value_t = true)]
     release: bool,
@@ -33,6 +33,9 @@ struct Args {
 
     #[arg(long, default_value_t = true)]
     include_internal_metrics: bool,
+
+    #[arg(long, default_value_t = false)]
+    include_av1: bool,
 }
 
 fn main() -> Result<()> {
@@ -40,6 +43,9 @@ fn main() -> Result<()> {
 
     run_one("h264", &args)?;
     run_one("hevc", &args)?;
+    if args.include_av1 {
+        run_one("av1", &args)?;
+    }
 
     println!("[vt-suite] done");
     Ok(())
