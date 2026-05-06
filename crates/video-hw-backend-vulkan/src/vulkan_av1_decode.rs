@@ -408,6 +408,40 @@ pub(crate) struct Av1DecodeCommandRecordSummary {
     first_error: Option<String>,
 }
 
+impl Av1DecodeCommandRecordSummary {
+    pub(crate) fn validate_for_command(
+        &self,
+        command: &Av1DecodeCommandSkeleton,
+    ) -> Result<(), String> {
+        if self.begin_count != 1 {
+            return Err(format!(
+                "AV1 decode record expected one begin command, got {}",
+                self.begin_count
+            ));
+        }
+        if self.reset_count != 1 {
+            return Err(format!(
+                "AV1 decode record expected one RESET command, got {}",
+                self.reset_count
+            ));
+        }
+        if self.decode_count != command.frames.len() {
+            return Err(format!(
+                "AV1 decode record expected {} decode commands, got {}",
+                command.frames.len(),
+                self.decode_count
+            ));
+        }
+        if self.end_count != 1 {
+            return Err(format!(
+                "AV1 decode record expected one end command, got {}",
+                self.end_count
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Av1DecodeCommandSkeleton {
     pub(crate) fn coded_extent(&self) -> vk::Extent2D {
         vk::Extent2D {
@@ -3422,7 +3456,21 @@ mod tests {
                 first_error: None,
             }
         );
+        record_summary
+            .validate_for_command(&command)
+            .expect("record summary should match the planned command sequence");
         assert_eq!(recorded, vec!["begin", "reset", "decode", "decode", "end"]);
+
+        let err = Av1DecodeCommandRecordSummary {
+            begin_count: 1,
+            reset_count: 1,
+            decode_count: 1,
+            end_count: 1,
+            first_error: None,
+        }
+        .validate_for_command(&command)
+        .expect_err("decode count mismatch should be rejected");
+        assert!(err.contains("expected 2 decode commands"));
     }
 
     #[test]

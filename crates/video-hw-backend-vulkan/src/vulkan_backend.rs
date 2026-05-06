@@ -881,8 +881,13 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                         |_visit| Ok(()),
                                     )
                                     .ok();
+                                let record_summary_valid = record_summary
+                                    .as_ref()
+                                    .is_some_and(|summary| {
+                                        summary.validate_for_command(&aligned_command).is_ok()
+                                    });
                                 format!(
-                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, record_summary={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, record_summary={}, record_summary_valid={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
                                     upload_plan.bytes.len(),
                                     aligned_command.frames.len(),
                                     submit_bundles.len(),
@@ -899,6 +904,7 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                             summary.end_count
                                         ))
                                         .unwrap_or_else(|| "unavailable".to_string()),
+                                    record_summary_valid,
                                     sequence_visits,
                                     sequence_decodes,
                                     sequence_begin_refs,
@@ -1641,6 +1647,7 @@ mod tests {
         assert!(message.contains("decode_info_loop=1"));
         assert!(message.contains("command_sequence=true"));
         assert!(message.contains("record_summary=1/1/1/1"));
+        assert!(message.contains("record_summary_valid=true"));
     }
 
     #[test]

@@ -161,7 +161,8 @@ Current implementation progress:
   begin-coding, RESET, per-frame decode-info, and end-coding structs in the same
   order the future command buffer recorder will consume them; a result-returning
   record callback wrapper now reports begin/reset/decode/end counts so unsafe
-  ash calls can be inserted without changing the sequencing API;
+  ash calls can be inserted without changing the sequencing API, and validates
+  those counts against the planned frame count;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

@@ -130,7 +130,8 @@ Tasks:
    materializes begin-coding, RESET, per-frame decode, and end-coding data in the
    order the future recorder will issue Vulkan calls; a result-returning record
    callback wrapper now provides the insertion point for the actual unsafe ash
-   command calls.
+   command calls and validates begin/reset/decode/end counts against the planned
+   frames.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
    physical-device index as HEVC does.
 
