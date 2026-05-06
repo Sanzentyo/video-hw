@@ -107,6 +107,12 @@ pub(crate) struct Av1DecodeCommandSkeleton {
     pub frames: Vec<Av1DecodeFrameCommandSkeleton>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Av1DecodeBitstreamUploadPlan {
+    pub bytes: Vec<u8>,
+    pub decodes: Vec<Av1DecodeInfoSkeleton>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av1DecodeFrameRecordBundle {
     pub frame_index: usize,
@@ -684,12 +690,89 @@ pub(crate) fn build_av1_key_frame_decode_command_skeleton(
     bitstream: &[u8],
     max_dpb_slots: u32,
 ) -> Result<Av1DecodeCommandSkeleton, String> {
+    let decodes = build_av1_decode_info_skeletons(bitstream)?;
+    build_av1_key_frame_decode_command_skeleton_from_decodes(&decodes, max_dpb_slots)
+}
+
+pub(crate) fn build_av1_aligned_decode_bitstream_upload_plan(
+    bitstream: &[u8],
+    offset_alignment: u64,
+    size_alignment: u64,
+) -> Result<Av1DecodeBitstreamUploadPlan, String> {
+    let mut bytes = Vec::new();
+    let mut aligned_decodes = Vec::new();
+
+    for decode in build_av1_decode_info_skeletons(bitstream)? {
+        let current_len =
+            u64::try_from(bytes.len()).map_err(|_| "AV1 upload buffer length exceeds u64")?;
+        let aligned_offset = align_up_av1_decode_value(current_len, offset_alignment);
+        let padding = usize::try_from(aligned_offset.saturating_sub(current_len))
+            .map_err(|_| "AV1 upload offset padding exceeds usize")?;
+        bytes.resize(bytes.len() + padding, 0);
+
+        let source_start = usize::try_from(decode.src_buffer_offset)
+            .map_err(|_| "AV1 decode source offset exceeds usize")?;
+        let source_len = usize::try_from(decode.src_buffer_range)
+            .map_err(|_| "AV1 decode source range exceeds usize")?;
+        let source_end = source_start
+            .checked_add(source_len)
+            .ok_or_else(|| "AV1 decode source range overflows usize".to_string())?;
+        let source = bitstream
+            .get(source_start..source_end)
+            .ok_or_else(|| "AV1 decode source range exceeds bitstream length".to_string())?;
+        bytes.extend_from_slice(source);
+
+        let aligned_range = align_up_av1_decode_value(decode.src_buffer_range, size_alignment);
+        let required_len = usize::try_from(aligned_offset.saturating_add(aligned_range))
+            .map_err(|_| "AV1 aligned upload range exceeds usize")?;
+        if bytes.len() < required_len {
+            bytes.resize(required_len, 0);
+        }
+
+        let mut aligned_decode = decode;
+        aligned_decode.src_buffer_offset = aligned_offset;
+        aligned_decode.src_buffer_range = aligned_range;
+        aligned_decodes.push(aligned_decode);
+    }
+
+    if aligned_decodes.is_empty() {
+        return Err("missing AV1 frames for aligned decode upload plan".to_string());
+    }
+
+    Ok(Av1DecodeBitstreamUploadPlan {
+        bytes,
+        decodes: aligned_decodes,
+    })
+}
+
+pub(crate) fn build_av1_aligned_key_frame_decode_command_skeleton(
+    bitstream: &[u8],
+    max_dpb_slots: u32,
+    offset_alignment: u64,
+    size_alignment: u64,
+) -> Result<(Av1DecodeBitstreamUploadPlan, Av1DecodeCommandSkeleton), String> {
+    let upload_plan = build_av1_aligned_decode_bitstream_upload_plan(
+        bitstream,
+        offset_alignment,
+        size_alignment,
+    )?;
+    let command = build_av1_key_frame_decode_command_skeleton_from_decodes(
+        &upload_plan.decodes,
+        max_dpb_slots,
+    )?;
+
+    Ok((upload_plan, command))
+}
+
+fn build_av1_key_frame_decode_command_skeleton_from_decodes(
+    decodes: &[Av1DecodeInfoSkeleton],
+    max_dpb_slots: u32,
+) -> Result<Av1DecodeCommandSkeleton, String> {
     if max_dpb_slots == 0 {
         return Err("AV1 decode command skeleton requires at least one DPB slot".to_string());
     }
     let max_dpb_slots = usize::try_from(max_dpb_slots)
         .map_err(|_| "AV1 max_dpb_slots does not fit usize".to_string())?;
-    let decodes = build_av1_decode_info_skeletons(bitstream)?;
     let first = decodes
         .first()
         .ok_or_else(|| "missing AV1 frames for decode command skeleton".to_string())?;
@@ -730,6 +813,18 @@ pub(crate) fn build_av1_key_frame_decode_command_skeleton(
         begin_slots,
         frames,
     })
+}
+
+fn align_up_av1_decode_value(value: u64, alignment: u64) -> u64 {
+    if alignment <= 1 {
+        return value;
+    }
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value.saturating_add(alignment.saturating_sub(remainder))
+    }
 }
 
 pub(crate) fn build_av1_decode_picture_info_skeleton(
@@ -2651,6 +2746,49 @@ mod tests {
                 Av1DecodeRecordStep::EndCoding,
             ]
         );
+    }
+
+    #[test]
+    fn aligned_decode_upload_plan_pads_offsets_and_ranges() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12]));
+        bitstream.extend_from_slice(&make_obu(2, &[]));
+        bitstream.extend_from_slice(&make_obu(6, &[0x21, 0x22, 0x23]));
+
+        let plan = build_av1_aligned_decode_bitstream_upload_plan(&bitstream, 8, 4)
+            .expect("aligned upload plan should be built for multi-frame AV1");
+
+        assert_eq!(plan.decodes.len(), 2);
+        assert_eq!(plan.decodes[0].src_buffer_offset, 0);
+        assert_eq!(plan.decodes[0].src_buffer_range, 4);
+        assert_eq!(plan.decodes[1].src_buffer_offset, 8);
+        assert_eq!(plan.decodes[1].src_buffer_range, 4);
+        assert_eq!(&plan.bytes[0..2], &[0x11, 0x12]);
+        assert_eq!(&plan.bytes[2..8], &[0; 6]);
+        assert_eq!(&plan.bytes[8..11], &[0x21, 0x22, 0x23]);
+        assert_eq!(plan.bytes[11], 0);
+        assert_eq!(plan.decodes[0].picture_info.tile_offsets, vec![0]);
+        assert_eq!(plan.decodes[1].picture_info.tile_offsets, vec![0]);
+    }
+
+    #[test]
+    fn aligned_key_frame_decode_command_uses_upload_offsets() {
+        let mut bitstream = make_obu(1, &av1_reduced_still_sequence_header_payload(320, 180));
+        bitstream.extend_from_slice(&make_obu(6, &[0x11, 0x12]));
+        bitstream.extend_from_slice(&make_obu(2, &[]));
+        bitstream.extend_from_slice(&make_obu(6, &[0x21, 0x22, 0x23]));
+
+        let (plan, command) =
+            build_av1_aligned_key_frame_decode_command_skeleton(&bitstream, 2, 16, 8)
+                .expect("aligned command skeleton should use aligned upload offsets");
+
+        assert_eq!(plan.decodes.len(), 2);
+        assert_eq!(command.frames.len(), 2);
+        assert_eq!(command.frames[0].src_buffer_offset, 0);
+        assert_eq!(command.frames[0].src_buffer_range, 8);
+        assert_eq!(command.frames[1].src_buffer_offset, 16);
+        assert_eq!(command.frames[1].src_buffer_range, 8);
+        assert_eq!(command.frames[1].setup_slot_index, 1);
     }
 
     #[test]

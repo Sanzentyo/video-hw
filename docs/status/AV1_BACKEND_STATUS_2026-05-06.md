@@ -19,7 +19,7 @@ or better.
 | AV1 fMP4 reader | reader tests cover AV1 codec/layout detection, `av1C` parameter access, and OBU passthrough | Done |
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
-| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, extracts sequence-header coded extent, builds a reduced-still `StdVideoAV1SequenceHeader`, and now builds relative decode-info source ranges; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
+| Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` probes AV1 decode prerequisites, parses low-overhead OBUs, extracts sequence-header coded extent, builds a reduced-still `StdVideoAV1SequenceHeader`, builds relative decode-info source ranges, and now plans aligned bitstream upload ranges for `vkCmdDecodeVideoKHR`; `CapabilityReport` remains false until submit/readback exists | Decode scaffolding only |
 | VideoToolbox AV1 decode/encode | `vt_backend.rs` returns explicit `UnsupportedConfig`; macOS target check and unsupported tests cover the current contract | Not implemented |
 
 ## Latest Verified Results
@@ -53,9 +53,11 @@ integrated benchmark records explicit unsupported errors:
 Observed FFmpeg behavior on this Windows host:
 
 - NVIDIA adapter: FFmpeg `av1_vulkan` encode/decode can run.
-- Intel adapter: FFmpeg `av1_vulkan` encode fails because the device does not
-  expose the encode queue / AV1 encode path. Intel advertises decode-related
-  Vulkan video capability, but this is not a passing video-hw AV1 implementation.
+- Intel adapter: FFmpeg sees `VK_KHR_video_decode_av1`, reports AV1 decode
+  capabilities, and initializes the Vulkan decoder, but a short AV1 decode smoke
+  terminates with Windows access-violation exit `-1073741819`; encode is still
+  unavailable because the device does not expose the encode queue / AV1 encode
+  path. This is not a passing video-hw AV1 target.
 
 Remaining work is a real Vulkan AV1 path using `VK_KHR_video_decode_av1` and, for
 encode, `VK_KHR_video_encode_av1` where the driver exposes it. The current HEVC
@@ -138,6 +140,11 @@ Current implementation progress:
 - frame record bundles now tie each decode-info index to its frame metadata,
   source range, setup slot, and destination base array layer before the future
   `vkCmdDecodeVideoKHR` loop consumes them;
+- aligned AV1 bitstream upload planning now copies each decode unit into a
+  compact buffer with caller-provided `srcBufferOffset` and `srcBufferRange`
+  alignment, preserving picture-info offsets relative to the aligned
+  `srcBufferOffset`; blocker diagnostics exercise a 4096/4096 plan matching
+  common Vulkan Video capability requirements;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

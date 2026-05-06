@@ -14,11 +14,12 @@ use crate::{
     DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
     VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
-        Av1DecodePrerequisiteProbe, build_av1_decode_info_skeleton,
-        build_av1_decode_info_skeletons, build_av1_decode_picture_info_skeleton,
-        build_av1_decode_submit_skeleton, build_av1_key_frame_decode_command_skeleton,
-        extract_av1_std_sequence_header, inspect_av1_low_overhead_obus,
-        probe_av1_decode_prerequisites, probe_av1_decode_session_parameters_for_bitstream,
+        Av1DecodePrerequisiteProbe, build_av1_aligned_key_frame_decode_command_skeleton,
+        build_av1_decode_info_skeleton, build_av1_decode_info_skeletons,
+        build_av1_decode_picture_info_skeleton, build_av1_decode_submit_skeleton,
+        build_av1_key_frame_decode_command_skeleton, extract_av1_std_sequence_header,
+        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
+        probe_av1_decode_session_parameters_for_bitstream,
     },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
@@ -777,6 +778,26 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                                 .collect::<Vec<_>>()
                                 .join("/")
                         )
+                    })
+                    .and_then(|command_status| {
+                        build_av1_aligned_key_frame_decode_command_skeleton(bitstream, 4, 4096, 4096)
+                            .map(|(upload_plan, aligned_command)| {
+                                format!(
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, first_offset={}, first_range={})",
+                                    upload_plan.bytes.len(),
+                                    aligned_command.frames.len(),
+                                    aligned_command
+                                        .frames
+                                        .first()
+                                        .map(|frame| frame.src_buffer_offset)
+                                        .unwrap_or_default(),
+                                    aligned_command
+                                        .frames
+                                        .first()
+                                        .map(|frame| frame.src_buffer_range)
+                                        .unwrap_or_default()
+                                )
+                            })
                     })
                     .unwrap_or_else(|err| format!("unavailable({err})"))
             ));
