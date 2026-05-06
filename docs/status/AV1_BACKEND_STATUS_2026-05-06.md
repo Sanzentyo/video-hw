@@ -185,6 +185,14 @@ Current implementation progress:
   dedicated gate; `scripts/check_vulkan_av1_record_probe.rs` runs the ignored
   live probe and writes a small command-record report under
   `output/vulkan-av1-record-probe/`;
+- On the current Windows/Intel-visible Vulkan AV1 adapter, the no-record probe
+  passes with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`,
+  `upload_bytes=256`, `image_layers=16`, `barrier_layers=16`, and
+  `record_decodes=1`; enabling `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1`
+  still terminates the isolated test process with `STATUS_ACCESS_VIOLATION`
+  before any queue submit/readback, so the next implementation step is to
+  reconcile the AV1 record chain against FFmpeg/Mesa/NVIDIA command-buffer
+  setup before making record the default;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

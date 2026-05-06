@@ -199,6 +199,7 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_record_probe.rs --no-record-com
 - 生成レポート: `output/vulkan-av1-record-probe/vulkan-av1-record-probe-<epoch>.md`
 - 既定で `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` を付け、ignored live test を通じて AV1 decode command buffer の begin/reset/decode/end record probe を実行する。
 - `--no-record-command-buffer` は通常diagnosticsと同じく driver command path を発行せず、session/source/image/barrier/command sequence の構築だけを確認する。
+- 2026-05-06 の Windows/Intel-visible 環境では `--no-record-command-buffer` は PASS、既定の command-buffer record は isolated test process が `STATUS_ACCESS_VIOLATION` で終了する状態。実submit/readbackへ進む前のdriver command-chain切り分け用として扱う。
 - これは submit/readback/PSNR ではない。Vulkan AV1 backend はまだ実装完了扱いにしない。
 
 ### 12) fMP4 decode access pattern benchmark
