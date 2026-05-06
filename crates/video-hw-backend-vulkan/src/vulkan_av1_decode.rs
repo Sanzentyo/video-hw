@@ -114,6 +114,14 @@ pub(crate) struct Av1DecodeCommandSkeleton {
     pub frames: Vec<Av1DecodeFrameCommandSkeleton>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1DecodeImagePlan {
+    pub format: vk::Format,
+    pub extent: vk::Extent2D,
+    pub array_layers: u32,
+    pub usage: vk::ImageUsageFlags,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Av1DecodeBitstreamUploadPlan {
     pub bytes: Vec<u8>,
@@ -449,6 +457,46 @@ impl Av1DecodeCommandSkeleton {
             width: self.coded_width,
             height: self.coded_height,
         }
+    }
+
+    pub(crate) fn decode_image_plan(
+        &self,
+        format: vk::Format,
+    ) -> Result<Av1DecodeImagePlan, String> {
+        if self.begin_slots.is_empty() {
+            return Err("AV1 decode image plan requires at least one begin slot".to_string());
+        }
+        let array_layers = u32::try_from(self.begin_slots.len())
+            .map_err(|_| "AV1 decode image array layer count exceeds u32 range".to_string())?;
+        Ok(Av1DecodeImagePlan {
+            format,
+            extent: self.coded_extent(),
+            array_layers,
+            usage: vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+        })
+    }
+
+    pub(crate) fn vk_decode_image_create_info(
+        &self,
+        plan: &Av1DecodeImagePlan,
+    ) -> vk::ImageCreateInfo<'static> {
+        vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(plan.format)
+            .extent(vk::Extent3D {
+                width: plan.extent.width,
+                height: plan.extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(plan.array_layers)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(plan.usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
     }
 
     pub(crate) fn begin_picture_resources<'a>(
@@ -3231,6 +3279,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1, 1]
         );
+
+        let image_plan = command
+            .decode_image_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM)
+            .expect("command should produce a decode image plan");
+        assert_eq!(image_plan.format, vk::Format::G8_B8R8_2PLANE_420_UNORM);
+        assert_eq!(image_plan.extent.width, 320);
+        assert_eq!(image_plan.extent.height, 180);
+        assert_eq!(image_plan.array_layers, 2);
+        assert!(
+            image_plan
+                .usage
+                .contains(vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR)
+        );
+        assert!(
+            image_plan
+                .usage
+                .contains(vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR)
+        );
+        assert!(image_plan.usage.contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        let image_create_info = command.vk_decode_image_create_info(&image_plan);
+        assert_eq!(image_create_info.image_type, vk::ImageType::TYPE_2D);
+        assert_eq!(image_create_info.format, image_plan.format);
+        assert_eq!(image_create_info.extent.width, 320);
+        assert_eq!(image_create_info.extent.height, 180);
+        assert_eq!(image_create_info.array_layers, 2);
+        assert_eq!(image_create_info.usage, image_plan.usage);
 
         let begin_resources = command.begin_picture_resources(vk::ImageView::null());
         assert_eq!(begin_resources.len(), 2);

@@ -96,6 +96,9 @@ Current implementation progress:
 - real-bitstream AV1 probing now builds a capability-aligned source upload plan,
   creates a `VIDEO_DECODE_SRC_KHR` buffer, binds HOST_VISIBLE|HOST_COHERENT
   memory, uploads the compact bitstream bytes, and destroys the buffer/memory;
+- AV1 command scaffolding now derives a decode output/DPB image plan from the
+  command skeleton, including selected format, coded extent, DPB array layers,
+  and `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR|TRANSFER_SRC` usage;
 - Vulkan AV1 decode blocker messages now also attempt session-parameter creation
   with the real bitstream sequence header and report the coded extent and selected
   picture format when that probe reaches `ready`;
