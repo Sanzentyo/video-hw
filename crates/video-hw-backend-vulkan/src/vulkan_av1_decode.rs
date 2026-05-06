@@ -94,10 +94,42 @@ pub(crate) struct Av1DecodeFrameCommandSkeleton {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Av1BeginCodingSlotSkeleton {
+    pub slot_index: i32,
+    pub base_array_layer: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av1DecodeCommandSkeleton {
     pub coded_width: u32,
     pub coded_height: u32,
+    pub begin_slots: Vec<Av1BeginCodingSlotSkeleton>,
     pub frames: Vec<Av1DecodeFrameCommandSkeleton>,
+}
+
+impl Av1DecodeCommandSkeleton {
+    pub(crate) fn coded_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.coded_width,
+            height: self.coded_height,
+        }
+    }
+
+    pub(crate) fn begin_picture_resources<'a>(
+        &self,
+        image_view: vk::ImageView,
+    ) -> Vec<vk::VideoPictureResourceInfoKHR<'a>> {
+        self.begin_slots
+            .iter()
+            .map(|slot| {
+                vk::VideoPictureResourceInfoKHR::default()
+                    .coded_offset(vk::Offset2D { x: 0, y: 0 })
+                    .coded_extent(self.coded_extent())
+                    .base_array_layer(slot.base_array_layer)
+                    .image_view_binding(image_view)
+            })
+            .collect()
+    }
 }
 
 impl Av1DecodeInfoSkeleton {
@@ -463,6 +495,19 @@ pub(crate) fn build_av1_key_frame_decode_command_skeleton(
         .first()
         .ok_or_else(|| "missing AV1 frames for decode command skeleton".to_string())?;
 
+    let begin_slots = (0..max_dpb_slots)
+        .map(|slot| {
+            let slot_index = i32::try_from(slot)
+                .map_err(|_| "AV1 begin-coding slot index exceeds i32 range".to_string())?;
+            let base_array_layer = u32::try_from(slot)
+                .map_err(|_| "AV1 begin-coding slot index exceeds u32 range".to_string())?;
+            Ok(Av1BeginCodingSlotSkeleton {
+                slot_index,
+                base_array_layer,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
     let frames = decodes
         .iter()
         .enumerate()
@@ -483,6 +528,7 @@ pub(crate) fn build_av1_key_frame_decode_command_skeleton(
     Ok(Av1DecodeCommandSkeleton {
         coded_width: first.coded_width,
         coded_height: first.coded_height,
+        begin_slots,
         frames,
     })
 }
@@ -2213,6 +2259,19 @@ mod tests {
 
         assert_eq!(command.coded_width, 320);
         assert_eq!(command.coded_height, 180);
+        assert_eq!(
+            command.begin_slots,
+            vec![
+                Av1BeginCodingSlotSkeleton {
+                    slot_index: 0,
+                    base_array_layer: 0,
+                },
+                Av1BeginCodingSlotSkeleton {
+                    slot_index: 1,
+                    base_array_layer: 1,
+                }
+            ]
+        );
         assert_eq!(command.frames.len(), 3);
         assert_eq!(
             command
@@ -2238,6 +2297,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1, 1]
         );
+
+        let begin_resources = command.begin_picture_resources(vk::ImageView::null());
+        assert_eq!(begin_resources.len(), 2);
+        assert_eq!(begin_resources[0].coded_extent.width, 320);
+        assert_eq!(begin_resources[0].coded_extent.height, 180);
+        assert_eq!(begin_resources[0].base_array_layer, 0);
+        assert_eq!(begin_resources[1].base_array_layer, 1);
+        assert_eq!(begin_resources[1].image_view_binding, vk::ImageView::null());
     }
 
     #[test]

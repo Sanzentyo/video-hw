@@ -733,11 +733,15 @@ fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                     .unwrap_or_else(|err| format!("unavailable({err})")),
                 build_av1_key_frame_decode_command_skeleton(bitstream, 4)
                     .map(|command| {
+                        let begin_resources =
+                            command.begin_picture_resources(vk::ImageView::null());
                         format!(
-                            "ready(frames={}, coded={}x{}, slots={})",
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, slots={})",
                             command.frames.len(),
                             command.coded_width,
                             command.coded_height,
+                            command.begin_slots.len(),
+                            begin_resources.len(),
                             command
                                 .frames
                                 .iter()

@@ -123,6 +123,8 @@ Current implementation progress:
 - decode-info construction now has a helper that attaches the setup reference
   slot together with the AV1 picture-info chain, matching the shape needed by a
   future `vkCmdDecodeVideoKHR` call;
+- key-frame command skeletons now also include begin-coding DPB slot bindings
+  and can materialize HEVC-style begin picture resources over array layers;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
