@@ -192,7 +192,7 @@ Current implementation progress:
   (`pTileInfo`, `pQuantization`, `pSegmentation`, `pLoopFilter`, `pCDEF`,
   `pLoopRestoration`, `pGlobalMotion`) with each picture. The AV1 record path
   now materializes key-frame/single-tile default instances for those pointers
-  instead of leaving them NULL; on the current Windows/Intel-visible Vulkan AV1
+  instead of leaving them NULL; on the current Windows Vulkan AV1
   adapter, `--no-record-command-buffer`, `barrier_only`, `begin_end`,
   `reset_end`, `first_decode`, and `full` command-buffer record probes all pass
   with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`, `upload_bytes=256`,
@@ -202,10 +202,14 @@ Current implementation progress:
   `--readback` probe now records a `VIDEO_DECODE_DST_KHR ->
   TRANSFER_SRC_OPTIMAL` image transition, copies the decoded NV12 planes into a
   host-visible buffer, orders `TRANSFER_WRITE -> HOST_READ`, waits on the submit
-  fence, maps the readback allocation, and passes on the current
-  Windows/Intel-visible adapter with `readback_bytes=86400`,
-  `readback_mapped_bytes=86400`, `readback_non_zero=true`, and
-  `readback_sample_len=86400`; the live probe can now read an external AV1
+  fence, maps the readback allocation, and initializes the readback buffer with
+  a sentinel before submit so unwritten buffers are detectable. Readback now
+  requires the selected queue family to support both `VIDEO_DECODE` and
+  `TRANSFER`; this uses NVIDIA on the current Windows host, while Intel's
+  decode-only queue still needs a separate transfer queue/ownership-transfer
+  implementation. The live probe reports `readback_bytes=86400`,
+  `readback_mapped_bytes=86400`, and `readback_sample_len=86400`; the live probe
+  can now read an external AV1
   low-overhead OBU elementary stream through
   `VIDEO_HW_VULKAN_AV1_PROBE_BITSTREAM_PATH`, and
   `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
@@ -222,11 +226,12 @@ Current implementation progress:
   4-byte plane offset alignment, and bitstream session diagnostics now report
   planned and mapped readback byte counts;
 - Vulkan AV1 capability is still false because FFmpeg-reference PSNR is not
-  passing yet: `scripts/check_vulkan_av1_psnr.rs --skip-build --min-psnr-y 0`
-  records the current one-frame generated-OBU result as `psnr_y_min=5.6200`,
-  unchanged after the first key-frame header parser pass, which confirms the
-  output path is live but the AV1 picture/session modeling is not yet bit-exact
-  enough to claim decode support;
+  passing yet: `scripts/check_vulkan_av1_psnr.rs --min-psnr-y 0` records the
+  current one-frame generated-OBU result as `psnr_y_min=12.9600` after fixing
+  the explicit submit path and proving the readback copy overwrites a sentinel
+  buffer. The output is still neutral NV12-like rather than the FFmpeg reference,
+  so the AV1 picture/session modeling is not yet bit-exact enough to claim
+  decode support;
 - Vulkan AV1 encode is blocked by the current `ash 0.38.0+1.3.281` binding set,
   which exposes `VK_KHR_video_decode_av1` but not `VK_KHR_video_encode_av1`.
 

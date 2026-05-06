@@ -96,10 +96,20 @@ pub(crate) struct Av1DecodePictureInfoSkeleton {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Av1ParsedKeyFrameHeader {
     pub tile_payload_offset: usize,
+    pub disable_cdf_update: bool,
+    pub allow_screen_content_tools: bool,
+    pub force_integer_mv: bool,
+    pub frame_size_override_flag: bool,
+    pub order_hint: u8,
+    pub allow_intrabc: bool,
+    pub disable_frame_end_update_cdf: bool,
     pub base_q_idx: u8,
+    pub delta_q_present: bool,
+    pub delta_q_res: u8,
     pub loop_filter_level: [u8; 4],
     pub loop_filter_sharpness: u8,
     pub loop_filter_delta_enabled: bool,
+    pub loop_filter_delta_update: bool,
     pub cdef_damping_minus_3: u8,
     pub cdef_bits: u8,
     pub cdef_y_pri_strength: [u8; 8],
@@ -107,6 +117,7 @@ pub(crate) struct Av1ParsedKeyFrameHeader {
     pub cdef_uv_pri_strength: [u8; 8],
     pub cdef_uv_sec_strength: [u8; 8],
     pub tx_mode: u32,
+    pub reduced_tx_set: bool,
 }
 
 impl Av1DecodePictureInfoSkeleton {
@@ -199,7 +210,7 @@ impl Av1DecodeStdPictureInfoScope {
                 loop_filter_level: [0; 4],
                 loop_filter_sharpness: 0,
                 update_ref_delta: 0,
-                loop_filter_ref_deltas: [0; 8],
+                loop_filter_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
                 update_mode_delta: 0,
                 loop_filter_mode_deltas: [0; 2],
             },
@@ -226,10 +237,45 @@ impl Av1DecodeStdPictureInfoScope {
             height_in_sbs_minus1,
         };
         if let Some(header) = key_frame_header {
+            scope.std_picture_info.flags._bitfield_1 =
+                StdVideoDecodeAV1PictureInfoFlags::new_bitfield_1(
+                    1,
+                    header.disable_cdf_update as u32,
+                    0,
+                    0,
+                    header.allow_screen_content_tools as u32,
+                    0,
+                    header.force_integer_mv as u32,
+                    header.frame_size_override_flag as u32,
+                    0,
+                    header.allow_intrabc as u32,
+                    0,
+                    0,
+                    0,
+                    0,
+                    header.disable_frame_end_update_cdf as u32,
+                    0,
+                    header.reduced_tx_set as u32,
+                    0,
+                    0,
+                    header.delta_q_present as u32,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                );
+            scope.std_picture_info.OrderHint = header.order_hint;
+            scope.std_picture_info.delta_q_res = header.delta_q_res;
             scope.quantization.base_q_idx = header.base_q_idx;
             scope.loop_filter.flags._bitfield_1 = StdVideoAV1LoopFilterFlags::new_bitfield_1(
                 header.loop_filter_delta_enabled as u32,
-                0,
+                header.loop_filter_delta_update as u32,
                 0,
             );
             scope.loop_filter.loop_filter_level = header.loop_filter_level;
@@ -1056,6 +1102,7 @@ struct Av1DecodeExtensionFlags {
 struct Av1AdapterDecodeSupport {
     extensions: Av1DecodeExtensionFlags,
     decode_queue_family_index: Option<u32>,
+    decode_transfer_queue_family_index: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1140,6 +1187,7 @@ struct Av1DecodeCommandRecordConfig<'a> {
     instance: &'a ash::Instance,
     device: &'a ash::Device,
     queue_family_index: u32,
+    submit_command_buffer: bool,
     upload_plan: &'a Av1DecodeBitstreamUploadPlan,
     command: &'a Av1DecodeCommandSkeleton,
     video_session: vk::VideoSessionKHR,
@@ -1783,7 +1831,7 @@ fn build_av1_frame_obu_submit_skeleton(
     }
     Ok(Av1DecodeSubmitSkeleton {
         temporal_unit_index: frame_record.temporal_unit_index,
-        frame_header_offset,
+        frame_header_offset: tile_offset,
         tile_offsets: vec![tile_offset],
         tile_sizes: vec![tile_size],
         key_frame_header,
@@ -1836,19 +1884,19 @@ fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHea
     if !show_frame {
         let _showable_frame = bits.read_bool("showable_frame")?;
     }
-    let _disable_cdf_update = bits.read_bool("disable_cdf_update")?;
-    let _allow_screen_content_tools = bits.read_bool("allow_screen_content_tools")?;
-    let _force_integer_mv = bits.read_bool("force_integer_mv")?;
-    let _frame_size_override_flag = bits.read_bool("frame_size_override_flag")?;
-    let _order_hint = bits.read_bits_u8(7, "order_hint")?;
+    let disable_cdf_update = bits.read_bool("disable_cdf_update")?;
+    let allow_screen_content_tools = bits.read_bool("allow_screen_content_tools")?;
+    let force_integer_mv = bits.read_bool("force_integer_mv")?;
+    let frame_size_override_flag = bits.read_bool("frame_size_override_flag")?;
+    let order_hint = bits.read_bits_u8(7, "order_hint")?;
     let render_and_frame_size_different = bits.read_bool("render_and_frame_size_different")?;
     if render_and_frame_size_different {
         return Err(
             "render_and_frame_size_different AV1 key-frame parsing is not implemented".to_string(),
         );
     }
-    let _allow_intrabc = bits.read_bool("allow_intrabc")?;
-    let _disable_frame_end_update_cdf = bits.read_bool("disable_frame_end_update_cdf")?;
+    let allow_intrabc = bits.read_bool("allow_intrabc")?;
+    let disable_frame_end_update_cdf = bits.read_bool("disable_frame_end_update_cdf")?;
     let uniform_tile_spacing_flag = bits.read_bool("uniform_tile_spacing_flag")?;
     if !uniform_tile_spacing_flag {
         return Err("non-uniform AV1 tile spacing parsing is not implemented".to_string());
@@ -1870,8 +1918,9 @@ fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHea
         return Err("AV1 segmentation parsing is not implemented".to_string());
     }
     let delta_q_present = bits.read_bool("delta_q_present")?;
+    let mut delta_q_res = 0;
     if delta_q_present {
-        let _delta_q_res = bits.read_bits_u8(2, "delta_q_res")?;
+        delta_q_res = bits.read_bits_u8(2, "delta_q_res")?;
     }
 
     let loop_filter_level = [
@@ -1882,11 +1931,12 @@ fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHea
     ];
     let mut loop_filter_sharpness = 0;
     let mut loop_filter_delta_enabled = false;
+    let mut loop_filter_delta_update = false;
     if loop_filter_level.iter().any(|&level| level != 0) {
         loop_filter_sharpness = bits.read_bits_u8(3, "loop_filter_sharpness")?;
         loop_filter_delta_enabled = bits.read_bool("loop_filter_delta_enabled")?;
         if loop_filter_delta_enabled {
-            let loop_filter_delta_update = bits.read_bool("loop_filter_delta_update")?;
+            loop_filter_delta_update = bits.read_bool("loop_filter_delta_update")?;
             if loop_filter_delta_update {
                 return Err("AV1 loop-filter delta update parsing is not implemented".to_string());
             }
@@ -1913,14 +1963,24 @@ fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHea
     } else {
         StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_LARGEST
     };
-    let _reduced_tx_set = bits.read_bool("reduced_tx_set")?;
+    let reduced_tx_set = bits.read_bool("reduced_tx_set")?;
     bits.align_to_next_byte_with_zero_bits("frame_header_obu_byte_alignment")?;
     Ok(Av1ParsedKeyFrameHeader {
         tile_payload_offset: bits.byte_offset(),
+        disable_cdf_update,
+        allow_screen_content_tools,
+        force_integer_mv,
+        frame_size_override_flag,
+        order_hint,
+        allow_intrabc,
+        disable_frame_end_update_cdf,
         base_q_idx,
+        delta_q_present,
+        delta_q_res,
         loop_filter_level,
         loop_filter_sharpness,
         loop_filter_delta_enabled,
+        loop_filter_delta_update,
         cdef_damping_minus_3,
         cdef_bits,
         cdef_y_pri_strength,
@@ -1928,6 +1988,7 @@ fn parse_av1_key_frame_obu_header(payload: &[u8]) -> Result<Av1ParsedKeyFrameHea
         cdef_uv_pri_strength,
         cdef_uv_sec_strength,
         tx_mode,
+        reduced_tx_set,
     })
 }
 
@@ -2123,10 +2184,17 @@ fn query_av1_adapter_decode_support(
         vk::QueueFlags::VIDEO_DECODE_KHR,
         vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
     );
+    let decode_transfer_queue_family_index = query_video_codec_queue_family_index(
+        instance,
+        physical_device,
+        vk::QueueFlags::VIDEO_DECODE_KHR | vk::QueueFlags::TRANSFER,
+        vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
+    );
 
     Ok(Av1AdapterDecodeSupport {
         extensions: flags,
         decode_queue_family_index,
+        decode_transfer_queue_family_index,
     })
 }
 
@@ -2426,7 +2494,17 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
         if !support.extensions.supports_av1_decode() {
             continue;
         }
-        let Some(queue_family_index) = support.decode_queue_family_index else {
+        let queue_family_index = if options.readback {
+            support.decode_transfer_queue_family_index
+        } else {
+            support.decode_queue_family_index
+        };
+        let Some(queue_family_index) = queue_family_index else {
+            if options.readback {
+                probe_errors.push(
+                        "AV1 decode readback requires a queue family with VIDEO_DECODE and TRANSFER support".to_string(),
+                    );
+            }
             continue;
         };
         let snapshot = match query_av1_decode_capability_snapshot(entry, instance, physical_device)
@@ -2586,7 +2664,16 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     physical_device,
                     readback_plan.buffer_size,
                 ) {
-                    Ok(buffer) => Some(buffer),
+                    Ok(buffer) => {
+                        if let Err(err) = initialize_av1_decode_readback_buffer(&device, &buffer) {
+                            destroy_av1_decode_readback_buffer(&device, buffer);
+                            destroy_av1_decode_session_resource(instance, &device, session);
+                            destroy_av1_decode_image(&device, image);
+                            destroy_av1_decode_source_buffer(&device, source_buffer);
+                            return Err(err);
+                        }
+                        Some(buffer)
+                    }
                     Err(err) => {
                         destroy_av1_decode_session_resource(instance, &device, session);
                         destroy_av1_decode_image(&device, image);
@@ -2602,6 +2689,7 @@ fn probe_av1_decode_session_parameters_for_bitstream_with_instance(
                     instance,
                     device: &device,
                     queue_family_index,
+                    submit_command_buffer: command_buffer_submit_requested,
                     upload_plan: &upload_plan,
                     command: &command,
                     video_session: session.session,
@@ -3192,6 +3280,34 @@ fn create_av1_decode_readback_buffer(
     }
 }
 
+fn initialize_av1_decode_readback_buffer(
+    device: &ash::Device,
+    resource: &Av1DecodeReadbackBufferResource,
+) -> Result<(), String> {
+    let mapped_len = usize::try_from(resource.size)
+        .map_err(|_| "AV1 decode readback buffer size exceeds usize range".to_string())?;
+    // SAFETY: The readback memory is HOST_VISIBLE|HOST_COHERENT and the requested range fits the
+    // allocation used for the buffer.
+    let mapped = unsafe {
+        device.map_memory(
+            resource.memory,
+            0,
+            resource.size,
+            vk::MemoryMapFlags::empty(),
+        )
+    }
+    .map_err(|err| format!("vkMapMemory for AV1 decode readback initialization failed: {err}"))?;
+    // SAFETY: The mapped pointer is valid for `mapped_len` bytes until unmap.
+    let mapped_slice = unsafe { std::slice::from_raw_parts_mut(mapped.cast::<u8>(), mapped_len) };
+    mapped_slice.fill(0xcd);
+    // SAFETY: HOST_COHERENT memory does not require an explicit flush, and the memory is no longer
+    // accessed after unmap until the queued transfer writes it.
+    unsafe {
+        device.unmap_memory(resource.memory);
+    }
+    Ok(())
+}
+
 fn map_av1_decode_readback_buffer(
     device: &ash::Device,
     resource: &Av1DecodeReadbackBufferResource,
@@ -3527,7 +3643,7 @@ fn record_and_destroy_av1_decode_command_buffer(
         // SAFETY: Command buffer is recording and all command data has been emitted.
         unsafe { device.end_command_buffer(command_buffer) }
             .map_err(|err| format!("vkEndCommandBuffer for AV1 decode failed: {err}"))?;
-        if std::env::var("VIDEO_HW_VULKAN_AV1_SUBMIT_COMMAND_BUFFER").as_deref() == Ok("1") {
+        if config.submit_command_buffer {
             submit_av1_decode_command_buffer(device, config.queue_family_index, command_buffer)?;
         }
         Ok(record_summary)

@@ -183,14 +183,18 @@ Tasks:
    and maps the full planned byte range. The same probe can now accept an
    external AV1 low-overhead OBU stream, and
    `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
-   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback. The
-   explicit Vulkan backend path now reuses this for one-frame key-frame OBU
-   inputs and returns metadata/NV12/RGB24 through `decode_to_yuv`; PSNR is still
-   low. The first parser pass now separates Frame OBU header bytes from tile
-   payload bytes and feeds observed quantizer, loop-filter, CDEF, tx-mode, and
-   sequence feature flags into the std structs, but the generated-OBU PSNR gate
-   remains at `psnr_y_min=5.6200`, so more FFmpeg/std-struct parity work is
-   required.
+   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback on
+   adapters where the selected decode queue also supports transfer. Intel on
+   this host exposes AV1 decode on a decode-only queue, so production Intel
+   readback still needs a separate transfer queue/ownership-transfer path. The
+   explicit Vulkan backend path now submits the command buffer through the
+   option path rather than depending on probe environment variables, initializes
+   the readback buffer with a sentinel before copy, and reuses this for
+   one-frame key-frame OBU inputs. PSNR is still low. The current parser pass
+   separates Frame OBU header bytes from tile payload bytes and feeds observed
+   quantizer, loop-filter, CDEF, tx-mode, picture flags, and sequence feature
+   flags into the std structs, but the generated-OBU PSNR gate remains at
+   `psnr_y_min=12.9600`, so more FFmpeg/std-struct parity work is required.
 5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
    the one-frame explicit Vulkan AV1 path.
 
