@@ -112,7 +112,7 @@ cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --rele
 ### 6.2) AV1 fMP4 roundtrip smoke
 
 ```bash
-cargo +nightly -Zscript scripts/check_av1_fmp4_roundtrip.rs --backends nvidia,intel --release true --require-hardware true
+cargo +nightly -Zscript scripts/check_av1_fmp4_roundtrip.rs --backends nvidia,intel --release true --require-hardware true --min-decode-psnr 40
 ```
 
 - 生成レポート: `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-<epoch>.md`
@@ -120,7 +120,7 @@ cargo +nightly -Zscript scripts/check_av1_fmp4_roundtrip.rs --backends nvidia,in
 - `read_fmp4_file` で reader sample数を確認する。
 - `ffprobe` で `codec_name=av1` / `codec_tag_string=av01` / duration を確認する。
 - FFmpeg software decode と `decode_to_yuv --input-format mp4 --output-mode metadata` の両方が通ることを確認する。
-- `decode_to_yuv --input-format mp4 --output-mode rgb24` と FFmpeg RGB24 reference の PSNR を比較し、既定では decode PSNR min 40 dB 以上を要求する。
+- `decode_to_yuv --input-format mp4 --output-mode rgb24` と FFmpeg RGB24 reference の PSNR を比較し、既定では decode PSNR min 40 dB 以上を要求する。旧名 `--min-decode-psnr-y` も互換aliasとして受け付ける。
 
 ### 7) Intel oneVPL fallback セットアップ（Windows CLI）
 

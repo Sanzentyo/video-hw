@@ -44,8 +44,8 @@ struct Args {
     ffprobe: PathBuf,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: PathBuf,
-    #[arg(long, default_value_t = 40.0)]
-    min_decode_psnr_y: f64,
+    #[arg(long, alias = "min-decode-psnr-y", default_value_t = 40.0)]
+    min_decode_psnr: f64,
 }
 
 #[derive(Debug)]
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
             result.output.display(),
             result.reader_samples,
             result.metadata_frames,
-            result.decode_psnr.psnr_y_min,
+            result.decode_psnr.min,
             result.ffprobe_codec,
             result.ffprobe_tag,
             result.ffprobe_duration
@@ -134,11 +134,11 @@ fn run_case(args: &Args, backend: &str, run_id: u64) -> Result<CaseResult> {
             probe.tag
         );
     }
-    if decode_psnr.psnr_y_min < args.min_decode_psnr_y {
+    if decode_psnr.min < args.min_decode_psnr {
         bail!(
             "{backend} fMP4 decode PSNR below threshold: min={:.4}, threshold={:.4}",
-            decode_psnr.psnr_y_min,
-            args.min_decode_psnr_y
+            decode_psnr.min,
+            args.min_decode_psnr
         );
     }
     Ok(CaseResult {
@@ -336,8 +336,8 @@ fn compute_rgb_psnr(args: &Args, hw_rgb: &Path, ffmpeg_rgb: &Path, stats: &Path)
 
 #[derive(Debug, Clone, Copy)]
 struct PsnrSummary {
-    psnr_y_avg: f64,
-    psnr_y_min: f64,
+    avg: f64,
+    min: f64,
 }
 
 fn parse_psnr_stats(path: &Path) -> Result<PsnrSummary> {
@@ -360,8 +360,8 @@ fn parse_psnr_stats(path: &Path) -> Result<PsnrSummary> {
         bail!("PSNR stats file contained no frames");
     }
     Ok(PsnrSummary {
-        psnr_y_avg: values.iter().sum::<f64>() / values.len() as f64,
-        psnr_y_min: values.iter().copied().fold(f64::INFINITY, f64::min),
+        avg: values.iter().sum::<f64>() / values.len() as f64,
+        min: values.iter().copied().fold(f64::INFINITY, f64::min),
     })
 }
 
@@ -469,7 +469,7 @@ fn write_report(args: &Args, results: &[CaseResult], report: &Path) -> Result<()
     writeln!(&mut body, "frames: {}", args.frames)?;
     writeln!(&mut body, "fps: {}", args.fps)?;
     writeln!(&mut body, "release: {}", args.release)?;
-    writeln!(&mut body, "min_decode_psnr_y: {:.4}", args.min_decode_psnr_y)?;
+    writeln!(&mut body, "min_decode_psnr: {:.4}", args.min_decode_psnr)?;
     writeln!(&mut body)?;
     writeln!(
         &mut body,
@@ -488,8 +488,8 @@ fn write_report(args: &Args, results: &[CaseResult], report: &Path) -> Result<()
             result.bytes,
             result.reader_samples,
             result.metadata_frames,
-            result.decode_psnr.psnr_y_avg,
-            result.decode_psnr.psnr_y_min,
+            result.decode_psnr.avg,
+            result.decode_psnr.min,
             result.ffprobe_codec,
             result.ffprobe_tag,
             result.ffprobe_duration

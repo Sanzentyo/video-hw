@@ -39,7 +39,7 @@ or better.
   - NVIDIA encode PSNR-Y avg 60.43 dB; decode PSNR-Y min 50.54 dB
   - Intel encode PSNR-Y avg 55.62 dB; decode PSNR-Y min 50.48 dB
 - AV1 fMP4 roundtrip smoke:
-  - `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-1778068991.md`
+  - `output/av1-fmp4-roundtrip/av1-fmp4-roundtrip-1778069094.md`
   - NVIDIA: 30 reader samples, 30 `decode_to_yuv --input-format mp4` metadata frames, RGB decode PSNR min 45.98 dB, `codec=av1`, `tag=av01`, duration `1.000000`
   - Intel: 30 reader samples, 30 metadata frames, RGB decode PSNR min 46.07 dB, `codec=av1`, `tag=av01`, duration `1.000000`
 - Vulkan AV1 integrated benchmark:
