@@ -8,7 +8,10 @@ use ash::vk::native::{
     StdVideoAV1ColorConfig, StdVideoAV1ColorConfigFlags,
     StdVideoAV1ColorPrimaries_STD_VIDEO_AV1_COLOR_PRIMARIES_BT_UNSPECIFIED,
     StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE,
-    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY, StdVideoAV1GlobalMotion,
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTER,
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTRA_ONLY,
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY,
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_SWITCH, StdVideoAV1GlobalMotion,
     StdVideoAV1InterpolationFilter_STD_VIDEO_AV1_INTERPOLATION_FILTER_SWITCHABLE,
     StdVideoAV1LoopFilter, StdVideoAV1LoopFilterFlags, StdVideoAV1LoopRestoration,
     StdVideoAV1MatrixCoefficients_STD_VIDEO_AV1_MATRIX_COEFFICIENTS_UNSPECIFIED,
@@ -111,6 +114,7 @@ pub(crate) struct Av1DecodePictureInfoSkeleton {
     pub tile_sizes: Vec<u32>,
     pub use_128x128_superblock: bool,
     pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
+    pub frame_header_summary: Option<Av1ParsedFrameHeaderSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1638,7 +1642,7 @@ fn build_av1_decode_info_skeleton_from_submit(
         src_buffer_range: u64::from(src_buffer_range),
         coded_width,
         coded_height,
-        setup_reference_info: key_frame_std_reference_info(&rebased_picture_info),
+        setup_reference_info: av1_std_reference_info(&rebased_picture_info),
         picture_info: rebased_picture_info,
     })
 }
@@ -1734,6 +1738,16 @@ fn build_av1_key_frame_decode_command_skeleton_from_decodes(
     decodes: &[Av1DecodeInfoSkeleton],
     max_dpb_slots: u32,
 ) -> Result<Av1DecodeCommandSkeleton, String> {
+    if let Some(summary) = decodes
+        .iter()
+        .filter_map(|decode| decode.picture_info.frame_header_summary)
+        .find(|summary| !summary.is_key_frame())
+    {
+        return Err(format!(
+            "AV1 inter-frame reference-slot replay is not implemented yet: {}",
+            summary.diagnostic()
+        ));
+    }
     if max_dpb_slots == 0 {
         return Err("AV1 decode command skeleton requires at least one DPB slot".to_string());
     }
@@ -1797,14 +1811,6 @@ fn align_up_av1_decode_value(value: u64, alignment: u64) -> u64 {
 pub(crate) fn build_av1_decode_picture_info_skeleton(
     submit: &Av1DecodeSubmitSkeleton,
 ) -> Result<Av1DecodePictureInfoSkeleton, String> {
-    if let Some(summary) = submit.frame_header_summary
-        && !summary.is_key_frame()
-    {
-        return Err(format!(
-            "AV1 inter-frame picture-info mapping is not implemented yet: {}",
-            summary.diagnostic()
-        ));
-    }
     if submit.tile_offsets.is_empty() {
         return Err("AV1 decode picture info requires at least one tile offset".to_string());
     }
@@ -1820,14 +1826,47 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
     }
 
     Ok(Av1DecodePictureInfoSkeleton {
-        std_picture_info: key_frame_std_picture_info(),
-        reference_name_slot_indices: [-1; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
+        std_picture_info: av1_std_picture_info_for_submit(submit)?,
+        reference_name_slot_indices: if let Some(summary) = submit.frame_header_summary
+            && !summary.is_key_frame()
+        {
+            summary.ref_frame_idx
+        } else {
+            [-1; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR]
+        },
         frame_header_offset: submit.frame_header_offset,
         tile_offsets: submit.tile_offsets.clone(),
         tile_sizes: submit.tile_sizes.clone(),
         use_128x128_superblock: submit.use_128x128_superblock,
         key_frame_header: submit.key_frame_header,
+        frame_header_summary: submit.frame_header_summary,
     })
+}
+
+fn av1_std_picture_info_for_submit(
+    submit: &Av1DecodeSubmitSkeleton,
+) -> Result<StdVideoDecodeAV1PictureInfo, String> {
+    let mut picture_info = key_frame_std_picture_info();
+    if let Some(summary) = submit.frame_header_summary {
+        picture_info.frame_type = av1_std_frame_type(summary.frame_type)?;
+        picture_info.OrderHint = summary.order_hint;
+        picture_info.primary_ref_frame = summary.primary_ref_frame;
+        picture_info.refresh_frame_flags = summary.refresh_frame_flags;
+        picture_info
+            .flags
+            .set_error_resilient_mode(u32::from(summary.error_resilient_mode));
+    }
+    Ok(picture_info)
+}
+
+fn av1_std_frame_type(frame_type: u8) -> Result<ash::vk::native::StdVideoAV1FrameType, String> {
+    match frame_type {
+        0 => Ok(StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY),
+        1 => Ok(StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTER),
+        2 => Ok(StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTRA_ONLY),
+        3 => Ok(StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_SWITCH),
+        other => Err(format!("unsupported AV1 frame_type {other}")),
+    }
 }
 
 fn parse_av1_frame_obu_summary(
@@ -1999,6 +2038,27 @@ fn key_frame_std_reference_info(
     picture_info: &Av1DecodePictureInfoSkeleton,
 ) -> StdVideoDecodeAV1ReferenceInfo {
     key_frame_std_reference_info_for_order_hint(picture_info.std_picture_info.OrderHint)
+}
+
+fn av1_std_reference_info(
+    picture_info: &Av1DecodePictureInfoSkeleton,
+) -> StdVideoDecodeAV1ReferenceInfo {
+    if picture_info
+        .frame_header_summary
+        .is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame)
+    {
+        return key_frame_std_reference_info(picture_info);
+    }
+    StdVideoDecodeAV1ReferenceInfo {
+        flags: StdVideoDecodeAV1ReferenceInfoFlags {
+            _bitfield_align_1: [],
+            _bitfield_1: StdVideoDecodeAV1ReferenceInfoFlags::new_bitfield_1(0, 0, 0),
+        },
+        frame_type: picture_info.std_picture_info.frame_type as u8,
+        RefFrameSignBias: 0,
+        OrderHint: picture_info.std_picture_info.OrderHint,
+        SavedOrderHints: [0; 8],
+    }
 }
 
 fn key_frame_std_reference_info_for_order_hint(order_hint: u8) -> StdVideoDecodeAV1ReferenceInfo {
@@ -5440,6 +5500,56 @@ mod tests {
     }
 
     #[test]
+    fn picture_info_skeleton_maps_inter_frame_header_summary_before_replay_gap() {
+        let summary = Av1ParsedFrameHeaderSummary {
+            frame_type: 1,
+            show_existing_frame: false,
+            show_frame: true,
+            error_resilient_mode: false,
+            order_hint: 1,
+            primary_ref_frame: 6,
+            refresh_frame_flags: 0x02,
+            ref_frame_idx: [0, 1, 2, 3, 4, 5, 6],
+            tile_payload_offset: 15,
+        };
+        let submit = Av1DecodeSubmitSkeleton {
+            temporal_unit_index: 1,
+            frame_header_offset: 20,
+            tile_offsets: vec![35],
+            tile_sizes: vec![8],
+            use_128x128_superblock: false,
+            key_frame_header: None,
+            frame_header_summary: Some(summary),
+        };
+
+        let picture = build_av1_decode_picture_info_skeleton(&submit)
+            .expect("inter-frame header summary should map to picture info");
+
+        assert_eq!(
+            picture.std_picture_info.frame_type,
+            StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_INTER
+        );
+        assert_eq!(picture.std_picture_info.OrderHint, 1);
+        assert_eq!(picture.std_picture_info.primary_ref_frame, 6);
+        assert_eq!(picture.std_picture_info.refresh_frame_flags, 0x02);
+        assert_eq!(picture.reference_name_slot_indices, [0, 1, 2, 3, 4, 5, 6]);
+
+        let decode = Av1DecodeInfoSkeleton {
+            temporal_unit_index: 1,
+            src_buffer_offset: 20,
+            src_buffer_range: 23,
+            coded_width: 320,
+            coded_height: 180,
+            setup_reference_info: av1_std_reference_info(&picture),
+            picture_info: picture,
+        };
+        let err = build_av1_key_frame_decode_command_skeleton_from_decodes(&[decode], 8)
+            .expect_err("inter-frame reference-slot replay should remain gated");
+        assert!(err.contains("AV1 inter-frame reference-slot replay is not implemented"));
+        assert!(err.contains("primary_ref_frame=6"));
+    }
+
+    #[test]
     fn picture_info_skeleton_rejects_empty_tiles() {
         let submit = Av1DecodeSubmitSkeleton {
             temporal_unit_index: 0,
@@ -6254,6 +6364,7 @@ mod tests {
             tile_sizes: vec![5],
             use_128x128_superblock: false,
             key_frame_header: None,
+            frame_header_summary: None,
         };
 
         let err = av1_decode_source_range(12, &picture)

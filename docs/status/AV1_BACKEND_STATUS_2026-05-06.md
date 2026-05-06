@@ -162,8 +162,9 @@ Current implementation progress:
   with stable pointers to std picture info and tile arrays for the upcoming
   `VideoDecodeInfoKHR` chain;
 - real AV1 frame-header parsing now uses `oxideav-av1` when it can parse the
-  frame OBU/header. Inter-frame GOP inputs still stop before picture-info
-  mapping, but diagnostics now include `order_hint`, `primary_ref_frame`,
+  frame OBU/header. Inter-frame GOP inputs now map the parsed header into the
+  picture-info skeleton and then stop at the explicit reference-slot replay
+  gate; diagnostics include `order_hint`, `primary_ref_frame`,
   `refresh_frame_flags`, `ref_frame_idx`, and the tile payload offset for the
   first parsed inter frame;
 - AV1 decode info skeleton extraction now computes the minimum consecutive
@@ -357,12 +358,13 @@ Latest Vulkan AV1 scaffold verification:
   blocker message now includes `frame_headers=2`, `key_frames=1`, and
   `inter_frames=1`.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --width 128 --height 72 --frames 2 --gop-size 2 --min-psnr-y 60`
-  intentionally fails after parsing the first inter-frame header
-  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778072409111.md`). The failure now
-  reports `frame_type=1`, `order_hint=1`, `primary_ref_frame=6`,
+  intentionally fails after mapping the first inter-frame header into
+  decode-info and then stopping at reference-slot replay
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778072585372.md`). The failure now
+  reports `decode_info_count=2`, `frame_type=1`, `order_hint=1`, `primary_ref_frame=6`,
   `refresh_frame_flags=0x02`, `ref_frame_idx=[0, 0, 0, 0, 0, 0, 0]`, and
   `tile_payload_offset=15`, confirming that the next missing layer is
-  inter-frame picture-info/reference-slot mapping plus DPB replay.
+  inter-frame reference-slot mapping plus DPB replay.
 - `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --skip-build --min-psnr-y 60`
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`,
   `psnr_y_min=inf`)
