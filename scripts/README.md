@@ -107,7 +107,7 @@ cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --rele
 - 生成レポート: `output/av1-psnr/av1-psnr-<epoch>.md`
 - FFmpeg `testsrc2` から raw ARGB 入力を生成し、`video-hw` AV1 encode 出力を FFmpeg reference と MSE/PSNR 比較する
 - decode pixel PSNR は `video-hw decode_to_yuv --output-mode rgb24` と FFmpeg RGB24 reference を比較する
-- Intel AV1 hardware decode はこの環境では metadata decode は通る一方、RGB/NV12 pixel payload read が空になるため、script は Intel decode PSNR を skipped として metadata frame count を記録する
+- 320x180/30 frames の確認では NVIDIA / Intel とも encode PSNR-Y avg 55 dB 以上、decode PSNR-Y min 50 dB 以上で PASS
 
 ### 7) Intel oneVPL fallback セットアップ（Windows CLI）
 

@@ -585,10 +585,7 @@ fn surface_to_backend_frame(
     let argb = if matches!(output_mode, DecodeOutputMode::Metadata) {
         None
     } else {
-        let mut data = Vec::new();
-        surface.read_to_end(&mut data).map_err(|err| {
-            BackendError::Backend(format!("failed to read decoded frame payload: {err}"))
-        })?;
+        let data = read_surface_payload(surface, width, height, fourcc)?;
         Some(surface_payload_to_argb(&data, width, height, fourcc)?)
     };
 
@@ -620,6 +617,156 @@ fn surface_payload_to_argb(
         _ => Err(BackendError::UnsupportedConfig(format!(
             "unsupported decoded pixel format from Intel backend: {fourcc:?}"
         ))),
+    }
+}
+
+fn read_surface_payload(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+    fourcc: FourCC,
+) -> Result<Vec<u8>, BackendError> {
+    if width == 0 || height == 0 {
+        return Err(BackendError::InvalidInput(
+            "decoded frame dimensions must be positive".to_string(),
+        ));
+    }
+    surface
+        .map(MemoryFlag::READ)
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::map"))?;
+    let read_result = match fourcc {
+        FourCC::NV12 => read_mapped_nv12_surface(surface, width, height),
+        FourCC::IyuvOrI420 | FourCC::YV12 => read_mapped_i420_surface(surface, width, height),
+        FourCC::Rgb4OrBgra => read_mapped_bgra_surface(surface, width, height),
+        _ => Err(BackendError::UnsupportedConfig(format!(
+            "unsupported decoded pixel format from Intel backend: {fourcc:?}"
+        ))),
+    };
+
+    let unmap_result = surface
+        .unmap()
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::unmap"));
+
+    let data = read_result?;
+    unmap_result?;
+    Ok(data)
+}
+
+fn read_mapped_nv12_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(
+            "NV12 decode currently requires even frame dimensions".to_string(),
+        ));
+    }
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    if pitch < width {
+        return Err(BackendError::Backend(format!(
+            "unexpected NV12 surface pitch (smaller than width): pitch={}, width={width}",
+            bounds.pitch
+        )));
+    }
+    let y_plane = surface.y();
+    let y_ptr = y_plane.as_ptr();
+    let uv_ptr = surface.u().as_ptr();
+    let y_size = width
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
+    let uv_size = y_size / 2;
+    let mut out = vec![0_u8; y_size + uv_size];
+    copy_pitched_rows(y_ptr, pitch, width, height, &mut out[..y_size]);
+    copy_pitched_rows(uv_ptr, pitch, width, height / 2, &mut out[y_size..]);
+    Ok(out)
+}
+
+fn read_mapped_i420_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(
+            "I420 decode currently requires even frame dimensions".to_string(),
+        ));
+    }
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    let chroma_pitch = pitch / 2;
+    let chroma_width = width / 2;
+    if pitch < width || chroma_pitch < chroma_width {
+        return Err(BackendError::Backend(format!(
+            "unexpected I420 surface pitch: pitch={}, width={width}",
+            bounds.pitch
+        )));
+    }
+    let y_plane = surface.y();
+    let y_ptr = y_plane.as_ptr();
+    let u_ptr = surface.u().as_ptr();
+    let v_ptr = surface.v().as_ptr();
+    let y_size = width
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("i420 luma size overflow".to_string()))?;
+    let uv_size = y_size / 4;
+    let mut out = vec![0_u8; y_size + uv_size * 2];
+    copy_pitched_rows(y_ptr, pitch, width, height, &mut out[..y_size]);
+    copy_pitched_rows(
+        u_ptr,
+        chroma_pitch,
+        chroma_width,
+        height / 2,
+        &mut out[y_size..(y_size + uv_size)],
+    );
+    copy_pitched_rows(
+        v_ptr,
+        chroma_pitch,
+        chroma_width,
+        height / 2,
+        &mut out[(y_size + uv_size)..],
+    );
+    Ok(out)
+}
+
+fn read_mapped_bgra_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| BackendError::InvalidInput("BGRA row size overflow".to_string()))?;
+    if pitch < row_bytes {
+        return Err(BackendError::Backend(format!(
+            "unexpected BGRA surface pitch (smaller than row): pitch={}, row={row_bytes}",
+            bounds.pitch
+        )));
+    }
+    let b_plane = surface.b();
+    let mut out = vec![0_u8; row_bytes * height];
+    copy_pitched_rows(b_plane.as_ptr(), pitch, row_bytes, height, &mut out);
+    Ok(out)
+}
+
+fn copy_pitched_rows(
+    src: *const u8,
+    source_pitch: usize,
+    row_bytes: usize,
+    rows: usize,
+    dst: &mut [u8],
+) {
+    debug_assert!(dst.len() >= row_bytes * rows);
+    for row in 0..rows {
+        // SAFETY: The caller obtained `src` from a mapped oneVPL surface plane and
+        // validated that `source_pitch >= row_bytes`. The destination slice is sized
+        // for all requested rows.
+        let source = unsafe { std::slice::from_raw_parts(src.add(row * source_pitch), row_bytes) };
+        let target = &mut dst[(row * row_bytes)..((row + 1) * row_bytes)];
+        target.copy_from_slice(source);
     }
 }
 
