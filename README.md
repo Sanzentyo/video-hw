@@ -99,6 +99,7 @@ Intel encode のレート制御は `VIDEO_HW_INTEL_RATE_CONTROL`（`cbr|vbr|cqp|
 - NVIDIA parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends nv --codec av1 --release true` で実行できます。320x180/30 frames の確認では `video-hw decode 0.118-0.120s`、`ffmpeg decode 0.131-0.133s`、`video-hw encode 0.148-0.162s`、`ffmpeg encode 0.164-0.174s` で parity PASS でした。
 - Intel oneVPL parity benchmark は `cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends intel --codec av1 --release true` で実行できます。320x180/30 encode frames / 640x360/120 decode frames の確認では `video-hw decode 0.406s`、`ffmpeg decode 0.392s`、`video-hw encode 0.425s`、`ffmpeg encode 0.429s` で parity PASS でした。AV1 OBU decode input は H.264/HEVC のように byte-repeat せず、生成済み elementary stream をそのまま使います。
 - AV1 の MSE/PSNR smoke は `cargo +nightly -Zscript scripts/check_av1_psnr.rs --backends nvidia,intel --release true` で実行できます。320x180/30 frames の確認では NVIDIA encode PSNR-Y avg 60.43 dB / decode PSNR-Y min 50.54 dB、Intel encode PSNR-Y avg 55.62 dB / decode PSNR-Y min 50.48 dB でした。
+- VideoToolbox AV1 は video-hw では未実装です。macOS の統合 benchmark は VT+AV1 を parity 対象として成功扱いにせず、`VideoToolbox AV1 encode/decode is not implemented in video-hw yet` を report に残します。
 - Vulkan AV1 は video-hw では未実装です。統合 benchmark は `Vulkan AV1 decode/encode is not implemented in video-hw yet` を report に残します。この環境では FFmpeg `av1_vulkan` は NVIDIA adapter で encode/decode 可能、Intel adapter では encode が `VK_KHR_video_encode_queue` 不足で不可でした。
 
 #### onevpl fork 更新時の手順

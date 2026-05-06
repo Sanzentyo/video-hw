@@ -17,10 +17,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -28,6 +29,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -35,6 +37,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
+            Self::Av1 => "output/benchmark-vt-av1-decode-input.av1",
         }
     }
 
@@ -42,6 +45,7 @@ impl Codec {
         match self {
             Self::H264 => "h264_videotoolbox",
             Self::Hevc => "hevc_videotoolbox",
+            Self::Av1 => "av1_videotoolbox",
         }
     }
 
@@ -49,6 +53,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 }
@@ -211,13 +216,18 @@ fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
 }
 
 fn main() -> Result<()> {
+    let args = Args::parse();
+
     if !cfg!(target_os = "macos") {
         bail!("this benchmark is intended for macOS (VideoToolbox)");
     }
 
-    let args = Args::parse();
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
+    }
+    if args.codec == Codec::Av1 {
+        write_unsupported_av1_report(&args)?;
+        return Ok(());
     }
 
     let profile = if args.release { "release" } else { "debug" };
@@ -541,6 +551,35 @@ fn main() -> Result<()> {
             summary.codec_name, summary.width, summary.height, summary.nb_read_frames
         )?;
     }
+
+    fs::write(&report_path, report)
+        .with_context(|| format!("write report: {}", report_path.display()))?;
+    println!("saved report: {}", report_path.display());
+    Ok(())
+}
+
+fn write_unsupported_av1_report(args: &Args) -> Result<()> {
+    let output_dir = PathBuf::from("output");
+    fs::create_dir_all(&output_dir).context("create output directory")?;
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX_EPOCH")?
+        .as_secs();
+    let report_path = output_dir.join(format!("benchmark-vt-precise-av1-{now_secs}.md"));
+
+    let mut report = String::new();
+    writeln!(&mut report, "# VT Precise Benchmark Report")?;
+    writeln!(&mut report, "epoch_seconds: {now_secs}")?;
+    writeln!(&mut report, "codec: av1")?;
+    writeln!(&mut report, "warmup: {}", args.warmup)?;
+    writeln!(&mut report, "repeat: {}", args.repeat)?;
+    writeln!(&mut report, "width: {}", args.width)?;
+    writeln!(&mut report, "height: {}", args.height)?;
+    writeln!(&mut report)?;
+    writeln!(
+        &mut report,
+        "- Overall: FAIL (VideoToolbox AV1 encode/decode is not implemented in video-hw yet)"
+    )?;
 
     fs::write(&report_path, report)
         .with_context(|| format!("write report: {}", report_path.display()))?;

@@ -1671,6 +1671,8 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
         (BackendKind::VideoToolbox, Codec::H264) => EncodedLayout::Avcc,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         (BackendKind::VideoToolbox, Codec::Hevc) => EncodedLayout::Hvcc,
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        (BackendKind::VideoToolbox, Codec::Av1) => EncodedLayout::Av1,
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")

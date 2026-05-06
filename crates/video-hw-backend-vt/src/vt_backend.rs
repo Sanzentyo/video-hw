@@ -105,6 +105,7 @@ struct VtDecoderSession {
 
 impl VtDecoderSession {
     fn new(config: &DecoderConfig, parameter_sets: &[Vec<u8>]) -> Result<Self, BackendError> {
+        ensure_vt_codec_implemented(config.codec, "decode")?;
         let codec_type = to_cm_codec_type(config.codec);
         if config.require_hardware
             && !VTDecompressionSession::is_hardware_decode_supported(codec_type)
@@ -416,6 +417,15 @@ impl VtDecoderAdapter {
 
 impl VideoDecoder for VtDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        if codec == Codec::Av1 {
+            return Ok(CapabilityReport {
+                codec,
+                decode_supported: false,
+                encode_supported: false,
+                hardware_acceleration: false,
+                decode_output_modes: Vec::new(),
+            });
+        }
         let cm_codec = to_cm_codec_type(codec);
         Ok(CapabilityReport {
             codec,
@@ -435,6 +445,7 @@ impl VideoDecoder for VtDecoderAdapter {
         chunk: &[u8],
         pts_90k: Option<i64>,
     ) -> Result<Vec<Frame>, BackendError> {
+        ensure_vt_codec_implemented(self.config.codec, "decode")?;
         let submit_start = Instant::now();
         let (access_units, cache) = self
             .assembler
@@ -461,6 +472,7 @@ impl VideoDecoder for VtDecoderAdapter {
     }
 
     fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+        ensure_vt_codec_implemented(self.config.codec, "decode")?;
         let submit_start = Instant::now();
         let (access_units, cache) = self.assembler.flush()?;
         let input_copy_bytes = packed_access_units_bytes(&access_units);
@@ -817,6 +829,15 @@ fn expect_metadata_only_decoded_unit(
 
 impl VideoEncoder for VtEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        if codec == Codec::Av1 {
+            return Ok(CapabilityReport {
+                codec,
+                decode_supported: false,
+                encode_supported: false,
+                hardware_acceleration: false,
+                decode_output_modes: Vec::new(),
+            });
+        }
         Ok(CapabilityReport {
             codec,
             decode_supported: true,
@@ -831,6 +852,7 @@ impl VideoEncoder for VtEncoderAdapter {
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
+        ensure_vt_codec_implemented(self.codec, "encode")?;
         let mut frame = frame;
         if self.pending_switch.is_some() && frame.force_keyframe {
             self.apply_pending_switch_if_needed()?;
@@ -882,6 +904,7 @@ impl VideoEncoder for VtEncoderAdapter {
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        ensure_vt_codec_implemented(self.codec, "encode")?;
         let flush_start = Instant::now();
         if self.pending_frames.is_empty() {
             return Ok(Vec::new());
@@ -1094,6 +1117,15 @@ fn codec_label(codec: Codec) -> &'static str {
         Codec::Hevc => "hevc",
         Codec::Av1 => "av1",
     }
+}
+
+fn ensure_vt_codec_implemented(codec: Codec, operation: &str) -> Result<(), BackendError> {
+    if codec == Codec::Av1 {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "VideoToolbox AV1 {operation} is not implemented in video-hw yet"
+        )));
+    }
+    Ok(())
 }
 
 fn create_format_description(
