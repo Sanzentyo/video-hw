@@ -20,6 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 struct Args {
     input: Option<PathBuf>,
     input_format: Av1InputFormat,
+    decode_bin: Option<PathBuf>,
     output_dir: PathBuf,
     ffmpeg: PathBuf,
     width: u32,
@@ -64,7 +65,7 @@ fn main() -> Result<()> {
             absolute_path(&generated)?
         }
     };
-    if !args.skip_build {
+    if !args.skip_build && args.decode_bin.is_none() {
         run(
             Command::new("cargo").args([
                 "build",
@@ -122,6 +123,7 @@ fn main() -> Result<()> {
 fn parse_args() -> Result<Args> {
     let mut input = None;
     let mut input_format = Av1InputFormat::Obu;
+    let mut decode_bin = None;
     let mut output_dir = PathBuf::from("output/vulkan-av1-psnr");
     let mut ffmpeg = env::var("FFMPEG_PATH")
         .map(PathBuf::from)
@@ -141,6 +143,7 @@ fn parse_args() -> Result<Args> {
             "--input-format" | "--container" => {
                 input_format = parse_input_format(&next_value(&mut iter, "--input-format")?)?
             }
+            "--decode-bin" => decode_bin = Some(PathBuf::from(next_value(&mut iter, "--decode-bin")?)),
             "--output-dir" => output_dir = PathBuf::from(next_value(&mut iter, "--output-dir")?),
             "--ffmpeg" => ffmpeg = PathBuf::from(next_value(&mut iter, "--ffmpeg")?),
             "--width" => width = next_value(&mut iter, "--width")?.parse()?,
@@ -156,7 +159,7 @@ fn parse_args() -> Result<Args> {
             "--skip-build" => skip_build = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--vulkan-adapter-index N] [--min-psnr-y DB] [--skip-build]"
+                    "usage: cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs [--input PATH] [--input-format obu|fmp4] [--decode-bin PATH] [--output-dir DIR] [--ffmpeg PATH] [--width N] [--height N] [--frames N] [--fps N] [--gop-size N] [--vulkan-adapter-index N] [--min-psnr-y DB] [--skip-build]"
                 );
                 std::process::exit(0);
             }
@@ -169,6 +172,7 @@ fn parse_args() -> Result<Args> {
     Ok(Args {
         input,
         input_format,
+        decode_bin,
         output_dir,
         ffmpeg,
         width,
@@ -240,7 +244,7 @@ fn generate_ffmpeg_av1_input(args: &Args, output: &Path) -> Result<()> {
 }
 
 fn decode_with_vulkan(args: &Args, input: &Path, output: &Path) -> Result<()> {
-    let executable = decode_to_yuv_executable();
+    let executable = decode_to_yuv_executable(args);
     let input_format = match args.input_format {
         Av1InputFormat::Obu => "annexb",
         Av1InputFormat::Fmp4 => "mp4",
@@ -422,7 +426,10 @@ fn frame_type_gate_command(args: &Args, input: &Path) -> String {
     )
 }
 
-fn decode_to_yuv_executable() -> PathBuf {
+fn decode_to_yuv_executable(args: &Args) -> PathBuf {
+    if let Some(path) = &args.decode_bin {
+        return path.clone();
+    }
     let exe = if cfg!(windows) {
         "decode_to_yuv.exe"
     } else {

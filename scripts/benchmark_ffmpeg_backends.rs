@@ -539,7 +539,7 @@ fn run_vulkan_decode_benchmark(args: &Args) -> Result<BackendReport> {
                 adapter.index,
                 &video_hw_adapter_label,
                 "video-hw PSNR verify",
-                || vulkan_av1_psnr_verify_command(args, &decode_input, adapter.index),
+                || vulkan_av1_psnr_verify_command(args, &decode_input, &decode_bin, adapter.index),
             ));
         }
         if let Some(ffmpeg_adapter) = ffmpeg_match {
@@ -1029,6 +1029,7 @@ fn vulkan_decode_command(
 fn vulkan_av1_psnr_verify_command(
     args: &Args,
     decode_input: &Path,
+    decode_bin: &Path,
     adapter_index: usize,
 ) -> Result<Command> {
     let input_format = match args.vulkan_decode_input_format {
@@ -1044,6 +1045,8 @@ fn vulkan_av1_psnr_verify_command(
         &decode_input.to_string_lossy(),
         "--input-format",
         input_format,
+        "--decode-bin",
+        &decode_bin.to_string_lossy(),
         "--width",
         &args.width.to_string(),
         "--height",
