@@ -371,6 +371,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
 pub(crate) fn build_av1_decode_info_skeletons(
     bitstream: &[u8],
 ) -> Result<Vec<Av1DecodeInfoSkeleton>, String> {
+    ensure_av1_sequence_header_before_first_frame(bitstream)?;
     let std_sequence_header = extract_av1_std_sequence_header(bitstream)?;
     let coded_width = u32::from(std_sequence_header.max_frame_width_minus_1) + 1;
     let coded_height = u32::from(std_sequence_header.max_frame_height_minus_1) + 1;
@@ -443,6 +444,31 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
         tile_sizes: submit.tile_sizes.clone(),
     })
 }
+
+fn ensure_av1_sequence_header_before_first_frame(bitstream: &[u8]) -> Result<(), String> {
+    let records = parse_av1_low_overhead_obus(bitstream)?;
+    let sequence_header_start = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .map(|record| record.obu_range.start)
+        .ok_or_else(|| "missing AV1 sequence header OBU before first frame".to_string())?;
+    let first_frame_start = records
+        .iter()
+        .find(|record| {
+            matches!(
+                record.obu_type,
+                Av1ObuType::Frame | Av1ObuType::FrameHeader | Av1ObuType::TileGroup
+            )
+        })
+        .map(|record| record.obu_range.start);
+
+    if first_frame_start.is_some_and(|frame_start| sequence_header_start > frame_start) {
+        return Err("AV1 sequence header OBU appears after the first frame payload".to_string());
+    }
+
+    Ok(())
+}
+
 impl ParsedAv1SequenceHeader {
     fn coded_width(&self) -> u32 {
         self.max_frame_width_minus_1 + 1
@@ -1855,6 +1881,20 @@ mod tests {
         let err = probe_av1_decode_session_parameters_for_bitstream(&bitstream)
             .expect_err("missing AV1 sequence header should be rejected before Vulkan probing");
         assert!(err.contains("missing AV1 sequence header"));
+    }
+
+    #[test]
+    fn decode_info_skeleton_rejects_sequence_header_after_first_frame() {
+        let mut bitstream = make_obu(6, &[0xaa, 0xbb]);
+        bitstream.extend_from_slice(&make_obu(
+            1,
+            &av1_reduced_still_sequence_header_payload(320, 180),
+        ));
+
+        let err = build_av1_decode_info_skeleton(&bitstream)
+            .expect_err("sequence header after first frame should be rejected");
+
+        assert!(err.contains("sequence header OBU appears after the first frame"));
     }
 
     #[test]

@@ -74,7 +74,8 @@ Tasks:
 4. Reject unsupported input forms explicitly:
    - IVF container bytes passed as elementary stream. Done.
    - OBUs without size fields if the submit path cannot packetize them safely;
-   - missing sequence header before first frame.
+   - missing sequence header before first frame. Done for decode-info skeleton
+     extraction, including late sequence-header rejection.
 5. Unit tests:
    - sequence header extraction;
    - temporal delimiter + sequence header + frame split;
