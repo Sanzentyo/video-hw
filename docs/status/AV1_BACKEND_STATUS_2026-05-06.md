@@ -89,6 +89,8 @@ Current implementation progress:
 - AV1 decode submit skeleton extraction now identifies the first frame payload,
   frame-header offset, tile offsets, and tile sizes for frame OBUs and
   frame-header + tile-group OBU pairs;
+- AV1 decode picture-info skeleton now builds key-frame `StdVideoDecodeAV1PictureInfo`,
+  reference-name slot defaults, and tile metadata from that submit skeleton;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;

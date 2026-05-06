@@ -4,9 +4,12 @@ use std::sync::OnceLock;
 
 use ash::vk;
 use ash::vk::native::{
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY,
+    StdVideoAV1InterpolationFilter_STD_VIDEO_AV1_INTERPOLATION_FILTER_SWITCHABLE,
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH, StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN,
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1SequenceHeader,
-    StdVideoAV1SequenceHeaderFlags,
+    StdVideoAV1SequenceHeaderFlags, StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT,
+    StdVideoDecodeAV1PictureInfo, StdVideoDecodeAV1PictureInfoFlags,
 };
 
 const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
@@ -43,6 +46,15 @@ pub(crate) struct Av1DecodeBitstreamSessionProbe {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Av1DecodeSubmitSkeleton {
     pub temporal_unit_index: usize,
+    pub frame_header_offset: u32,
+    pub tile_offsets: Vec<u32>,
+    pub tile_sizes: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Av1DecodePictureInfoSkeleton {
+    pub std_picture_info: StdVideoDecodeAV1PictureInfo,
+    pub reference_name_slot_indices: [i32; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
     pub frame_header_offset: u32,
     pub tile_offsets: Vec<u32>,
     pub tile_sizes: Vec<u32>,
@@ -256,6 +268,32 @@ pub(crate) fn build_av1_decode_submit_skeleton(
     }
 }
 
+pub(crate) fn build_av1_decode_picture_info_skeleton(
+    submit: &Av1DecodeSubmitSkeleton,
+) -> Result<Av1DecodePictureInfoSkeleton, String> {
+    if submit.tile_offsets.is_empty() {
+        return Err("AV1 decode picture info requires at least one tile offset".to_string());
+    }
+    if submit.tile_offsets.len() != submit.tile_sizes.len() {
+        return Err(format!(
+            "AV1 decode picture info tile offset/size count mismatch: offsets={}, sizes={}",
+            submit.tile_offsets.len(),
+            submit.tile_sizes.len()
+        ));
+    }
+    if submit.tile_sizes.contains(&0) {
+        return Err("AV1 decode picture info contains an empty tile payload".to_string());
+    }
+
+    Ok(Av1DecodePictureInfoSkeleton {
+        std_picture_info: key_frame_std_picture_info(),
+        reference_name_slot_indices: [-1; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
+        frame_header_offset: submit.frame_header_offset,
+        tile_offsets: submit.tile_offsets.clone(),
+        tile_sizes: submit.tile_sizes.clone(),
+    })
+}
+
 impl ParsedAv1SequenceHeader {
     fn coded_width(&self) -> u32 {
         self.max_frame_width_minus_1 + 1
@@ -263,6 +301,42 @@ impl ParsedAv1SequenceHeader {
 
     fn coded_height(&self) -> u32 {
         self.max_frame_height_minus_1 + 1
+    }
+}
+
+fn key_frame_std_picture_info() -> StdVideoDecodeAV1PictureInfo {
+    StdVideoDecodeAV1PictureInfo {
+        flags: StdVideoDecodeAV1PictureInfoFlags {
+            _bitfield_align_1: [],
+            _bitfield_1: StdVideoDecodeAV1PictureInfoFlags::new_bitfield_1(
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0,
+            ),
+        },
+        frame_type: StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY,
+        current_frame_id: 0,
+        OrderHint: 0,
+        primary_ref_frame: 7,
+        refresh_frame_flags: 0xff,
+        reserved1: 0,
+        interpolation_filter:
+            StdVideoAV1InterpolationFilter_STD_VIDEO_AV1_INTERPOLATION_FILTER_SWITCHABLE,
+        TxMode: StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT,
+        delta_q_res: 0,
+        delta_lf_res: 0,
+        SkipModeFrame: [0; 2],
+        coded_denom: 0,
+        reserved2: [0; 3],
+        OrderHints: [0; 8],
+        expectedFrameId: [0; 8],
+        pTileInfo: std::ptr::null(),
+        pQuantization: std::ptr::null(),
+        pSegmentation: std::ptr::null(),
+        pLoopFilter: std::ptr::null(),
+        pCDEF: std::ptr::null(),
+        pLoopRestoration: std::ptr::null(),
+        pGlobalMotion: std::ptr::null(),
+        pFilmGrain: std::ptr::null(),
     }
 }
 
@@ -1590,6 +1664,48 @@ mod tests {
         let err = build_av1_decode_submit_skeleton(&bitstream)
             .expect_err("tile group without frame header should be rejected");
         assert!(err.contains("missing a preceding frame-header"));
+    }
+
+    #[test]
+    fn picture_info_skeleton_uses_key_frame_defaults_and_tiles() {
+        let submit = Av1DecodeSubmitSkeleton {
+            temporal_unit_index: 0,
+            frame_header_offset: 12,
+            tile_offsets: vec![12],
+            tile_sizes: vec![5],
+        };
+
+        let picture = build_av1_decode_picture_info_skeleton(&submit)
+            .expect("valid submit skeleton should map to picture info skeleton");
+
+        assert_eq!(picture.frame_header_offset, 12);
+        assert_eq!(picture.tile_offsets, vec![12]);
+        assert_eq!(picture.tile_sizes, vec![5]);
+        assert_eq!(
+            picture.std_picture_info.frame_type,
+            StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY
+        );
+        assert_eq!(picture.std_picture_info.flags.error_resilient_mode(), 1);
+        assert!(
+            picture
+                .reference_name_slot_indices
+                .iter()
+                .all(|slot| *slot == -1)
+        );
+    }
+
+    #[test]
+    fn picture_info_skeleton_rejects_empty_tiles() {
+        let submit = Av1DecodeSubmitSkeleton {
+            temporal_unit_index: 0,
+            frame_header_offset: 12,
+            tile_offsets: Vec::new(),
+            tile_sizes: Vec::new(),
+        };
+
+        let err = build_av1_decode_picture_info_skeleton(&submit)
+            .expect_err("empty tile list should be rejected");
+        assert!(err.contains("at least one tile offset"));
     }
 
     #[test]
