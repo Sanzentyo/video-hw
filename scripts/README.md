@@ -219,6 +219,7 @@ cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --skip-build --gop-size 30 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --gop-size 30 --min-psnr-y 60
 ```
 
 - 生成レポート: `output/vulkan-av1-psnr/vulkan-av1-psnr-<epoch>.md`

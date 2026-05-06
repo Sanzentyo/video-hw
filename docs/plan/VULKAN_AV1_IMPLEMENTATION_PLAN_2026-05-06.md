@@ -249,6 +249,12 @@ Acceptance:
   writes FAIL markdown reports even when decode or PSNR setup fails before
   per-frame PSNR can be computed, including the stderr tail that reports the
   first unsupported `frame_type=1`.
+- The same gate now covers fragmented MP4 input:
+  `--input-format fmp4 --gop-size 1` passes at `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), while
+  `--input-format fmp4 --gop-size 30` fails at decode with the same
+  unsupported `frame_type=1`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068145633.md`).
 
 ### Phase 5: Integrated Benchmark
 
@@ -319,6 +325,7 @@ cargo check -p video-hw --features backend-vulkan --examples
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --min-psnr-y 60
 cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --gop-size 30 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --gop-size 30 --min-psnr-y 60
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --verify --allow-failures true
 ```
 

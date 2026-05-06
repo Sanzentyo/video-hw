@@ -308,6 +308,14 @@ Latest Vulkan AV1 scaffold verification:
   (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068076063.md`,
   `failed_stage=decode Vulkan AV1 to NV12`, stderr includes
   `frame_type=1`). This is the active inter-frame/GOP replay gap.
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60 --gop-size 1`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`,
+  `psnr_y_min=inf`)
+- `cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --skip-build --min-psnr-y 60 --gop-size 30`
+  intentionally fails on the same inter-frame gap through the MP4/`av1C` path
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068145633.md`,
+  `failed_stage=decode Vulkan AV1 to NV12`, stderr includes
+  `frame_type=1`).
 
 The detailed implementation plan is
 `docs/plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`.
