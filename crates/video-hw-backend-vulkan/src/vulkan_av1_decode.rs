@@ -4,13 +4,17 @@ use std::sync::OnceLock;
 
 use ash::vk;
 use ash::vk::native::{
-    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY,
+    StdVideoAV1CDEF, StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE,
+    StdVideoAV1FrameType_STD_VIDEO_AV1_FRAME_TYPE_KEY, StdVideoAV1GlobalMotion,
     StdVideoAV1InterpolationFilter_STD_VIDEO_AV1_INTERPOLATION_FILTER_SWITCHABLE,
+    StdVideoAV1LoopFilter, StdVideoAV1LoopFilterFlags, StdVideoAV1LoopRestoration,
     StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_HIGH, StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN,
-    StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1SequenceHeader,
-    StdVideoAV1SequenceHeaderFlags, StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT,
-    StdVideoDecodeAV1PictureInfo, StdVideoDecodeAV1PictureInfoFlags,
-    StdVideoDecodeAV1ReferenceInfo, StdVideoDecodeAV1ReferenceInfoFlags,
+    StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_PROFESSIONAL, StdVideoAV1Quantization,
+    StdVideoAV1QuantizationFlags, StdVideoAV1Segmentation, StdVideoAV1SequenceHeader,
+    StdVideoAV1SequenceHeaderFlags, StdVideoAV1TileInfo, StdVideoAV1TileInfoFlags,
+    StdVideoAV1TxMode_STD_VIDEO_AV1_TX_MODE_SELECT, StdVideoDecodeAV1PictureInfo,
+    StdVideoDecodeAV1PictureInfoFlags, StdVideoDecodeAV1ReferenceInfo,
+    StdVideoDecodeAV1ReferenceInfoFlags,
 };
 
 const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
@@ -80,6 +84,124 @@ impl Av1DecodePictureInfoSkeleton {
             .frame_header_offset(self.frame_header_offset)
             .tile_offsets(&self.tile_offsets)
             .tile_sizes(&self.tile_sizes)
+    }
+}
+
+struct Av1DecodeStdPictureInfoScope {
+    std_picture_info: StdVideoDecodeAV1PictureInfo,
+    tile_info: StdVideoAV1TileInfo,
+    quantization: StdVideoAV1Quantization,
+    segmentation: StdVideoAV1Segmentation,
+    loop_filter: StdVideoAV1LoopFilter,
+    cdef: StdVideoAV1CDEF,
+    loop_restoration: StdVideoAV1LoopRestoration,
+    global_motion: StdVideoAV1GlobalMotion,
+    mi_col_starts: [u16; 64],
+    mi_row_starts: [u16; 64],
+    width_in_sbs_minus1: [u16; 64],
+    height_in_sbs_minus1: [u16; 64],
+}
+
+impl Av1DecodeStdPictureInfoScope {
+    fn new(base: StdVideoDecodeAV1PictureInfo, coded_width: u32, coded_height: u32) -> Self {
+        let sb_cols = u16::try_from(coded_width.div_ceil(64).max(1)).unwrap_or(u16::MAX);
+        let sb_rows = u16::try_from(coded_height.div_ceil(64).max(1)).unwrap_or(u16::MAX);
+        let mi_cols = u16::try_from(coded_width.div_ceil(4).max(1)).unwrap_or(u16::MAX);
+        let mi_rows = u16::try_from(coded_height.div_ceil(4).max(1)).unwrap_or(u16::MAX);
+        let mut mi_col_starts = [0_u16; 64];
+        let mut mi_row_starts = [0_u16; 64];
+        mi_col_starts[1] = mi_cols;
+        mi_row_starts[1] = mi_rows;
+        let mut width_in_sbs_minus1 = [0_u16; 64];
+        let mut height_in_sbs_minus1 = [0_u16; 64];
+        width_in_sbs_minus1[0] = sb_cols.saturating_sub(1);
+        height_in_sbs_minus1[0] = sb_rows.saturating_sub(1);
+
+        Self {
+            std_picture_info: base,
+            tile_info: StdVideoAV1TileInfo {
+                flags: StdVideoAV1TileInfoFlags {
+                    _bitfield_align_1: [],
+                    _bitfield_1: StdVideoAV1TileInfoFlags::new_bitfield_1(1, 0),
+                },
+                TileCols: 1,
+                TileRows: 1,
+                context_update_tile_id: 0,
+                tile_size_bytes_minus_1: 0,
+                reserved1: [0; 7],
+                pMiColStarts: std::ptr::null(),
+                pMiRowStarts: std::ptr::null(),
+                pWidthInSbsMinus1: std::ptr::null(),
+                pHeightInSbsMinus1: std::ptr::null(),
+            },
+            quantization: StdVideoAV1Quantization {
+                flags: StdVideoAV1QuantizationFlags {
+                    _bitfield_align_1: [],
+                    _bitfield_1: StdVideoAV1QuantizationFlags::new_bitfield_1(0, 0, 0),
+                },
+                base_q_idx: 0,
+                DeltaQYDc: 0,
+                DeltaQUDc: 0,
+                DeltaQUAc: 0,
+                DeltaQVDc: 0,
+                DeltaQVAc: 0,
+                qm_y: 0,
+                qm_u: 0,
+                qm_v: 0,
+            },
+            segmentation: StdVideoAV1Segmentation {
+                FeatureEnabled: [0; 8],
+                FeatureData: [[0; 8]; 8],
+            },
+            loop_filter: StdVideoAV1LoopFilter {
+                flags: StdVideoAV1LoopFilterFlags {
+                    _bitfield_align_1: [],
+                    _bitfield_1: StdVideoAV1LoopFilterFlags::new_bitfield_1(0, 0, 0),
+                },
+                loop_filter_level: [0; 4],
+                loop_filter_sharpness: 0,
+                update_ref_delta: 0,
+                loop_filter_ref_deltas: [0; 8],
+                update_mode_delta: 0,
+                loop_filter_mode_deltas: [0; 2],
+            },
+            cdef: StdVideoAV1CDEF {
+                cdef_damping_minus_3: 0,
+                cdef_bits: 0,
+                cdef_y_pri_strength: [0; 8],
+                cdef_y_sec_strength: [0; 8],
+                cdef_uv_pri_strength: [0; 8],
+                cdef_uv_sec_strength: [0; 8],
+            },
+            loop_restoration: StdVideoAV1LoopRestoration {
+                FrameRestorationType:
+                    [StdVideoAV1FrameRestorationType_STD_VIDEO_AV1_FRAME_RESTORATION_TYPE_NONE; 3],
+                LoopRestorationSize: [0; 3],
+            },
+            global_motion: StdVideoAV1GlobalMotion {
+                GmType: [0; 8],
+                gm_params: [[0; 6]; 8],
+            },
+            mi_col_starts,
+            mi_row_starts,
+            width_in_sbs_minus1,
+            height_in_sbs_minus1,
+        }
+    }
+
+    fn attach_pointers(&mut self) {
+        self.tile_info.pMiColStarts = self.mi_col_starts.as_ptr();
+        self.tile_info.pMiRowStarts = self.mi_row_starts.as_ptr();
+        self.tile_info.pWidthInSbsMinus1 = self.width_in_sbs_minus1.as_ptr();
+        self.tile_info.pHeightInSbsMinus1 = self.height_in_sbs_minus1.as_ptr();
+        self.std_picture_info.pTileInfo = &self.tile_info;
+        self.std_picture_info.pQuantization = &self.quantization;
+        self.std_picture_info.pSegmentation = &self.segmentation;
+        self.std_picture_info.pLoopFilter = &self.loop_filter;
+        self.std_picture_info.pCDEF = &self.cdef;
+        self.std_picture_info.pLoopRestoration = &self.loop_restoration;
+        self.std_picture_info.pGlobalMotion = &self.global_motion;
+        self.std_picture_info.pFilmGrain = std::ptr::null();
     }
 }
 
@@ -240,7 +362,18 @@ impl Av1DecodeBitstreamUploadPlan {
 
         let dst_picture_resource =
             decode.dst_picture_resource(image_view, bundle.dst_base_array_layer);
-        let mut av1_picture_info = decode.picture_info.vk_picture_info();
+        let mut std_picture_scope = Av1DecodeStdPictureInfoScope::new(
+            decode.picture_info.std_picture_info,
+            decode.coded_width,
+            decode.coded_height,
+        );
+        std_picture_scope.attach_pointers();
+        let mut av1_picture_info = vk::VideoDecodeAV1PictureInfoKHR::default()
+            .std_picture_info(&std_picture_scope.std_picture_info)
+            .reference_name_slot_indices(decode.picture_info.reference_name_slot_indices)
+            .frame_header_offset(decode.picture_info.frame_header_offset)
+            .tile_offsets(&decode.picture_info.tile_offsets)
+            .tile_sizes(&decode.picture_info.tile_sizes);
         let mut setup_dpb_info = decode.vk_setup_dpb_slot_info();
         let setup_reference_slot = decode.vk_setup_reference_slot(
             bundle.setup_slot_index,
@@ -4048,6 +4181,21 @@ mod tests {
                 vk::Buffer::null(),
                 vk::ImageView::null(),
                 |decode_info, bundle| {
+                    let av1_info = decode_info
+                        .p_next
+                        .cast::<vk::VideoDecodeAV1PictureInfoKHR<'_>>();
+                    // SAFETY: `with_frame_decode_info` materializes the AV1 pNext chain for the
+                    // duration of this callback.
+                    let std_info = unsafe { &*((*av1_info).p_std_picture_info) };
+                    let std_pointer_ready = [
+                        !std_info.pTileInfo.is_null(),
+                        !std_info.pQuantization.is_null(),
+                        !std_info.pSegmentation.is_null(),
+                        !std_info.pLoopFilter.is_null(),
+                        !std_info.pCDEF.is_null(),
+                        !std_info.pLoopRestoration.is_null(),
+                        !std_info.pGlobalMotion.is_null(),
+                    ];
                     (
                         bundle.frame_index,
                         decode_info.src_buffer_offset,
@@ -4055,11 +4203,23 @@ mod tests {
                         decode_info.dst_picture_resource.base_array_layer,
                         !decode_info.p_next.is_null(),
                         !decode_info.p_setup_reference_slot.is_null(),
+                        std_pointer_ready,
                     )
                 },
             )
             .expect("frame decode info should be materialized inside the callback");
-        assert_eq!(summary, (1, 16, 8, 1, true, true));
+        assert_eq!(
+            summary,
+            (
+                1,
+                16,
+                8,
+                1,
+                true,
+                true,
+                [true, true, true, true, true, true, true]
+            )
+        );
 
         let loop_summaries = plan
             .with_frame_decode_infos(

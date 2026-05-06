@@ -146,6 +146,10 @@ Tasks:
    VIDEO_DECODE_DST_KHR initialization barrier. An opt-in
    `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` probe can record a real command
    buffer with begin/reset/decode/end commands against those live resources.
+   The record path now also materializes key-frame/single-tile default AV1 std
+   substructures for `pTileInfo`, `pQuantization`, `pSegmentation`,
+   `pLoopFilter`, `pCDEF`, `pLoopRestoration`, and `pGlobalMotion`, matching
+   the non-NULL picture-info shape used by FFmpeg's Vulkan AV1 path.
    Actual queue submit/readback is still deferred to the submit/readback phase
    rather than hidden inside the default capability probe.
 5. Cache bootstrap results by bitstream hash, access-unit limit, and optional

@@ -187,16 +187,16 @@ Current implementation progress:
   `output/vulkan-av1-record-probe/`; the script supports
   `--record-mode barrier_only|begin_end|reset_end|first_decode|full` for
   command-buffer crash localization;
-- On the current Windows/Intel-visible Vulkan AV1 adapter, the no-record probe
-  passes with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`,
-  `upload_bytes=256`, `image_layers=16`, `barrier_layers=16`, and
-  `record_decodes=1`; command-buffer localization shows `barrier_only`,
-  `begin_end`, and `reset_end` PASS, while `first_decode` terminates the
-  isolated test process with `STATUS_ACCESS_VIOLATION`, so the crash point is
-  the first `vkCmdDecodeVideoKHR` call before any queue submit/readback; the
-  next implementation step is to reconcile the AV1 decode-info/picture-info
-  chain against FFmpeg/Mesa/NVIDIA before making decode command recording the
-  default;
+- FFmpeg's Vulkan AV1 decode path passes concrete AV1 std substructures
+  (`pTileInfo`, `pQuantization`, `pSegmentation`, `pLoopFilter`, `pCDEF`,
+  `pLoopRestoration`, `pGlobalMotion`) with each picture. The AV1 record path
+  now materializes key-frame/single-tile default instances for those pointers
+  instead of leaving them NULL; on the current Windows/Intel-visible Vulkan AV1
+  adapter, `--no-record-command-buffer`, `barrier_only`, `begin_end`,
+  `reset_end`, `first_decode`, and `full` command-buffer record probes all pass
+  with `coded=320x180`, `format=G8_B8R8_2PLANE_420_UNORM`, `upload_bytes=256`,
+  `image_layers=16`, `barrier_layers=16`, and `record_decodes=1` for decode
+  modes;
 - Vulkan AV1 capability is still false because real-bitstream session
   `vkCmdDecodeVideoKHR` submit, readback, PSNR, and benchmark gates are not
   implemented;
