@@ -23,6 +23,7 @@ use ash::vk::native::{
     StdVideoDecodeAV1PictureInfoFlags, StdVideoDecodeAV1ReferenceInfo,
     StdVideoDecodeAV1ReferenceInfoFlags,
 };
+use oxideav_av1::{FrameType as OxideAv1FrameType, SequenceHeader as OxideAv1SequenceHeader};
 
 const AV1_SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
 const AV1_SELECT_INTEGER_MV: u8 = 2;
@@ -98,6 +99,7 @@ pub(crate) struct Av1DecodeSubmitSkeleton {
     pub tile_sizes: Vec<u32>,
     pub use_128x128_superblock: bool,
     pub key_frame_header: Option<Av1ParsedKeyFrameHeader>,
+    pub frame_header_summary: Option<Av1ParsedFrameHeaderSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +138,39 @@ pub(crate) struct Av1ParsedKeyFrameHeader {
     pub cdef_uv_sec_strength: [u8; 8],
     pub tx_mode: u32,
     pub reduced_tx_set: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Av1ParsedFrameHeaderSummary {
+    pub frame_type: u8,
+    pub show_existing_frame: bool,
+    pub show_frame: bool,
+    pub error_resilient_mode: bool,
+    pub order_hint: u8,
+    pub primary_ref_frame: u8,
+    pub refresh_frame_flags: u8,
+    pub ref_frame_idx: [i32; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR],
+    pub tile_payload_offset: usize,
+}
+
+impl Av1ParsedFrameHeaderSummary {
+    fn is_key_frame(self) -> bool {
+        self.frame_type == 0 && !self.show_existing_frame
+    }
+
+    fn diagnostic(self) -> String {
+        format!(
+            "frame_type={}, show_existing_frame={}, show_frame={}, order_hint={}, primary_ref_frame={}, refresh_frame_flags=0x{:02x}, ref_frame_idx={:?}, tile_payload_offset={}",
+            self.frame_type,
+            self.show_existing_frame,
+            self.show_frame,
+            self.order_hint,
+            self.primary_ref_frame,
+            self.refresh_frame_flags,
+            self.ref_frame_idx,
+            self.tile_payload_offset
+        )
+    }
 }
 
 impl Av1DecodePictureInfoSkeleton {
@@ -1504,6 +1539,16 @@ pub(crate) fn build_av1_decode_submit_skeletons(
         .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
         .map(|record| parse_av1_sequence_header_payload(&bitstream[record.payload_range.clone()]))
         .transpose()?;
+    let oxideav_sequence_header = records
+        .iter()
+        .find(|record| record.obu_type == Av1ObuType::SequenceHeader)
+        .map(|record| {
+            oxideav_av1::parse_sequence_header(&bitstream[record.payload_range.clone()])
+                .map_err(|err| format!("oxideav AV1 sequence-header parse failed: {err}"))
+        })
+        .transpose()
+        .ok()
+        .flatten();
     let mut submits = Vec::new();
     let mut consumed_tile_groups = vec![false; records.len()];
 
@@ -1514,6 +1559,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                     bitstream,
                     record,
                     sequence_header.as_ref(),
+                    oxideav_sequence_header.as_ref(),
                 )?);
             }
             Av1ObuType::FrameHeader => {
@@ -1534,6 +1580,7 @@ pub(crate) fn build_av1_decode_submit_skeletons(
                         record,
                         &tile_groups,
                         sequence_header.as_ref(),
+                        oxideav_sequence_header.as_ref(),
                     )?);
                 }
             }
@@ -1750,6 +1797,14 @@ fn align_up_av1_decode_value(value: u64, alignment: u64) -> u64 {
 pub(crate) fn build_av1_decode_picture_info_skeleton(
     submit: &Av1DecodeSubmitSkeleton,
 ) -> Result<Av1DecodePictureInfoSkeleton, String> {
+    if let Some(summary) = submit.frame_header_summary
+        && !summary.is_key_frame()
+    {
+        return Err(format!(
+            "AV1 inter-frame picture-info mapping is not implemented yet: {}",
+            summary.diagnostic()
+        ));
+    }
     if submit.tile_offsets.is_empty() {
         return Err("AV1 decode picture info requires at least one tile offset".to_string());
     }
@@ -1772,6 +1827,79 @@ pub(crate) fn build_av1_decode_picture_info_skeleton(
         tile_sizes: submit.tile_sizes.clone(),
         use_128x128_superblock: submit.use_128x128_superblock,
         key_frame_header: submit.key_frame_header,
+    })
+}
+
+fn parse_av1_frame_obu_summary(
+    sequence_header: &OxideAv1SequenceHeader,
+    payload: &[u8],
+) -> Result<Av1ParsedFrameHeaderSummary, String> {
+    let (frame_header, tile_payload) = oxideav_av1::parse_frame_obu(sequence_header, payload)
+        .map_err(|err| format!("oxideav AV1 frame OBU parse failed: {err}"))?;
+    let tile_payload_offset = payload
+        .len()
+        .checked_sub(tile_payload.len())
+        .ok_or_else(|| "oxideav AV1 frame OBU tile payload exceeds payload length".to_string())?;
+    av1_frame_header_summary_from_oxideav(frame_header, tile_payload_offset)
+}
+
+fn reject_show_existing_av1_frame(
+    frame_header_summary: Option<Av1ParsedFrameHeaderSummary>,
+) -> Result<(), String> {
+    if frame_header_summary.is_some_and(|summary| summary.show_existing_frame) {
+        return Err(
+            "AV1 frame-header parsing is not implemented: show_existing_frame has no tile payload"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_av1_frame_header_summary(
+    sequence_header: &OxideAv1SequenceHeader,
+    payload: &[u8],
+) -> Result<Av1ParsedFrameHeaderSummary, String> {
+    let frame_header = oxideav_av1::parse_frame_header(sequence_header, payload)
+        .map_err(|err| format!("oxideav AV1 frame-header parse failed: {err}"))?;
+    av1_frame_header_summary_from_oxideav(frame_header, 0)
+}
+
+fn av1_frame_header_summary_from_oxideav(
+    frame_header: oxideav_av1::FrameHeader,
+    tile_payload_offset: usize,
+) -> Result<Av1ParsedFrameHeaderSummary, String> {
+    let frame_type = match frame_header.frame_type {
+        OxideAv1FrameType::Key => 0,
+        OxideAv1FrameType::Inter => 1,
+        OxideAv1FrameType::IntraOnly => 2,
+        OxideAv1FrameType::Switch => 3,
+    };
+    let order_hint = u8::try_from(frame_header.order_hint)
+        .map_err(|_| format!("AV1 order_hint exceeds u8: {}", frame_header.order_hint))?;
+    let primary_ref_frame = u8::try_from(frame_header.primary_ref_frame).map_err(|_| {
+        format!(
+            "AV1 primary_ref_frame exceeds u8: {}",
+            frame_header.primary_ref_frame
+        )
+    })?;
+    let mut ref_frame_idx = [-1_i32; vk::MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR];
+    for (dst, src) in ref_frame_idx
+        .iter_mut()
+        .zip(frame_header.ref_frame_idx.iter())
+    {
+        *dst = i32::try_from(*src).map_err(|_| format!("AV1 ref_frame_idx exceeds i32: {src}"))?;
+    }
+
+    Ok(Av1ParsedFrameHeaderSummary {
+        frame_type,
+        show_existing_frame: frame_header.show_existing_frame,
+        show_frame: frame_header.show_frame,
+        error_resilient_mode: frame_header.error_resilient_mode,
+        order_hint,
+        primary_ref_frame,
+        refresh_frame_flags: frame_header.refresh_frame_flags,
+        ref_frame_idx,
+        tile_payload_offset,
     })
 }
 
@@ -1935,20 +2063,28 @@ fn build_av1_frame_obu_submit_skeleton(
     bitstream: &[u8],
     frame_record: &Av1ObuRecord,
     sequence_header: Option<&ParsedAv1SequenceHeader>,
+    oxideav_sequence_header: Option<&OxideAv1SequenceHeader>,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
-    let key_frame_header = handle_av1_key_frame_header_parse_result(
-        parse_av1_key_frame_obu_header(
-            bitstream
-                .get(frame_record.payload_range.clone())
-                .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?,
-            sequence_header,
-        ),
-        sequence_header,
-    )?;
-    let tile_payload_offset = key_frame_header
-        .map(|header| header.tile_payload_offset)
+    let payload = bitstream
+        .get(frame_record.payload_range.clone())
+        .ok_or_else(|| "AV1 frame OBU payload range exceeds bitstream".to_string())?;
+    let frame_header_summary = oxideav_sequence_header
+        .and_then(|sequence_header| parse_av1_frame_obu_summary(sequence_header, payload).ok());
+    reject_show_existing_av1_frame(frame_header_summary)?;
+    let key_frame_header =
+        if frame_header_summary.is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame) {
+            handle_av1_key_frame_header_parse_result(
+                parse_av1_key_frame_obu_header(payload, sequence_header),
+                sequence_header,
+            )?
+        } else {
+            None
+        };
+    let tile_payload_offset = frame_header_summary
+        .map(|summary| summary.tile_payload_offset)
+        .or_else(|| key_frame_header.map(|header| header.tile_payload_offset))
         .unwrap_or(0);
     let tile_offset = frame_header_offset
         .checked_add(
@@ -1974,6 +2110,7 @@ fn build_av1_frame_obu_submit_skeleton(
         tile_sizes: vec![tile_size],
         use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
         key_frame_header,
+        frame_header_summary,
     })
 }
 
@@ -1999,20 +2136,26 @@ fn build_av1_tile_group_submit_skeleton(
     frame_header_record: &Av1ObuRecord,
     tile_group_records: &[(usize, &Av1ObuRecord)],
     sequence_header: Option<&ParsedAv1SequenceHeader>,
+    oxideav_sequence_header: Option<&OxideAv1SequenceHeader>,
 ) -> Result<Av1DecodeSubmitSkeleton, String> {
     let frame_header_offset = u32::try_from(frame_header_record.payload_range.start)
         .map_err(|_| "AV1 frame header offset exceeds u32 range".to_string())?;
-    let key_frame_header = handle_av1_key_frame_header_parse_result(
-        parse_av1_key_frame_obu_header(
-            bitstream
-                .get(frame_header_record.payload_range.clone())
-                .ok_or_else(|| {
-                    "AV1 frame-header OBU payload range exceeds bitstream".to_string()
-                })?,
-            sequence_header,
-        ),
-        sequence_header,
-    )?;
+    let frame_header_payload = bitstream
+        .get(frame_header_record.payload_range.clone())
+        .ok_or_else(|| "AV1 frame-header OBU payload range exceeds bitstream".to_string())?;
+    let frame_header_summary = oxideav_sequence_header.and_then(|sequence_header| {
+        parse_av1_frame_header_summary(sequence_header, frame_header_payload).ok()
+    });
+    reject_show_existing_av1_frame(frame_header_summary)?;
+    let key_frame_header =
+        if frame_header_summary.is_none_or(Av1ParsedFrameHeaderSummary::is_key_frame) {
+            handle_av1_key_frame_header_parse_result(
+                parse_av1_key_frame_obu_header(frame_header_payload, sequence_header),
+                sequence_header,
+            )?
+        } else {
+            None
+        };
 
     let mut tile_offsets = Vec::with_capacity(tile_group_records.len());
     let mut tile_sizes = Vec::with_capacity(tile_group_records.len());
@@ -2035,6 +2178,7 @@ fn build_av1_tile_group_submit_skeleton(
         tile_sizes,
         use_128x128_superblock: sequence_header.is_some_and(|header| header.use_128x128_superblock),
         key_frame_header,
+        frame_header_summary,
     })
 }
 
@@ -5265,6 +5409,7 @@ mod tests {
             tile_sizes: vec![5],
             use_128x128_superblock: false,
             key_frame_header: None,
+            frame_header_summary: None,
         };
 
         let picture = build_av1_decode_picture_info_skeleton(&submit)
@@ -5303,6 +5448,7 @@ mod tests {
             tile_sizes: Vec::new(),
             use_128x128_superblock: false,
             key_frame_header: None,
+            frame_header_summary: None,
         };
 
         let err = build_av1_decode_picture_info_skeleton(&submit)

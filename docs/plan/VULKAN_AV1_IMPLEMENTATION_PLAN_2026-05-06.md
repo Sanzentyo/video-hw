@@ -183,7 +183,11 @@ Tasks:
    allocation and command submission remain.
 3. For reference frames, populate `StdVideoDecodeAV1ReferenceInfo` and chain
    `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots. Key-frame setup
-   reference construction is covered; inter-frame reference lists remain.
+   reference construction is covered; inter-frame reference lists remain. The
+   first inter-frame parser step now uses `oxideav-av1` for real frame headers
+   and reports `order_hint`, `primary_ref_frame`, `refresh_frame_flags`,
+   `ref_frame_idx`, and tile payload offset before stopping at picture-info
+   mapping.
 4. Reuse the HEVC readback path for NV12 output only after verifying the output
    image format and coded extent constraints match AV1 capabilities. AV1 now
    has a pure NV12 readback plan for `G8_B8R8_2PLANE_420_UNORM` that matches the
