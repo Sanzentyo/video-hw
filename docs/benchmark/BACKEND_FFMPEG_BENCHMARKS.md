@@ -59,6 +59,47 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 -
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --warmup 1 --repeat 7 --frame-count 300 --verify
 ```
 
+For NVIDIA work, use only H.264/HEVC until AV1 support is explicitly included
+in the benchmark plan:
+
+```sh
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+```
+
+The NV precise script has three decode comparison modes:
+
+| Mode | video-hw path | FFmpeg path | Use for |
+|---|---|---|---|
+| `--decode-output-mode metadata` | NVDEC decode, no host pixel payload | CUVID decode to null sink | Pure decoder throughput / parser overhead |
+| `--decode-output-mode nv12` | NVDEC decode plus host NV12 payload | CUVID + `hwdownload,format=nv12` to rawvideo null sink | Host readback comparison |
+| `--decode-output-mode rgb24` | NVDEC decode plus host RGB24 payload | CUVID + `hwdownload,format=nv12,format=rgb24` to rawvideo null sink | Application paths that need RGB frames |
+
+Do not compare a `metadata` video-hw decode run with an FFmpeg
+`hwdownload`/RGB run, or a video-hw RGB run with FFmpeg null-sink decode. Those
+measure different work.
+
+Encode comparison should normally use `--equal-raw-input`, which feeds the same
+generated ARGB raw frame stream to both video-hw and FFmpeg. Without it, the
+script is useful only as a smoke test or backend trend check because video-hw
+and FFmpeg generate different synthetic inputs.
+
+Use `--ffmpeg-path` and `--ffprobe-path` when comparing against a local FFmpeg
+build, for example:
+
+```sh
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs \
+  --codec h264 \
+  --decode-output-mode rgb24 \
+  --warmup 1 \
+  --repeat 5 \
+  --verify \
+  --equal-raw-input \
+  --include-internal-metrics \
+  --ffmpeg-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffmpeg \
+  --ffprobe-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffprobe
+```
+
 ## Requirements
 
 - Rust nightly is required for `cargo +nightly -Zscript`.

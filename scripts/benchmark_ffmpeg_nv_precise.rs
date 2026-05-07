@@ -106,6 +106,12 @@ struct Args {
     #[arg(long, default_value = "metadata")]
     decode_output_mode: String,
 
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg_path: PathBuf,
+
+    #[arg(long, default_value = "ffprobe")]
+    ffprobe_path: PathBuf,
+
     #[arg(long, default_value_t = 300)]
     frame_count: usize,
 
@@ -130,6 +136,9 @@ struct Args {
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     equal_raw_input: bool,
+
+    #[arg(long, default_value_t = false)]
+    include_experimental_av1: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -250,9 +259,9 @@ fn percent_delta(video_hw: f64, ffmpeg: f64) -> f64 {
     ((video_hw / ffmpeg) - 1.0) * 100.0
 }
 
-fn input_frame_count(codec: Codec) -> Option<usize> {
+fn input_frame_count_with_probe(ffprobe_path: &Path, codec: Codec) -> Option<usize> {
     let input = codec.sample_input();
-    let output = Command::new("ffprobe")
+    let output = Command::new(ffprobe_path)
         .args([
             "-v",
             "error",
@@ -280,6 +289,12 @@ fn main() -> Result<()> {
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
     }
+    if args.codec == Codec::Av1 && !args.include_experimental_av1 {
+        bail!(
+            "AV1 is experimental in this benchmark; use --include-experimental-av1 to run it explicitly"
+        );
+    }
+    validate_decode_output_mode(&args.decode_output_mode)?;
 
     let profile = if args.release { "release" } else { "debug" };
     let output_dir = PathBuf::from("output");
@@ -420,7 +435,7 @@ fn main() -> Result<()> {
         args.codec.as_cli(),
         now_secs
     ));
-    let decode_frames = input_frame_count(args.codec).unwrap_or(303);
+    let decode_frames = input_frame_count_with_probe(&args.ffprobe_path, args.codec).unwrap_or(303);
     let decode_video_hw = samples[0].summarize();
     let encode_video_hw = samples[1].summarize();
     let decode_ffmpeg = samples[2].summarize();
@@ -454,6 +469,8 @@ fn main() -> Result<()> {
     writeln!(&mut report, "width: {}", args.width)?;
     writeln!(&mut report, "height: {}", args.height)?;
     writeln!(&mut report, "decode_output_mode: {}", args.decode_output_mode)?;
+    writeln!(&mut report, "ffmpeg_path: {}", args.ffmpeg_path.display())?;
+    writeln!(&mut report, "ffprobe_path: {}", args.ffprobe_path.display())?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(
         &mut report,
@@ -491,6 +508,20 @@ fn main() -> Result<()> {
     writeln!(
         &mut report,
         "- Target: video-hw throughput should be within ±10% of ffmpeg, or faster"
+    )?;
+    writeln!(
+        &mut report,
+        "- Decode comparison mode: {}",
+        decode_comparison_description(&args.decode_output_mode)
+    )?;
+    writeln!(
+        &mut report,
+        "- Encode comparison mode: {}",
+        if args.equal_raw_input {
+            "same generated ARGB raw frame stream"
+        } else {
+            "non-identical synthetic inputs; use only for smoke/per-backend trends"
+        }
     )?;
     writeln!(
         &mut report,
@@ -657,8 +688,8 @@ fn main() -> Result<()> {
             ("ffmpeg", ffmpeg_output.as_path()),
         ];
         for (label, path) in verify_items {
-            let summary = ffprobe_summary(path, args.codec, args.frame_count)?;
-            run_ffmpeg_decode_verify(path, null_sink)?;
+            let summary = ffprobe_summary(&args.ffprobe_path, path, args.codec, args.frame_count)?;
+            run_ffmpeg_decode_verify(&args.ffmpeg_path, path, null_sink)?;
             writeln!(
                 &mut report,
                 "- {}: codec={}, {}x{}, frames={} (decode=ok)",
@@ -785,28 +816,13 @@ fn run_case(
             run_timed_command(cmd, !args.include_internal_metrics)
         }
         Case::FfmpegDecode => {
-            let mut cmd = Command::new("ffmpeg");
-            cmd.args([
-                "-y",
-                "-hide_banner",
-                "-benchmark",
-                "-hwaccel",
-                "cuda",
-                "-c:v",
-                args.codec.ffmpeg_decode_codec(),
-                "-f",
-                args.codec.ffmpeg_muxer(),
-                "-i",
-                args.codec.sample_input(),
-                "-f",
-                "null",
-                null_sink,
-            ]);
+            let mut cmd = Command::new(&args.ffmpeg_path);
+            add_ffmpeg_decode_args(&mut cmd, args, null_sink);
             run_timed_command(cmd, true)
         }
         Case::FfmpegEncode => {
             let muxer = args.codec.ffmpeg_muxer();
-            let mut cmd = Command::new("ffmpeg");
+            let mut cmd = Command::new(&args.ffmpeg_path);
             if args.equal_raw_input {
                 cmd.args([
                     "-y",
@@ -867,7 +883,7 @@ fn ensure_decode_input(args: &Args, output_dir: &Path) -> Result<()> {
     }
     fs::create_dir_all(output_dir)
         .with_context(|| format!("create output directory: {}", output_dir.display()))?;
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(&args.ffmpeg_path);
     cmd.args([
         "-v",
         "error",
@@ -906,6 +922,63 @@ fn ensure_decode_input(args: &Args, output_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_decode_output_mode(mode: &str) -> Result<()> {
+    match mode {
+        "metadata" | "nv12" | "rgb24" => Ok(()),
+        _ => bail!("--decode-output-mode must be one of: metadata, nv12, rgb24"),
+    }
+}
+
+fn decode_comparison_description(mode: &str) -> &'static str {
+    match mode {
+        "metadata" => "decoder throughput with no host pixel readback; FFmpeg uses null sink",
+        "nv12" => "host NV12 output; FFmpeg uses hwdownload,format=nv12 to rawvideo null sink",
+        "rgb24" => {
+            "host RGB24 output; FFmpeg uses hwdownload,format=nv12,format=rgb24 to rawvideo null sink"
+        }
+        _ => "unknown",
+    }
+}
+
+fn add_ffmpeg_decode_args(cmd: &mut Command, args: &Args, null_sink: &str) {
+    cmd.args([
+        "-y",
+        "-hide_banner",
+        "-benchmark",
+        "-hwaccel",
+        "cuda",
+    ]);
+    if matches!(args.decode_output_mode.as_str(), "nv12" | "rgb24") {
+        cmd.args(["-hwaccel_output_format", "cuda"]);
+    }
+    cmd.args([
+        "-c:v",
+        args.codec.ffmpeg_decode_codec(),
+        "-f",
+        args.codec.ffmpeg_muxer(),
+        "-i",
+        args.codec.sample_input(),
+    ]);
+    match args.decode_output_mode.as_str() {
+        "metadata" => {
+            cmd.args(["-f", "null", null_sink]);
+        }
+        "nv12" => {
+            cmd.args(["-vf", "hwdownload,format=nv12", "-f", "rawvideo", null_sink]);
+        }
+        "rgb24" => {
+            cmd.args([
+                "-vf",
+                "hwdownload,format=nv12,format=rgb24",
+                "-f",
+                "rawvideo",
+                null_sink,
+            ]);
+        }
+        _ => unreachable!("decode output mode is validated before running cases"),
+    }
 }
 
 fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
@@ -1104,8 +1177,13 @@ struct ProbeSummary {
     nb_read_frames: usize,
 }
 
-fn ffprobe_summary(path: &Path, codec: Codec, expected_frames: usize) -> Result<ProbeSummary> {
-    let output = Command::new("ffprobe")
+fn ffprobe_summary(
+    ffprobe_path: &Path,
+    path: &Path,
+    codec: Codec,
+    expected_frames: usize,
+) -> Result<ProbeSummary> {
+    let output = Command::new(ffprobe_path)
         .args([
             "-v",
             "error",
@@ -1171,8 +1249,8 @@ fn ffprobe_summary(path: &Path, codec: Codec, expected_frames: usize) -> Result<
     Ok(summary)
 }
 
-fn run_ffmpeg_decode_verify(path: &Path, null_sink: &str) -> Result<()> {
-    let status = Command::new("ffmpeg")
+fn run_ffmpeg_decode_verify(ffmpeg_path: &Path, path: &Path, null_sink: &str) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
         .args(["-v", "error", "-i", &path.to_string_lossy(), "-f", "null", null_sink])
         .status()
         .with_context(|| format!("spawn ffmpeg decode verify for {}", path.display()))?;
