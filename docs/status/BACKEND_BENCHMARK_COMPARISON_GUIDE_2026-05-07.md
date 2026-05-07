@@ -40,10 +40,10 @@ not produce host pixels.
 
 ## Encode Modes
 
-Use `--equal-raw-input` for normal encode comparison. It generates one ARGB raw
+Use `--equal-raw-input true` for normal encode comparison. It generates one ARGB raw
 frame sequence and feeds that same byte stream to both `video-hw` and FFmpeg.
 
-Without `--equal-raw-input`, video-hw uses its synthetic frame generator while
+With `--equal-raw-input false`, video-hw uses its synthetic frame generator while
 FFmpeg uses `testsrc2`; that is acceptable for smoke testing but not for a
 performance parity claim.
 
@@ -58,24 +58,24 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --codecs h264,hevc 
 Backend-specific NVIDIA metadata decode plus equal-input encode:
 
 ```sh
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --decode-output-mode metadata --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --decode-output-mode metadata --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --decode-output-mode metadata --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --decode-output-mode metadata --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
 ```
 
 Backend-specific NVIDIA host RGB decode comparison:
 
 ```sh
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --decode-output-mode rgb24 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --decode-output-mode rgb24 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --decode-output-mode rgb24 --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --decode-output-mode rgb24 --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
 ```
 
 Backend-specific Intel and VT examples:
 
 ```sh
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
 ```
 
 Local NVIDIA-enabled FFmpeg build:
@@ -87,8 +87,9 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs \
   --warmup 1 \
   --repeat 5 \
   --verify \
-  --equal-raw-input \
+  --equal-raw-input true \
   --include-internal-metrics \
+  --cudarc-cuda-version 12090 \
   --ffmpeg-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffmpeg \
   --ffprobe-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffprobe
 ```
@@ -97,11 +98,13 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs \
 
 - H.264 and HEVC are measured separately.
 - Each result uses `warmup >= 1` and `repeat >= 3`; prefer `repeat >= 5`.
-- Encode parity claims use `--equal-raw-input`.
+- Encode parity claims use `--equal-raw-input true`.
 - Decode parity claims state the decode output mode and use the matching FFmpeg
   path.
 - Reports state backend, codec, FFmpeg binary when non-default, input contract,
   output contract, and verification status.
+- NVIDIA reports state `cudarc_cuda_version` when the CUDA version must be
+  overridden for the local driver/toolkit combination.
 - Reports include CV so unstable measurements can be rejected or rerun.
 - `--verify` passes for both video-hw and FFmpeg encoded outputs.
 - fMP4 application measurements remain separate and include PSNR/order checks

@@ -112,6 +112,9 @@ struct Args {
     #[arg(long, default_value = "ffprobe")]
     ffprobe_path: PathBuf,
 
+    #[arg(long)]
+    cudarc_cuda_version: Option<String>,
+
     #[arg(long, default_value_t = 300)]
     frame_count: usize,
 
@@ -292,7 +295,7 @@ fn main() -> Result<()> {
     let output_dir = PathBuf::from("output");
     fs::create_dir_all(&output_dir).context("create output directory")?;
 
-    build_examples(profile)?;
+    build_examples(profile, args.cudarc_cuda_version.as_deref())?;
 
     let decode_bin = example_bin_path(profile, "decode_annexb");
     let encode_bin = example_bin_path(profile, "encode_synthetic");
@@ -463,6 +466,11 @@ fn main() -> Result<()> {
     writeln!(&mut report, "decode_output_mode: {}", args.decode_output_mode)?;
     writeln!(&mut report, "ffmpeg_path: {}", args.ffmpeg_path.display())?;
     writeln!(&mut report, "ffprobe_path: {}", args.ffprobe_path.display())?;
+    writeln!(
+        &mut report,
+        "cudarc_cuda_version: {}",
+        args.cudarc_cuda_version.as_deref().unwrap_or("<auto>")
+    )?;
     writeln!(&mut report, "equal_raw_input: {}", args.equal_raw_input)?;
     writeln!(
         &mut report,
@@ -697,7 +705,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_examples(profile: &str) -> Result<()> {
+fn build_examples(profile: &str, cudarc_cuda_version: Option<&str>) -> Result<()> {
     let mut args = vec![
         "build",
         "--features",
@@ -709,7 +717,10 @@ fn build_examples(profile: &str) -> Result<()> {
     if profile == "release" {
         args = vec!["build", "--features", "backend-nvidia", "--examples", "--release"];
     }
-    run_command("cargo", &args, &[])?;
+    let envs = cudarc_cuda_version
+        .map(|value| vec![("CUDARC_CUDA_VERSION", value)])
+        .unwrap_or_default();
+    run_command("cargo", &args, &envs)?;
     Ok(())
 }
 

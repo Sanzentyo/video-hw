@@ -65,8 +65,8 @@ but they are out of scope for this pass; do not include `--codec av1` or
 `--codecs ... av1 ...` in the commands being compared.
 
 ```sh
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
-cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input true --include-internal-metrics
 ```
 
 The NVIDIA precise script has three decode comparison modes:
@@ -81,7 +81,7 @@ Do not compare a `metadata` video-hw decode run with an FFmpeg
 `hwdownload`/RGB run, or a video-hw RGB run with FFmpeg null-sink decode. Those
 measure different work.
 
-Encode comparison should normally use `--equal-raw-input`, which feeds the same
+Encode comparison should normally use `--equal-raw-input true`, which feeds the same
 generated ARGB raw frame stream to both video-hw and FFmpeg. Without it, the
 script is useful only as a smoke test or backend trend check because video-hw
 and FFmpeg generate different synthetic inputs.
@@ -103,11 +103,16 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs \
   --warmup 1 \
   --repeat 5 \
   --verify \
-  --equal-raw-input \
+  --equal-raw-input true \
   --include-internal-metrics \
+  --cudarc-cuda-version 12090 \
   --ffmpeg-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffmpeg \
   --ffprobe-path /home/sanzentyo/git/ffmpeg-nvidia-build/bin/ffprobe
 ```
+
+Use `--cudarc-cuda-version` when `cudarc`'s build-system CUDA detection does
+not match the installed driver/toolkit. On the current Linux NVIDIA test host,
+`12090` is required.
 
 ## Requirements
 
