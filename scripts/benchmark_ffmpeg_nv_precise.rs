@@ -136,9 +136,6 @@ struct Args {
 
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     equal_raw_input: bool,
-
-    #[arg(long, default_value_t = false)]
-    include_experimental_av1: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -288,11 +285,6 @@ fn main() -> Result<()> {
     let args = Args::parse();
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
-    }
-    if args.codec == Codec::Av1 && !args.include_experimental_av1 {
-        bail!(
-            "AV1 is experimental in this benchmark; use --include-experimental-av1 to run it explicitly"
-        );
     }
     validate_decode_output_mode(&args.decode_output_mode)?;
 

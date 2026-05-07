@@ -59,15 +59,17 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_intel_precise.rs --codec h264 -
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec h264 --warmup 1 --repeat 7 --frame-count 300 --verify
 ```
 
-For NVIDIA work, use only H.264/HEVC until AV1 support is explicitly included
-in the benchmark plan:
+For the current H.264/HEVC performance comparison pass, run the backend-specific
+scripts with `--codec h264` and `--codec hevc`. AV1 paths exist in some scripts,
+but they are out of scope for this pass; do not include `--codec av1` or
+`--codecs ... av1 ...` in the commands being compared.
 
 ```sh
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec h264 --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
 cargo +nightly -Zscript scripts/benchmark_ffmpeg_nv_precise.rs --codec hevc --warmup 1 --repeat 5 --verify --equal-raw-input --include-internal-metrics
 ```
 
-The NV precise script has three decode comparison modes:
+The NVIDIA precise script has three decode comparison modes:
 
 | Mode | video-hw path | FFmpeg path | Use for |
 |---|---|---|---|
@@ -83,6 +85,13 @@ Encode comparison should normally use `--equal-raw-input`, which feeds the same
 generated ARGB raw frame stream to both video-hw and FFmpeg. Without it, the
 script is useful only as a smoke test or backend trend check because video-hw
 and FFmpeg generate different synthetic inputs.
+
+The same principle applies to non-NVIDIA backends: compare decode only when the
+output contract matches, and compare encode only when the input frame sequence
+matches. Backend-specific scripts may expose different hardware paths
+(QSV/VideoToolbox/Vulkan), but reports must still state the backend, codec,
+decode output contract, input contract, warmup/repeat counts, and verification
+status.
 
 Use `--ffmpeg-path` and `--ffprobe-path` when comparing against a local FFmpeg
 build, for example:
