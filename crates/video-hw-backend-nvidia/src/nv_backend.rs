@@ -725,6 +725,7 @@ impl VideoEncoder for NvEncoderAdapter {
         self.apply_pending_switch_if_needed()?;
 
         let pending_frames = std::mem::take(&mut self.pending_frames);
+        let pending_frame_count = pending_frames.len();
         let width = self.width.take().unwrap_or(640);
         let height = self.height.take().unwrap_or(360);
         let max_in_flight = self.max_in_flight_outputs;
@@ -777,7 +778,7 @@ impl VideoEncoder for NvEncoderAdapter {
                 }
             });
 
-            for (index, frame) in pending_frames.iter().enumerate() {
+            for (index, frame) in pending_frames.into_iter().enumerate() {
                 while session.available_pairs() == 0 {
                     let pending = pending_outputs.pop_front().ok_or_else(|| {
                         BackendError::Backend(
@@ -814,9 +815,8 @@ impl VideoEncoder for NvEncoderAdapter {
                 let mut pair = session.checkout_pair()?;
                 let synth_start = Instant::now();
                 let _ = input_layout;
-                let argb = frame
+                let mut argb = frame
                     .argb
-                    .clone()
                     .unwrap_or_else(|| make_synthetic_argb(width, height, index));
                 if argb.len() != width.saturating_mul(height).saturating_mul(4) {
                     return Err(BackendError::InvalidInput(format!(
@@ -832,10 +832,10 @@ impl VideoEncoder for NvEncoderAdapter {
                 copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
                 {
                     let upload_start = Instant::now();
-                    let nvenc_buf = argb_to_nvenc_format(&argb);
+                    argb_to_nvenc_format_in_place(&mut argb);
                     let mut lock = pair.input.lock().map_err(map_encode_error)?;
                     unsafe {
-                        lock.write_pitched(&nvenc_buf, width * 4, height);
+                        lock.write_pitched(&argb, width * 4, height);
                     }
                     timing.upload += upload_start.elapsed();
                 }
@@ -950,7 +950,7 @@ impl VideoEncoder for NvEncoderAdapter {
         if report_metrics {
             eprintln!(
                 "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
-                pending_frames.len(),
+                pending_frame_count,
                 packets.len(),
                 output_depth_peak,
                 max_in_flight,
@@ -1072,7 +1072,7 @@ impl NvEncoderAdapter {
             })?;
 
             let synth_start = Instant::now();
-            let argb = frame
+            let mut argb = frame
                 .argb
                 .clone()
                 .unwrap_or_else(|| make_synthetic_argb(width, height, index));
@@ -1091,10 +1091,10 @@ impl NvEncoderAdapter {
 
             let upload_start = Instant::now();
             {
-                let nvenc_buf = argb_to_nvenc_format(&argb);
+                argb_to_nvenc_format_in_place(&mut argb);
                 let mut lock = pair.input.lock().map_err(map_encode_error)?;
                 unsafe {
-                    lock.write_pitched(&nvenc_buf, width * 4, height);
+                    lock.write_pitched(&argb, width * 4, height);
                 }
             }
             timing.upload += upload_start.elapsed();
@@ -1565,10 +1565,10 @@ fn make_synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u
 /// NVENC's "A8R8G8B8" format is word-ordered in little-endian:
 /// the 32-bit integer `0xAARRGGBB` is stored as bytes `[B, G, R, A]` in memory.
 /// Our internal format stores bytes as `[A, R, G, B]`, so a full 4-byte reversal is needed.
-fn argb_to_nvenc_format(argb: &[u8]) -> Vec<u8> {
-    argb.chunks_exact(4)
-        .flat_map(|px| [px[3], px[2], px[1], px[0]])
-        .collect()
+fn argb_to_nvenc_format_in_place(argb: &mut [u8]) {
+    for px in argb.chunks_exact_mut(4) {
+        px.reverse();
+    }
 }
 
 #[cfg(test)]
@@ -1647,6 +1647,21 @@ mod tests {
             .unwrap();
         adapter.sync_pipeline_generation(&scheduler);
         assert_eq!(scheduler.generation(), adapter.configured_generation());
+    }
+
+    #[test]
+    fn argb_to_nvenc_format_in_place_matches_allocating_conversion() {
+        let input = vec![255, 1, 2, 3, 128, 4, 5, 6];
+        let expected = input
+            .chunks_exact(4)
+            .flat_map(|px| [px[3], px[2], px[1], px[0]])
+            .collect::<Vec<_>>();
+        let mut actual = input;
+
+        argb_to_nvenc_format_in_place(&mut actual);
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual, vec![3, 2, 1, 255, 6, 5, 4, 128]);
     }
 
     #[test]

@@ -663,6 +663,11 @@ pub trait SessionSwitchingEncoderBackend: EncoderBackend {}
 trait DynDecodeSession {
     fn backend_kind(&self) -> BackendKind;
     fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError>;
+    fn submit_annexb_chunk(
+        &mut self,
+        chunk: &[u8],
+        pts_90k: Option<Timestamp90k>,
+    ) -> Result<(), BackendError>;
     fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError>;
     fn flush(&mut self) -> Result<Vec<DecodedFrame>, BackendError>;
     fn summary(&self) -> DecodeSummary;
@@ -736,6 +741,14 @@ impl AnyDecodeSession {
 
     pub fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
         self.inner.submit(input)
+    }
+
+    pub fn submit_annexb_chunk(
+        &mut self,
+        chunk: &[u8],
+        pts_90k: Option<Timestamp90k>,
+    ) -> Result<(), BackendError> {
+        self.inner.submit_annexb_chunk(chunk, pts_90k)
     }
 
     pub fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError> {
@@ -851,9 +864,17 @@ impl<D: VideoDecoder> DecodeSession<D> {
 
     pub fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
         let (annexb, pts_90k) = normalize_bitstream_input(input)?;
+        self.submit_annexb_chunk(&annexb, pts_90k.map(Timestamp90k))
+    }
+
+    pub fn submit_annexb_chunk(
+        &mut self,
+        chunk: &[u8],
+        pts_90k: Option<Timestamp90k>,
+    ) -> Result<(), BackendError> {
         let outputs = self
             .decoder_inner
-            .push_bitstream_chunk(&annexb, pts_90k)?
+            .push_bitstream_chunk(chunk, pts_90k.map(|v| v.0))?
             .into_iter()
             .map(|frame| backend_frame_to_decoded_frame(frame, self.output_mode))
             .collect::<Result<Vec<_>, _>>()?;
@@ -951,6 +972,14 @@ where
 
     fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
         DecodeSession::submit(self, input)
+    }
+
+    fn submit_annexb_chunk(
+        &mut self,
+        chunk: &[u8],
+        pts_90k: Option<Timestamp90k>,
+    ) -> Result<(), BackendError> {
+        DecodeSession::submit_annexb_chunk(self, chunk, pts_90k)
     }
 
     fn try_reap(&mut self) -> Result<Option<DecodedFrame>, BackendError> {

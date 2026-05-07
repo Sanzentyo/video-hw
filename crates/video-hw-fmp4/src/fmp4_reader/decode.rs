@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use anyhow::{Context, Result, anyhow};
 use shiguredo_mp4::boxes::SampleEntry;
 use video_hw::{
-    AnyDecodeSession, Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput,
-    Codec, DecodeOutputMode, DecodedFrame, DecoderConfig, Timestamp90k, VtDecoderOptions,
+    AnyDecodeSession, Backend, BackendDecoderOptions, BackendError, BackendKind, Codec,
+    DecodeOutputMode, DecodedFrame, DecoderConfig, Timestamp90k, VtDecoderOptions,
 };
 
 use super::{
@@ -850,7 +850,7 @@ impl<'a> FrameDecoder<'a> {
                 sample_meta_by_id: &gop_meta_by_id,
                 presentation_index_by_id: &gop_presentation_index_by_id,
             };
-            submit_sample(&mut session, &track, sample, &mut collect)?;
+            submit_sample(&mut session, &track, sample, &mut collect, false)?;
         }
 
         for frame in session
@@ -963,7 +963,7 @@ impl<'a> FrameDecoder<'a> {
                 sample_meta_by_id: &requested_meta_by_id,
                 presentation_index_by_id: &requested_presentation_index_by_id,
             };
-            submit_sample(&mut session, &track, sample, &mut collect)?;
+            submit_sample(&mut session, &track, sample, &mut collect, false)?;
         }
         for frame in session
             .flush()
@@ -1191,7 +1191,7 @@ impl<'a> FrameDecoder<'a> {
                 sample_meta_by_id: &sample_meta_by_id,
                 presentation_index_by_id: &presentation_index_by_id,
             };
-            submit_sample(&mut session, &track, sample, &mut collect)?;
+            submit_sample(&mut session, &track, sample, &mut collect, false)?;
         }
         for frame in session
             .flush()
@@ -1257,7 +1257,7 @@ impl Iterator for DecodedFrameIter<'_> {
                         presentation_index_by_id: &self.presentation_index_by_id,
                     };
                     if let Err(err) =
-                        submit_sample(&mut self.session, &self.track, sample, &mut collect)
+                        submit_sample(&mut self.session, &self.track, sample, &mut collect, true)
                     {
                         return Some(Err(err.context(format!(
                             "streaming decode failed at sample {} on track {}",
@@ -1407,6 +1407,7 @@ fn submit_sample(
     track: &Fmp4Track,
     sample: EncodedSample,
     collect: &mut DecodeCollectState<'_>,
+    drain_after_submit: bool,
 ) -> Result<()> {
     let sample_id = sample.meta.sample_id;
     let pts_90k = sample_timestamp_to_90k(&sample.meta);
@@ -1417,10 +1418,7 @@ fn submit_sample(
         .to_decode_payload()
         .with_context(|| format!("failed to prepare sample {sample_id} decoder payload"))?;
     loop {
-        match session.submit(BitstreamInput::AnnexBChunk {
-            chunk: payload.clone(),
-            pts_90k,
-        }) {
+        match session.submit_annexb_chunk(&payload, pts_90k) {
             Ok(()) => break,
             Err(BackendError::TemporaryBackpressure(_)) => drain_ready_frames(session, collect)?,
             Err(err) => {
@@ -1431,8 +1429,11 @@ fn submit_sample(
             }
         }
     }
-    drain_ready_frames(session, collect)
-        .with_context(|| format!("failed to reap decoded frames after sample {sample_id}"))
+    if drain_after_submit {
+        drain_ready_frames(session, collect)
+            .with_context(|| format!("failed to reap decoded frames after sample {sample_id}"))?;
+    }
+    Ok(())
 }
 
 fn drain_ready_frames(
