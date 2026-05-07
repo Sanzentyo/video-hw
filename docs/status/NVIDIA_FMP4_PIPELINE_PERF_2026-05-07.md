@@ -20,6 +20,9 @@ them again with NVENC.
 - Non-streaming fMP4 range/window decode does not force a `try_reap` after every
   submitted sample. Streaming iteration keeps the per-sample reap behavior so it
   can yield incrementally.
+- NV12-to-RGB24 host conversion now uses precomputed YUV coefficient tables and
+  processes two pixels per chroma pair, reducing per-frame CPU conversion work
+  while keeping the same integer conversion formula.
 
 ## Validation
 
@@ -46,10 +49,15 @@ Warm performance observed from the application-side release build:
 
 | Stage | Time / 120 frames | Approx FPS |
 |---|---:|---:|
-| source fMP4 decode | `1186 ms` | `101 fps` |
-| roundtrip fMP4 decode | `951 ms` | `126 fps` |
-| first NVENC encode | `735 ms` | `163 fps` |
-| second NVENC encode | `685 ms` | `175 fps` |
+| source fMP4 decode | `1193 ms` | `101 fps` |
+| roundtrip fMP4 decode | `749 ms` | `160 fps` |
+| first NVENC encode | `767 ms` | `157 fps` |
+| second NVENC encode | `696 ms` | `172 fps` |
+
+The NV12-to-RGB24 table change mainly improves the re-encoded roundtrip decode
+case (`951 ms` -> `749 ms` for 120 frames in this sample). It does not materially
+improve the original B-frame source decode path, which remains around
+`1190 ms` for 120 frames.
 
 SAM overlay workload after these changes remained SAM-bound:
 
@@ -73,6 +81,12 @@ The likely cause is NVDEC display surface reuse before host copy. A future
 version may revisit this only with explicit surface lifetime ownership or a
 bounded copy queue that maps/copies each display frame before the surface can be
 reused.
+
+A separate parser configuration experiment raised `ulMaxNumDecodeSurfaces` and
+`ulMaxDisplayDelay`. It was also rejected: validation returned only `90/120`
+diagonal-best frames (`0.75` rate), despite presentation-order metadata. Parser
+reorder/surface settings should not be changed without the same PSNR diagonal
+acceptance check.
 
 ## Follow-up
 

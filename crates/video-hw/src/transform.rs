@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -156,28 +156,51 @@ pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
     }
 
     let uv_base = luma_size;
+    let tables = yuv_tables();
     let mut rgb = vec![0_u8; width.saturating_mul(height).saturating_mul(3)];
     for y in 0..height {
         let y_row = y * pitch;
         let uv_row = uv_base + (y / 2) * pitch;
         let dst_row = y * width * 3;
-        for x in 0..width {
-            let y_value = i32::from(frame.data[y_row + x]);
+        let mut x = 0;
+        while x + 1 < width {
+            let uv_index = uv_row + x;
+            let u = usize::from(frame.data[uv_index]);
+            let v = usize::from(frame.data[uv_index + 1]);
+
+            write_yuv_pixel(
+                &frame.data,
+                &mut rgb,
+                y_row + x,
+                dst_row + x * 3,
+                tables,
+                u,
+                v,
+            );
+            write_yuv_pixel(
+                &frame.data,
+                &mut rgb,
+                y_row + x + 1,
+                dst_row + (x + 1) * 3,
+                tables,
+                u,
+                v,
+            );
+            x += 2;
+        }
+        if x < width {
             let uv_index = uv_row + (x & !1);
-            let u_value = i32::from(frame.data[uv_index]);
-            let v_value = i32::from(frame.data[uv_index + 1]);
-
-            let c = (y_value - 16).max(0);
-            let d = u_value - 128;
-            let e = v_value - 128;
-            let r = clip_to_u8((298 * c + 409 * e + 128) >> 8);
-            let g = clip_to_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
-            let b = clip_to_u8((298 * c + 516 * d + 128) >> 8);
-
-            let dst = dst_row + x * 3;
-            rgb[dst] = r;
-            rgb[dst + 1] = g;
-            rgb[dst + 2] = b;
+            let u = usize::from(frame.data[uv_index]);
+            let v = usize::from(frame.data[uv_index + 1]);
+            write_yuv_pixel(
+                &frame.data,
+                &mut rgb,
+                y_row + x,
+                dst_row + x * 3,
+                tables,
+                u,
+                v,
+            );
         }
     }
 
@@ -186,6 +209,57 @@ pub fn nv12_to_rgb24(frame: &Nv12Frame) -> Result<RgbFrame, BackendError> {
         height,
         pts_90k: frame.pts_90k,
         data: rgb,
+    })
+}
+
+#[inline]
+fn write_yuv_pixel(
+    src: &[u8],
+    dst: &mut [u8],
+    y_index: usize,
+    dst_index: usize,
+    tables: &YuvTables,
+    u: usize,
+    v: usize,
+) {
+    let y = tables.y[usize::from(src[y_index])];
+    dst[dst_index] = clip_to_u8((y + tables.v_r[v]) >> 8);
+    dst[dst_index + 1] = clip_to_u8((y + tables.u_g[u] + tables.v_g[v]) >> 8);
+    dst[dst_index + 2] = clip_to_u8((y + tables.u_b[u]) >> 8);
+}
+
+#[derive(Debug)]
+struct YuvTables {
+    y: [i32; 256],
+    u_g: [i32; 256],
+    u_b: [i32; 256],
+    v_r: [i32; 256],
+    v_g: [i32; 256],
+}
+
+fn yuv_tables() -> &'static YuvTables {
+    static TABLES: OnceLock<YuvTables> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut y = [0; 256];
+        let mut u_g = [0; 256];
+        let mut u_b = [0; 256];
+        let mut v_r = [0; 256];
+        let mut v_g = [0; 256];
+        for value in 0..256 {
+            let chroma = value as i32 - 128;
+            y[value] = 298 * (value as i32 - 16).max(0) + 128;
+            u_g[value] = -100 * chroma;
+            u_b[value] = 516 * chroma;
+            v_r[value] = 409 * chroma;
+            v_g[value] = -208 * chroma;
+        }
+        YuvTables {
+            y,
+            u_g,
+            u_b,
+            v_r,
+            v_g,
+        }
     })
 }
 
@@ -234,6 +308,22 @@ mod tests {
     }
 
     #[test]
+    fn nv12_to_rgb_matches_reference_formula() {
+        let frame = Nv12Frame {
+            width: 3,
+            height: 2,
+            pitch: 4,
+            pts_90k: Some(90_000),
+            data: vec![16, 32, 180, 0, 64, 120, 235, 0, 90, 240, 128, 128],
+        };
+        let rgb = nv12_to_rgb24(&frame).unwrap();
+        let expected = reference_nv12_to_rgb(&frame);
+
+        assert_eq!(rgb.pts_90k, Some(90_000));
+        assert_eq!(rgb.data, expected);
+    }
+
+    #[test]
     fn dispatcher_runs_transform_job() {
         let dispatcher = TransformDispatcher::new(2, 8);
         let frame = make_argb_to_nv12_dummy(32, 18);
@@ -258,5 +348,33 @@ mod tests {
             ColorRequest::KeepNative,
             Some((640, 360))
         ));
+    }
+
+    fn reference_nv12_to_rgb(frame: &Nv12Frame) -> Vec<u8> {
+        let width = frame.width;
+        let height = frame.height;
+        let pitch = frame.pitch;
+        let uv_base = pitch * height;
+        let mut rgb = vec![0_u8; width * height * 3];
+        for y in 0..height {
+            let y_row = y * pitch;
+            let uv_row = uv_base + (y / 2) * pitch;
+            let dst_row = y * width * 3;
+            for x in 0..width {
+                let y_value = i32::from(frame.data[y_row + x]);
+                let uv_index = uv_row + (x & !1);
+                let u_value = i32::from(frame.data[uv_index]);
+                let v_value = i32::from(frame.data[uv_index + 1]);
+
+                let c = (y_value - 16).max(0);
+                let d = u_value - 128;
+                let e = v_value - 128;
+                let dst = dst_row + x * 3;
+                rgb[dst] = clip_to_u8((298 * c + 409 * e + 128) >> 8);
+                rgb[dst + 1] = clip_to_u8((298 * c - 100 * d - 208 * e + 128) >> 8);
+                rgb[dst + 2] = clip_to_u8((298 * c + 516 * d + 128) >> 8);
+            }
+        }
+        rgb
     }
 }
