@@ -27,8 +27,10 @@ pub use fmp4_reader::{
     SampleMeta, SampleRange, SampleReadStats, SyncReading, TrackId, TrackKind, TrackReadStats,
 };
 pub use fmp4_writer::{
-    ArgbFrame, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,
-    FragmentFrames, FrameRate, FrameSize, Pts90k, Ready, RgbaFrame, SyncRecording,
+    ArgbFrame, CompositionOffset90k, EncodedSampleInput, EncodedTrackConfig, Finished, Fmp4Writer,
+    Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary, FragmentFrames, FrameRate, FrameSize,
+    Pts90k, Ready, RgbaFrame, SampleDuration90k, SyncEncodedRecording, SyncRecording,
+    TrackTimescale,
 };
 
 #[cfg(feature = "async-session")]

@@ -1924,9 +1924,20 @@ fn window_range_from_order(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     use std::{
         fs,
-        num::NonZeroU32,
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -1949,7 +1960,6 @@ mod tests {
         )
     ))]
     use video_hw::{Codec, DecoderConfig};
-    use video_hw::{DecodedFrame, Dimensions};
 
     #[test]
     fn av1_track_options_preserve_fmp4_av1c_record() {

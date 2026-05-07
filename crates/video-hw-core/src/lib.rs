@@ -2,6 +2,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::{fmt, fmt::Display};
 
+pub mod bitstream;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     H264,
@@ -109,6 +111,46 @@ pub struct EncodedChunk {
     pub is_keyframe: bool,
 }
 
+impl EncodedChunk {
+    pub fn payload_ref(&self) -> bitstream::EncodedPayloadRef<'_> {
+        bitstream::EncodedPayloadRef {
+            codec: self.codec,
+            layout: self.layout,
+            data: &self.data,
+            is_keyframe: self.is_keyframe,
+        }
+    }
+
+    pub fn to_annexb(&self) -> Result<bitstream::AnnexBAccessUnit, bitstream::BitstreamError> {
+        bitstream::payload_to_annexb(self.payload_ref(), bitstream::NalLengthSize::Four)
+    }
+
+    pub fn to_nalus(&self) -> Result<Vec<bitstream::NalUnit>, bitstream::BitstreamError> {
+        bitstream::payload_to_nalus(self.payload_ref(), bitstream::NalLengthSize::Four)
+    }
+
+    pub fn to_decode_payload(&self) -> Result<bitstream::DecodePayload, bitstream::BitstreamError> {
+        bitstream::payload_to_decode_payload(self.payload_ref(), bitstream::NalLengthSize::Four)
+    }
+
+    pub fn to_length_prefixed_sample(
+        &self,
+        nal_length_size: bitstream::NalLengthSize,
+    ) -> Result<bitstream::LengthPrefixedSample, bitstream::BitstreamError> {
+        match self.layout {
+            EncodedLayout::AnnexB => bitstream::annexb_to_length_prefixed(
+                bitstream::AnnexBAccessUnitRef::new(&self.data),
+                nal_length_size,
+            ),
+            EncodedLayout::Avcc | EncodedLayout::Hvcc => {
+                Ok(bitstream::LengthPrefixedSample::new(self.data.clone()))
+            }
+            EncodedLayout::Av1 => Ok(bitstream::LengthPrefixedSample::new(self.data.clone())),
+            EncodedLayout::Opaque => Err(bitstream::BitstreamError::OpaquePayload),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DecodedFrame {
     Metadata {
@@ -129,6 +171,245 @@ pub enum DecodedFrame {
         pts_90k: Option<Timestamp90k>,
         data: Vec<u8>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelOutputLayout {
+    Rgb24,
+    Rgba8888,
+    Argb8888,
+    Bgra8888,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMatrix {
+    Bt601,
+    Bt709,
+}
+
+impl Default for ColorMatrix {
+    fn default() -> Self {
+        Self::Bt709
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorRange {
+    Limited,
+    Full,
+}
+
+impl Default for ColorRange {
+    fn default() -> Self {
+        Self::Limited
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorConvertOptions {
+    pub matrix: ColorMatrix,
+    pub range: ColorRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PixelBufferOwned {
+    pub layout: PixelOutputLayout,
+    pub dims: Dimensions,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PitchBytes(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelWidth(pub NonZeroU32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelHeight(pub NonZeroU32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nv12FrameRef<'a> {
+    pub dims: Dimensions,
+    pub pitch: PitchBytes,
+    pub pts_90k: Option<Timestamp90k>,
+    pub data: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb24FrameRef<'a> {
+    pub dims: Dimensions,
+    pub pts_90k: Option<Timestamp90k>,
+    pub data: &'a [u8],
+}
+
+impl DecodedFrame {
+    pub fn try_as_nv12(&self) -> Option<Nv12FrameRef<'_>> {
+        match self {
+            Self::Nv12 {
+                dims,
+                pitch,
+                pts_90k,
+                data,
+            } => Some(Nv12FrameRef {
+                dims: *dims,
+                pitch: PitchBytes(*pitch),
+                pts_90k: *pts_90k,
+                data,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn try_as_rgb24(&self) -> Option<Rgb24FrameRef<'_>> {
+        match self {
+            Self::Rgb24 {
+                dims,
+                pts_90k,
+                data,
+            } => Some(Rgb24FrameRef {
+                dims: *dims,
+                pts_90k: *pts_90k,
+                data,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn to_pixel_buffer(
+        &self,
+        layout: PixelOutputLayout,
+        options: ColorConvertOptions,
+    ) -> Result<PixelBufferOwned, BackendError> {
+        match self {
+            Self::Rgb24 { dims, data, .. } => rgb24_to_pixel_buffer(*dims, data, layout),
+            Self::Nv12 {
+                dims, pitch, data, ..
+            } => nv12_to_pixel_buffer(*dims, *pitch, data, layout, options),
+            Self::Metadata { .. } => Err(BackendError::UnsupportedConfig(
+                "metadata-only decoded frame has no pixel payload".to_string(),
+            )),
+        }
+    }
+}
+
+fn rgb24_to_pixel_buffer(
+    dims: Dimensions,
+    data: &[u8],
+    layout: PixelOutputLayout,
+) -> Result<PixelBufferOwned, BackendError> {
+    let pixel_count = dims.width.get() as usize * dims.height.get() as usize;
+    if data.len() != pixel_count * 3 {
+        return Err(BackendError::InvalidInput(format!(
+            "rgb24 payload size mismatch: expected {}, got {}",
+            pixel_count * 3,
+            data.len()
+        )));
+    }
+    let out = match layout {
+        PixelOutputLayout::Rgb24 => data.to_vec(),
+        PixelOutputLayout::Rgba8888 => {
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for rgb in data.chunks_exact(3) {
+                out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+            out
+        }
+        PixelOutputLayout::Argb8888 => {
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for rgb in data.chunks_exact(3) {
+                out.extend_from_slice(&[255, rgb[0], rgb[1], rgb[2]]);
+            }
+            out
+        }
+        PixelOutputLayout::Bgra8888 => {
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for rgb in data.chunks_exact(3) {
+                out.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+            }
+            out
+        }
+    };
+    Ok(PixelBufferOwned {
+        layout,
+        dims,
+        data: out,
+    })
+}
+
+fn nv12_to_pixel_buffer(
+    dims: Dimensions,
+    pitch: usize,
+    data: &[u8],
+    layout: PixelOutputLayout,
+    options: ColorConvertOptions,
+) -> Result<PixelBufferOwned, BackendError> {
+    let width = dims.width.get() as usize;
+    let height = dims.height.get() as usize;
+    if pitch < width {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 pitch is smaller than width: pitch={pitch}, width={width}"
+        )));
+    }
+    let y_size = pitch
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
+    if data.len() < y_size + y_size / 2 {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 payload size mismatch: expected at least {}, got {}",
+            y_size + y_size / 2,
+            data.len()
+        )));
+    }
+
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let yv = data[y * pitch + x];
+            let uv_index = y_size + (y / 2) * pitch + (x / 2) * 2;
+            let u = data[uv_index];
+            let v = data[uv_index + 1];
+            let (r, g, b) = yuv_to_rgb(yv, u, v, options);
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    rgb24_to_pixel_buffer(dims, &rgb, layout)
+}
+
+fn yuv_to_rgb(y: u8, u: u8, v: u8, options: ColorConvertOptions) -> (u8, u8, u8) {
+    let y_i = i32::from(y);
+    let c = match options.range {
+        ColorRange::Limited => (y_i - 16).max(0),
+        ColorRange::Full => y_i,
+    };
+    let d = i32::from(u) - 128;
+    let e = i32::from(v) - 128;
+    let (r, g, b) = match (options.matrix, options.range) {
+        (ColorMatrix::Bt601, ColorRange::Limited) => (
+            (298 * c + 409 * e + 128) >> 8,
+            (298 * c - 100 * d - 208 * e + 128) >> 8,
+            (298 * c + 516 * d + 128) >> 8,
+        ),
+        (ColorMatrix::Bt709, ColorRange::Limited) => (
+            (298 * c + 459 * e + 128) >> 8,
+            (298 * c - 55 * d - 136 * e + 128) >> 8,
+            (298 * c + 541 * d + 128) >> 8,
+        ),
+        (ColorMatrix::Bt601, ColorRange::Full) => (
+            y_i + ((1436 * e) >> 10),
+            y_i - ((352 * d + 731 * e) >> 10),
+            y_i + ((1815 * d) >> 10),
+        ),
+        (ColorMatrix::Bt709, ColorRange::Full) => (
+            y_i + ((1613 * e) >> 10),
+            y_i - ((192 * d + 479 * e) >> 10),
+            y_i + ((1900 * d) >> 10),
+        ),
+    };
+    (clamp_u8(r), clamp_u8(g), clamp_u8(b))
+}
+
+fn clamp_u8(value: i32) -> u8 {
+    value.clamp(0, 255) as u8
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -509,6 +790,22 @@ pub enum BackendError {
     DeviceLost(String),
     #[error("backend error: {0}")]
     Backend(String),
+}
+
+impl From<bitstream::BitstreamError> for BackendError {
+    fn from(value: bitstream::BitstreamError) -> Self {
+        match value {
+            bitstream::BitstreamError::UnsupportedLayout { codec, layout } => {
+                Self::InvalidBitstream(format!(
+                    "unsupported bitstream layout: codec={codec}, layout={layout}"
+                ))
+            }
+            bitstream::BitstreamError::OpaquePayload => {
+                Self::InvalidBitstream("opaque encoded payload cannot be converted".to_string())
+            }
+            other => Self::InvalidBitstream(other.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,6 +7,7 @@ H.264 (`avc1`), HEVC (`hvc1`), AV1 (`av01`) の video sample entry を扱えま�
 - Writer は typestate
   - `Fmp4Writer<Ready>`
   - `Fmp4Writer<SyncRecording>`
+  - `Fmp4Writer<SyncEncodedRecording>`
   - `Fmp4Writer<AsyncRecording>`
   - `Fmp4Writer<Finished>`
 - Reader も typestate
@@ -29,6 +30,13 @@ H.264 (`avc1`), HEVC (`hvc1`), AV1 (`av01`) の video sample entry を扱えま�
   - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
   - `Mp4IndexSnapshot::track_descriptions` には codec / layout / NAL length size / parameter sets / basic audio-video fields を含む軽量 description が入ります
   - `DecodeDiagnostics` は backend と output mode を文字列として serialize します。deserialize では有効化済み backend feature に含まれる `resolved_backend` だけを復元できます
+
+## Responsibility Boundary
+
+- `video-hw-core::bitstream` は H.264/HEVC の Annex-B / length-prefixed payload 変換、NALU 分割、parameter set 抽出、access unit assembly などの codec payload utility を提供します。
+- `video-hw-fmp4` は fragmented MP4 container の reader/writer と MP4 sample entry 管理を担当します。WebRTC/RTP packetizer/depacketizer、signaling、GUI preview、relay policy は上位アプリの責務です。
+- `EncodedLayout::Av1` は Annex-B ではありません。互換 API の `to_annexb()` は AV1 payload passthrough、`to_decode_payload()` は decode 用 payload を返す API です。
+- `EncodedLayout::Opaque` は変換 API では明示 error になります。
 
 ## Writer Example
 

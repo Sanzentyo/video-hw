@@ -1,8 +1,7 @@
 use std::{collections::HashMap, fmt, num::NonZeroU32, path::PathBuf};
 
-use anyhow::Context;
 use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
-use video_hw::{Codec, EncodedLayout};
+use video_hw::{Codec, EncodedLayout, bitstream};
 
 #[cfg(feature = "serde")]
 mod serde_track_kind {
@@ -288,30 +287,22 @@ impl EncodedSample {
         match self.encoded_layout() {
             Some(EncodedLayout::Av1) => Ok(self.data.clone()),
             Some(EncodedLayout::Avcc) | Some(EncodedLayout::Hvcc) => {
-                let nal_length_size = sample_entry_nal_length_size(self.sample_entry.as_ref())?;
+                let nal_length_size = bitstream::NalLengthSize::from_bytes(
+                    sample_entry_nal_length_size(self.sample_entry.as_ref())?,
+                )?;
                 let mut annexb = Vec::new();
                 if self.meta.keyframe {
                     for parameter_set in self.parameter_sets() {
-                        annexb.extend_from_slice(&[0, 0, 0, 1]);
-                        annexb.extend_from_slice(&parameter_set);
+                        bitstream::append_annexb_nalu(&mut annexb, &parameter_set);
                     }
                 }
-                let mut cursor = 0usize;
-                while cursor < self.data.len() {
-                    let len_bytes = self
-                        .data
-                        .get(cursor..cursor + nal_length_size)
-                        .context("length-prefixed sample truncated before NAL length")?;
-                    let nalu_len = read_be_nal_length(len_bytes);
-                    cursor = cursor.saturating_add(nal_length_size);
-                    let nalu = self
-                        .data
-                        .get(cursor..cursor + nalu_len)
-                        .context("length-prefixed sample truncated inside NAL payload")?;
-                    annexb.extend_from_slice(&[0, 0, 0, 1]);
-                    annexb.extend_from_slice(nalu);
-                    cursor = cursor.saturating_add(nalu_len);
-                }
+                annexb.extend_from_slice(
+                    bitstream::length_prefixed_to_annexb(
+                        bitstream::LengthPrefixedSampleRef::new(&self.data),
+                        nal_length_size,
+                    )?
+                    .as_bytes(),
+                );
                 Ok(annexb)
             }
             Some(EncodedLayout::AnnexB) => Ok(self.data.clone()),
@@ -453,12 +444,6 @@ pub(crate) fn sample_entry_nal_length_size(
             value + 1
         ),
     }
-}
-
-fn read_be_nal_length(bytes: &[u8]) -> usize {
-    bytes
-        .iter()
-        .fold(0usize, |value, byte| (value << 8) | usize::from(*byte))
 }
 
 #[cfg(test)]

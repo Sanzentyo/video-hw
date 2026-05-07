@@ -10,7 +10,7 @@ use nvidia_video_codec_sdk::{
 };
 
 use crate::backend_transform_adapter::{DecodedUnit, NvidiaTransformAdapter};
-use crate::bitstream::{AccessUnit, StatefulBitstreamAssembler};
+use crate::nv_bitstream::{AccessUnit, StatefulBitstreamAssembler};
 use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
