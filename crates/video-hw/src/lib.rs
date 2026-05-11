@@ -739,6 +739,9 @@ pub struct DecodePreflightReport {
     pub output_mode: DecodeOutputMode,
     pub supported_by_contract: bool,
     pub usable_in_current_runtime: bool,
+    pub decode_supported: Option<bool>,
+    pub hardware_acceleration: Option<bool>,
+    pub output_mode_supported: Option<bool>,
     pub reason: Option<String>,
 }
 
@@ -753,6 +756,9 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
             output_mode: request.output_mode,
             supported_by_contract: false,
             usable_in_current_runtime: false,
+            decode_supported: None,
+            hardware_acceleration: None,
+            output_mode_supported: None,
             reason: Some(resolved.unwrap_err().to_string()),
         };
     };
@@ -764,6 +770,9 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
             output_mode: request.output_mode,
             supported_by_contract,
             usable_in_current_runtime: false,
+            decode_supported: None,
+            hardware_acceleration: None,
+            output_mode_supported: Some(false),
             reason: Some(format!(
                 "{kind:?} decoder does not support DecodeOutputMode::{} by contract",
                 request.output_mode
@@ -773,15 +782,19 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
     let runtime = preflight_decoder_capability(kind, &config);
     match runtime {
         Ok(capability) => {
+            let output_mode_supported = capability.supports_decode_output_mode(request.output_mode);
             let usable = capability.decode_supported
                 && (!request.require_hardware || capability.hardware_acceleration)
-                && capability.supports_decode_output_mode(request.output_mode);
+                && output_mode_supported;
             DecodePreflightReport {
                 requested_backend: request.backend,
                 resolved_backend: Some(kind),
                 output_mode: request.output_mode,
                 supported_by_contract,
                 usable_in_current_runtime: usable,
+                decode_supported: Some(capability.decode_supported),
+                hardware_acceleration: Some(capability.hardware_acceleration),
+                output_mode_supported: Some(output_mode_supported),
                 reason: if usable {
                     None
                 } else {
@@ -800,6 +813,9 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
             output_mode: request.output_mode,
             supported_by_contract,
             usable_in_current_runtime: false,
+            decode_supported: None,
+            hardware_acceleration: None,
+            output_mode_supported: None,
             reason: Some(err.to_string()),
         },
     }

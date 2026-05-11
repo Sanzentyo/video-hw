@@ -69,6 +69,7 @@ cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --rel
 - VT backend 固有パラメータを変える場合は
   `--vt-enable-pipeline-scheduler <true|false>` / `--vt-pipeline-queue-capacity <N>` を使用する。
 - AV1 は `libaom-av1` で生成した fMP4 `av01` input を使う decode-only 比較。`video-hw decode_to_yuv --input-format mp4 --backend vt --codec av1` と FFmpeg `-hwaccel videotoolbox` decode を同じ入力で測る。`--verify` では FFmpeg software NV12 reference との PSNR-Y も記録し、`--min-psnr-y` で閾値を変更できる。AV1 encode は未実装のため測定対象外。
+- AV1 入力生成は `libaom-av1` が無い環境では `libsvtav1` / `rav1e` にフォールバックする。レポートには `preflight_decode` による `decode_hardware_acceleration` / `decode_usable_in_current_runtime` も記録する。
 
 ### 5) VideoToolbox 精密ベンチ定常運用（直列実行）
 

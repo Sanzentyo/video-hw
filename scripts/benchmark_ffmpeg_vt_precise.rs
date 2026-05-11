@@ -219,6 +219,17 @@ struct CaseRun {
     metrics: Option<InternalMetrics>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct DecodePreflight {
+    resolved_backend: Option<String>,
+    supported_by_contract: Option<bool>,
+    usable_in_current_runtime: Option<bool>,
+    decode_supported: Option<bool>,
+    hardware_acceleration: Option<bool>,
+    output_mode_supported: Option<bool>,
+    reason: Option<String>,
+}
+
 fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -257,6 +268,8 @@ fn main() -> Result<()> {
     };
     let encode_bin = example_bin_path(profile, "encode_synthetic");
     let encode_raw_bin = example_bin_path(profile, "encode_raw_argb");
+    let preflight_bin = example_bin_path(profile, "preflight_decode");
+    let decode_preflight = query_decode_preflight(&preflight_bin, &args)?;
     let video_hw_output =
         output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-vt-{}-precise.bin", args.codec.as_cli()));
@@ -399,6 +412,42 @@ fn main() -> Result<()> {
         "vt_pipeline_queue_capacity: {:?}",
         args.vt_pipeline_queue_capacity
     )?;
+    writeln!(
+        &mut report,
+        "decode_resolved_backend: {}",
+        decode_preflight
+            .resolved_backend
+            .as_deref()
+            .unwrap_or("unknown")
+    )?;
+    writeln!(
+        &mut report,
+        "decode_supported_by_contract: {}",
+        format_optional_bool(decode_preflight.supported_by_contract)
+    )?;
+    writeln!(
+        &mut report,
+        "decode_usable_in_current_runtime: {}",
+        format_optional_bool(decode_preflight.usable_in_current_runtime)
+    )?;
+    writeln!(
+        &mut report,
+        "decode_supported: {}",
+        format_optional_bool(decode_preflight.decode_supported)
+    )?;
+    writeln!(
+        &mut report,
+        "decode_hardware_acceleration: {}",
+        format_optional_bool(decode_preflight.hardware_acceleration)
+    )?;
+    writeln!(
+        &mut report,
+        "decode_output_mode_supported: {}",
+        format_optional_bool(decode_preflight.output_mode_supported)
+    )?;
+    if let Some(reason) = &decode_preflight.reason {
+        writeln!(&mut report, "decode_preflight_reason: {reason}")?;
+    }
     if args.codec == Codec::Av1 {
         writeln!(
             &mut report,
@@ -666,6 +715,76 @@ fn example_bin_path(profile: &str, name: &str) -> PathBuf {
         .join(profile)
         .join("examples")
         .join(format!("{name}{exe_suffix}"))
+}
+
+fn query_decode_preflight(preflight_bin: &Path, args: &Args) -> Result<DecodePreflight> {
+    let output_mode = if args.codec == Codec::Av1 {
+        "nv12"
+    } else {
+        "metadata"
+    };
+    let output = Command::new(preflight_bin)
+        .args([
+            "--backend",
+            "vt",
+            "--codec",
+            args.codec.as_cli(),
+            "--output-mode",
+            output_mode,
+            "--require-hardware",
+            "true",
+        ])
+        .output()
+        .context("run preflight_decode")?;
+    if !output.status.success() {
+        bail!(
+            "preflight_decode failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    parse_decode_preflight(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_decode_preflight(raw: &str) -> Result<DecodePreflight> {
+    let mut report = DecodePreflight::default();
+    for line in raw.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "resolved_backend" => {
+                if value != "none" {
+                    report.resolved_backend = Some(value.to_string());
+                }
+            }
+            "supported_by_contract" => report.supported_by_contract = parse_optional_bool(value),
+            "usable_in_current_runtime" => {
+                report.usable_in_current_runtime = parse_optional_bool(value);
+            }
+            "decode_supported" => report.decode_supported = parse_optional_bool(value),
+            "hardware_acceleration" => report.hardware_acceleration = parse_optional_bool(value),
+            "output_mode_supported" => report.output_mode_supported = parse_optional_bool(value),
+            "reason" => report.reason = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Ok(report)
+}
+
+fn parse_optional_bool(raw: &str) -> Option<bool> {
+    match raw {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn format_optional_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
 }
 
 fn run_case(

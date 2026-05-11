@@ -67,14 +67,23 @@ or better.
   - detail: `output/benchmark-vulkan-av1-1778068469.md`
   - generated fragmented MP4 `av01` decode input is recorded as `decode_input_format: fmp4`
   - NVIDIA: video-hw Vulkan AV1 fMP4 decode 0.144s / 55.412 fps vs FFmpeg Vulkan fMP4 decode 0.311s / 25.712 fps for 8 generated keyframe-only frames at 320x180 (`--release true`, warmup 1, repeat 3)
-- VideoToolbox AV1 fMP4 decode smoke:
-  - `output/benchmark-vt-precise-av1-1778470234.md`
-  - generated 4-frame 320x180 fMP4 `av01` input with FFmpeg `libsvtav1`
+- VideoToolbox AV1 fMP4 decode benchmark:
+  - `output/benchmark-vt-precise-av1-1778473171.md`
+  - generated 30-frame 320x180 fMP4 `av01` input with FFmpeg `libsvtav1`
     fallback because this host's FFmpeg does not provide `libaom-av1`
-  - video-hw VT decode 0.622s vs FFmpeg `-hwaccel videotoolbox` decode 0.141s
-    (`--release false`, warmup 0, repeat 1)
-  - PSNR-Y against FFmpeg software NV12 reference: avg 43.4091 dB, min 42.8169
-    dB over 4 frames
+  - preflight reports `decode_hardware_acceleration=true`,
+    `decode_supported=true`, and `decode_usable_in_current_runtime=true`
+  - video-hw VT decode mean 0.110s vs FFmpeg `-hwaccel videotoolbox` decode mean
+    0.136s (`--release true`, warmup 1, repeat 3)
+  - PSNR-Y against FFmpeg software NV12 reference: avg 43.0278 dB, min 41.6512
+    dB over 30 frames
+- VideoToolbox AV1 fMP4 decode access-order benchmark:
+  - `output/benchmark-fmp4-decode-access-1778473184.md`
+  - `decode_range_iter_contiguous`: 0.014s, 30 frames, min PSNR inf
+  - `decode_sample_sequential_no_cache`: 0.372s with 465 sample reads; decoded
+    cache reduces sequential access to 0.063s with 26/4 hit/miss
+  - `cached_decode_sample_reverse_before`: 0.064s; mismatched
+    `cached_decode_sample_reverse_after` stays slower at 0.364s
 - AV1 frame-type inspection:
   - `output/av1-frame-types/av1-frame-types-1778071015345679600.md`: generated OBU,
     `--gop-size 1`, 8 frame headers, all `frame_type=0`.
@@ -564,15 +573,16 @@ Current safeguards and evidence:
   `scripts/run_vt_precise_suite.rs --include-av1` includes that AV1 pass in the
   serial VT suite;
 - macOS local smoke
-  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --release false --warmup 0 --repeat 1 --frame-count 4 --width 320 --height 180 --verify`
-  passes and records `output/benchmark-vt-precise-av1-1778470234.md`;
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --release true --warmup 1 --repeat 3 --frame-count 30 --width 320 --height 180 --verify`
+  passes and records `output/benchmark-vt-precise-av1-1778473171.md`;
+- `scripts/benchmark_fmp4_decode_access.rs --features backend-vt --release true -- --input output/benchmark-vt-av1-decode-input.mp4 --backend vt --require-hardware --frame-count 30 --reference sequential-baseline`
+  passes and records `output/benchmark-fmp4-decode-access-1778473184.md`;
 - `cargo check --features backend-vt` and
   `cargo clippy --all-targets --features backend-vt` pass, with pre-existing
   warnings only.
 
-Remaining work is to move beyond the short smoke into the regular release
-benchmark matrix, larger fMP4 fixtures, and repeated runs. AV1 encode remains
-unimplemented.
+Remaining work is larger fMP4 fixtures and longer repeated runs. AV1 encode
+remains unimplemented.
 
 ## Next Concrete Work
 
@@ -585,6 +595,6 @@ unimplemented.
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also
    cannot encode.
-4. Extend the VideoToolbox AV1 fMP4 decode smoke into release-mode repeated
-   benchmark coverage and fMP4 access-order benchmarks; AV1 encode still needs a
-   separate implementation.
+4. Extend VideoToolbox AV1 fMP4 decode coverage to larger dimensions, longer
+   clips, and interop fixtures; AV1 encode still needs a separate implementation
+   and should remain unsupported until Apple/FFmpeg expose an AV1 VT encoder.

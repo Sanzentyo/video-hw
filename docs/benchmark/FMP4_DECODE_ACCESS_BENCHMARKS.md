@@ -154,3 +154,20 @@ min PSNR in addition to cache behavior.
   an 8-frame 320x180 AV1 fMP4 and completed all access cases with min PSNR
   46.045 dB. A 160x90 AV1 smoke generated successfully but failed NVDEC submit
   with `CUDA_ERROR_UNKNOWN`, so 320x180 remains the documented smoke size.
+
+## macOS / VideoToolbox AV1 fMP4 Decode
+
+On this macOS machine, a 30-frame 320x180 AV1 fMP4 input generated for the VT
+precise benchmark was measured with `--backend vt --require-hardware` in
+`output/benchmark-fmp4-decode-access-1778473184.md`.
+
+Key numbers:
+
+- `decode_range_iter_contiguous`: 0.014 s, 30 returned frames, 30 sample reads,
+  min PSNR inf against the sequential baseline.
+- `decode_sample_sequential_no_cache`: 0.372 s, 465 sample reads, 984 KB payload
+  read.
+- `cached_decode_sample_sequential`: 0.063 s with 26 decoded cache hits and 4
+  misses for 30 requests.
+- `cached_decode_sample_reverse_before`: 0.064 s with 26/4 hit/miss; the
+  mismatched `cached_decode_sample_reverse_after` control took 0.364 s.
