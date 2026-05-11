@@ -652,22 +652,9 @@ fn main() -> Result<()> {
 }
 
 fn build_examples(profile: &str) -> Result<()> {
-    let mut args = vec![
-        "build",
-        "--examples",
-        "--features",
-        "backend-vt",
-        "--profile",
-        profile,
-    ];
+    let mut args = vec!["build", "--examples", "--features", "backend-vt"];
     if profile == "release" {
-        args = vec![
-            "build",
-            "--examples",
-            "--features",
-            "backend-vt",
-            "--release",
-        ];
+        args.push("--release");
     }
     run_command("cargo", &args, &[])?;
     Ok(())
@@ -858,32 +845,33 @@ fn generate_av1_fmp4_decode_input(args: &Args, path: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("create input dir: {}", parent.display()))?;
     }
-    let output = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc2=size={}x{}:rate=30", args.width, args.height),
-            "-frames:v",
-            &args.frame_count.to_string(),
-            "-c:v",
-            "libaom-av1",
-            "-cpu-used",
-            "8",
-            "-g",
-            "30",
-            "-lag-in-frames",
-            "0",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-f",
-            "mp4",
-            &path.to_string_lossy(),
-        ])
+    let encoder = select_ffmpeg_av1_encoder()?;
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-y",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("testsrc2=size={}x{}:rate=30", args.width, args.height),
+        "-frames:v",
+        &args.frame_count.to_string(),
+        "-c:v",
+        encoder.name,
+    ]);
+    command.args(encoder.extra_args);
+    command.args([
+        "-g",
+        "30",
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        "-f",
+        "mp4",
+        &path.to_string_lossy(),
+    ]);
+    let output = command
         .output()
         .with_context(|| format!("generate AV1 fMP4 input: {}", path.display()))?;
     if !output.status.success() {
@@ -893,6 +881,43 @@ fn generate_av1_fmp4_decode_input(args: &Args, path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct FfmpegAv1Encoder {
+    name: &'static str,
+    extra_args: &'static [&'static str],
+}
+
+fn select_ffmpeg_av1_encoder() -> Result<FfmpegAv1Encoder> {
+    let encoders = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .context("list FFmpeg encoders")?;
+    let listing = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&encoders.stdout),
+        String::from_utf8_lossy(&encoders.stderr)
+    );
+    for encoder in [
+        FfmpegAv1Encoder {
+            name: "libaom-av1",
+            extra_args: &["-cpu-used", "8", "-lag-in-frames", "0"],
+        },
+        FfmpegAv1Encoder {
+            name: "libsvtav1",
+            extra_args: &["-preset", "13"],
+        },
+        FfmpegAv1Encoder {
+            name: "rav1e",
+            extra_args: &["-speed", "10"],
+        },
+    ] {
+        if listing.contains(encoder.name) {
+            return Ok(encoder);
+        }
+    }
+    bail!("ffmpeg does not list a supported AV1 encoder (tried libaom-av1, libsvtav1, rav1e)")
 }
 
 fn generate_ffmpeg_nv12_reference(

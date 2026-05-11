@@ -20,7 +20,7 @@ or better.
 | FFmpeg comparison | `scripts/benchmark_ffmpeg_backends.rs`, NV/Intel precise scripts, reports in `output/*av1*.md` | Done for NVIDIA/Intel |
 | PSNR/MSE verification | `scripts/check_av1_psnr.rs`; latest report `output/av1-psnr/av1-psnr-1778051481.md` | Done for NVIDIA/Intel |
 | Vulkan AV1 decode/encode | `vulkan_av1_decode.rs` implements generated AV1 OBU/fMP4 decode through submit/readback on NVIDIA for keyframe-only, short GOP, and generated long-GOP replay cases; PSNR gates pass against FFmpeg software reference for those scopes. AV1 encode is blocked by current ash bindings lacking `VK_KHR_video_encode_av1` | Decode generated-GOP partial, encode blocked |
-| VideoToolbox AV1 decode/encode | `vt_backend.rs` now has an AV1 fMP4 decode bootstrap path using `av1C`/track dimensions in `VtDecoderOptions`; encode still returns explicit `UnsupportedConfig`; macOS target check covers the backend crate | Decode scaffolded, encode not implemented |
+| VideoToolbox AV1 decode/encode | `vt_backend.rs` now has an AV1 fMP4 decode bootstrap path using `av1C`/track dimensions in `VtDecoderOptions`; `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --verify` passes on macOS with PSNR-Y verification; encode still returns explicit `UnsupportedConfig` | Decode smoke passed, encode not implemented |
 
 ## Latest Verified Results
 
@@ -67,6 +67,14 @@ or better.
   - detail: `output/benchmark-vulkan-av1-1778068469.md`
   - generated fragmented MP4 `av01` decode input is recorded as `decode_input_format: fmp4`
   - NVIDIA: video-hw Vulkan AV1 fMP4 decode 0.144s / 55.412 fps vs FFmpeg Vulkan fMP4 decode 0.311s / 25.712 fps for 8 generated keyframe-only frames at 320x180 (`--release true`, warmup 1, repeat 3)
+- VideoToolbox AV1 fMP4 decode smoke:
+  - `output/benchmark-vt-precise-av1-1778470234.md`
+  - generated 4-frame 320x180 fMP4 `av01` input with FFmpeg `libsvtav1`
+    fallback because this host's FFmpeg does not provide `libaom-av1`
+  - video-hw VT decode 0.622s vs FFmpeg `-hwaccel videotoolbox` decode 0.141s
+    (`--release false`, warmup 0, repeat 1)
+  - PSNR-Y against FFmpeg software NV12 reference: avg 43.4091 dB, min 42.8169
+    dB over 4 frames
 - AV1 frame-type inspection:
   - `output/av1-frame-types/av1-frame-types-1778071015345679600.md`: generated OBU,
     `--gop-size 1`, 8 frame headers, all `frame_type=0`.
@@ -550,17 +558,21 @@ Current safeguards and evidence:
   first `av01` sample entry is available;
 - `scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --verify` now generates
   an AV1 fMP4 input and records decode-only video-hw VT vs FFmpeg VT results,
-  including PSNR-Y against an FFmpeg software NV12 reference;
+  including PSNR-Y against an FFmpeg software NV12 reference. Input generation
+  now uses the first available FFmpeg AV1 encoder among `libaom-av1`,
+  `libsvtav1`, and `rav1e`;
   `scripts/run_vt_precise_suite.rs --include-av1` includes that AV1 pass in the
   serial VT suite;
-- `cargo check -p video-hw-backend-vt --target x86_64-apple-darwin --features backend-vt --tests`
-  passes on the cross target;
-- macOS-target full example/fMP4 checks from this Windows host are blocked by a
-  missing cross `cc` tool before reaching project code.
+- macOS local smoke
+  `cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --release false --warmup 0 --repeat 1 --frame-count 4 --width 320 --height 180 --verify`
+  passes and records `output/benchmark-vt-precise-av1-1778470234.md`;
+- `cargo check --features backend-vt` and
+  `cargo clippy --all-targets --features backend-vt` pass, with pre-existing
+  warnings only.
 
-Remaining work requires a macOS host with AV1 VideoToolbox hardware support to
-run the actual fMP4 decode path, compare with FFmpeg `av1_videotoolbox`, and
-record PSNR/performance. AV1 encode remains unimplemented.
+Remaining work is to move beyond the short smoke into the regular release
+benchmark matrix, larger fMP4 fixtures, and repeated runs. AV1 encode remains
+unimplemented.
 
 ## Next Concrete Work
 
@@ -573,6 +585,6 @@ record PSNR/performance. AV1 encode remains unimplemented.
    adapters exposing encode queue and
    `VK_KHR_video_encode_av1`; report Intel encode as unavailable when FFmpeg also
    cannot encode.
-4. On macOS AV1 hardware, run the new VideoToolbox AV1 fMP4 decode path and
-   update the VT status only after FFmpeg benchmark and PSNR pass; AV1 encode
-   still needs a separate implementation.
+4. Extend the VideoToolbox AV1 fMP4 decode smoke into release-mode repeated
+   benchmark coverage and fMP4 access-order benchmarks; AV1 encode still needs a
+   separate implementation.
