@@ -11,8 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use shiguredo_mp4::{
     Decode, Encode, Mp4FileTime, TrackKind, Uint,
     boxes::{
-        Avc1Box, AvccBox, FtypBox, Hvc1Box, HvccBox, HvccNalUintArray, MoovBox, SampleEntry,
-        VisualSampleEntryFields,
+        Av01Box, Av1cBox, Avc1Box, AvccBox, FtypBox, Hvc1Box, HvccBox, HvccNalUintArray, MoovBox,
+        SampleEntry, VisualSampleEntryFields,
     },
     mux::{Fmp4SegmentMuxer, Sample, SegmentMuxerOptions},
 };
@@ -37,10 +37,14 @@ use video_hw::VulkanEncoderAdapter;
 use video_hw::{
     Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodedChunk,
     EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
+    bitstream::ParameterSets,
 };
 
 use super::{
-    config::{Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary, FragmentFrames, Pts90k},
+    config::{
+        EncodedTrackConfig, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary, FragmentFrames,
+        Pts90k, SampleDuration90k,
+    },
     video_frame::{ArgbFrame, RgbaFrame},
 };
 
@@ -52,6 +56,12 @@ impl WriterCore {
     pub(crate) fn open(config: &Fmp4WriterConfig) -> Result<Self> {
         Ok(Self {
             inner: RecorderState::new(config)?,
+        })
+    }
+
+    pub(crate) fn open_encoded(config: &EncodedTrackConfig) -> Result<Self> {
+        Ok(Self {
+            inner: RecorderState::new_encoded(config)?,
         })
     }
 
@@ -67,6 +77,15 @@ impl WriterCore {
 
     pub(crate) fn set_fragment_frames(&mut self, value: FragmentFrames) -> Result<()> {
         self.inner.set_fragment_frames(value.get().get())
+    }
+
+    pub(crate) fn write_encoded_chunk(
+        &mut self,
+        chunk: EncodedChunk,
+        duration_90k: Option<SampleDuration90k>,
+    ) -> Result<()> {
+        self.inner
+            .handle_chunk_with_duration(chunk, duration_90k.map(SampleDuration90k::get))
     }
 
     pub(crate) fn status(&self) -> Fmp4WriterStatus {
@@ -99,6 +118,7 @@ impl WriterCore {
 struct PendingSample {
     keyframe: bool,
     pts_90k: i64,
+    duration_90k: Option<u32>,
     data: Vec<u8>,
 }
 
@@ -282,7 +302,7 @@ struct RecordingSettings {
 }
 
 struct RecorderState {
-    encoder: BackendEncoderSession,
+    encoder: Option<BackendEncoderSession>,
     muxer: Fmp4SegmentMuxer,
     writer: RecorderFileWriter,
     output_path: PathBuf,
@@ -303,6 +323,8 @@ struct RecorderState {
     vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
+    av1_sequence_header: Option<Vec<u8>>,
+    av1_config: Option<Av1ConfigSummary>,
     sample_entry: Option<SampleEntry>,
     sample_entry_emitted: bool,
     init_written: bool,
@@ -348,7 +370,10 @@ impl RecorderState {
         let default_duration = u32::try_from((90_000 / fps.max(1)).max(1))
             .context("failed to compute default frame duration")?;
         Ok(Self {
-            encoder: BackendEncoderSession::new(resolved_backend, encoder_config)?,
+            encoder: Some(BackendEncoderSession::new(
+                resolved_backend,
+                encoder_config,
+            )?),
             muxer: Fmp4SegmentMuxer::with_options(SegmentMuxerOptions { creation_timestamp })
                 .context("failed to create fMP4 muxer")?,
             writer,
@@ -370,6 +395,8 @@ impl RecorderState {
             vps: None,
             sps: None,
             pps: None,
+            av1_sequence_header: None,
+            av1_config: None,
             sample_entry: None,
             sample_entry_emitted: false,
             init_written: false,
@@ -381,6 +408,69 @@ impl RecorderState {
             packets_seen: 0,
             bytes_written: 0,
         })
+    }
+
+    fn new_encoded(config: &EncodedTrackConfig) -> Result<Self> {
+        let width_u32 = config.frame_size.width().get();
+        let height_u32 = config.frame_size.height().get();
+        let dims = Dimensions {
+            width: config.frame_size.width(),
+            height: config.frame_size.height(),
+        };
+        let width_u16 = u16::try_from(width_u32).context("width must fit in u16")?;
+        let height_u16 = u16::try_from(height_u32).context("height must fit in u16")?;
+        if let Some(parent) = config.output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create output dir: {}", parent.display()))?;
+        }
+        let writer = RecorderFileWriter::spawn(config.output_path.clone())?;
+        let creation_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let fps = config.frame_rate.get().get().max(1);
+        let default_duration = u32::try_from((90_000 / fps).max(1))
+            .context("failed to compute default frame duration")?;
+        let mut state = Self {
+            encoder: None,
+            muxer: Fmp4SegmentMuxer::with_options(SegmentMuxerOptions { creation_timestamp })
+                .context("failed to create fMP4 muxer")?,
+            writer,
+            output_path: config.output_path.clone(),
+            creation_timestamp,
+            dims,
+            width_u16,
+            height_u16,
+            codec: config.codec,
+            timescale: NonZeroU32::new(90_000).expect("constant non-zero"),
+            default_duration,
+            first_input_pts_90k: None,
+            last_submitted_pts_90k: None,
+            next_fallback_pts_90k: 0,
+            last_written_pts_90k: None,
+            pending_submitted_pts_90k: VecDeque::new(),
+            pending_force_keyframe: false,
+            submitted_frames: 0,
+            vps: None,
+            sps: None,
+            pps: None,
+            av1_sequence_header: None,
+            av1_config: None,
+            sample_entry: None,
+            sample_entry_emitted: false,
+            init_written: false,
+            init_bytes_written: None,
+            total_duration_90k: 0,
+            pending_samples: VecDeque::new(),
+            fragment_frames: config.fragment_frames.get().get().max(1),
+            segments_written: 0,
+            packets_seen: 0,
+            bytes_written: 0,
+        };
+        state.apply_initial_parameter_sets(config.initial_parameter_sets.as_ref());
+        state.ensure_sample_entry();
+        Ok(state)
     }
 
     fn submit_rgba_frame(&mut self, frame_rgba: Vec<u8>, pts_90k: i64) -> Result<()> {
@@ -400,6 +490,10 @@ impl RecorderState {
         }
         self.last_submitted_pts_90k = Some(normalized_pts_90k);
         self.encoder
+            .as_mut()
+            .ok_or_else(|| {
+                anyhow!("raw frame submission is not available in an encoded fMP4 session")
+            })?
             .submit(EncodeFrame {
                 dims: self.dims,
                 pts_90k: Some(Timestamp90k(normalized_pts_90k)),
@@ -410,14 +504,29 @@ impl RecorderState {
         self.pending_submitted_pts_90k.push_back(normalized_pts_90k);
         self.pending_force_keyframe = false;
         self.submitted_frames = self.submitted_frames.saturating_add(1);
-        while let Some(chunk) = self.encoder.try_reap().context("encoder try_reap failed")? {
+        loop {
+            let chunk = self
+                .encoder
+                .as_mut()
+                .expect("encoder checked above")
+                .try_reap()
+                .context("encoder try_reap failed")?;
+            let Some(chunk) = chunk else {
+                break;
+            };
             self.handle_chunk(chunk)?;
         }
-        if self.encoder.requires_periodic_fragment_flush()
-            && self.submitted_frames.is_multiple_of(fragment_interval)
-        {
+        let should_flush = self
+            .encoder
+            .as_ref()
+            .expect("encoder checked above")
+            .requires_periodic_fragment_flush()
+            && self.submitted_frames.is_multiple_of(fragment_interval);
+        if should_flush {
             for chunk in self
                 .encoder
+                .as_mut()
+                .expect("encoder checked above")
                 .flush()
                 .context("encoder periodic fragment flush failed")?
             {
@@ -436,12 +545,20 @@ impl RecorderState {
 
     fn finish(mut self) -> Result<RecorderSummaryCompat> {
         let mut flush_packets = 0_u64;
-        for chunk in self.encoder.flush().context("encoder flush failed")? {
-            flush_packets = flush_packets.saturating_add(1);
-            self.handle_chunk(chunk)?;
+        if self.encoder.is_some() {
+            let chunks = self
+                .encoder
+                .as_mut()
+                .expect("encoder exists")
+                .flush()
+                .context("encoder flush failed")?;
+            for chunk in chunks {
+                flush_packets = flush_packets.saturating_add(1);
+                self.handle_chunk(chunk)?;
+            }
         }
         if self.sample_entry.is_none() && !self.pending_samples.is_empty() {
-            bail!("recording ended before SPS/PPS could be observed");
+            bail!("recording ended before codec parameter sets could be observed");
         }
         self.flush_pending_if_ready(true)?;
         self.rewrite_init_segment_with_final_timing()?;
@@ -470,6 +587,14 @@ impl RecorderState {
     }
 
     fn handle_chunk(&mut self, chunk: EncodedChunk) -> Result<()> {
+        self.handle_chunk_with_duration(chunk, None)
+    }
+
+    fn handle_chunk_with_duration(
+        &mut self,
+        chunk: EncodedChunk,
+        duration_90k: Option<u32>,
+    ) -> Result<()> {
         self.packets_seen = self.packets_seen.saturating_add(1);
         if chunk.codec != self.codec {
             bail!(
@@ -494,6 +619,11 @@ impl RecorderState {
             (Codec::Hevc, EncodedLayout::Hvcc) => {
                 hvcc_chunk_to_hvcc_sample(&chunk.data, &mut self.vps, &mut self.sps, &mut self.pps)?
             }
+            (Codec::Av1, EncodedLayout::Av1) => av1_chunk_to_av1_sample(
+                &chunk.data,
+                &mut self.av1_sequence_header,
+                &mut self.av1_config,
+            )?,
             (_, layout) => {
                 bail!(
                     "unsupported encoded layout for fMP4 writer: {} (codec={})",
@@ -507,12 +637,39 @@ impl RecorderState {
             self.pending_samples.push_back(PendingSample {
                 keyframe: chunk.is_keyframe,
                 pts_90k,
+                duration_90k,
                 data: sample_data,
             });
         }
         self.ensure_sample_entry();
         self.flush_pending_if_ready(false)?;
         Ok(())
+    }
+
+    fn apply_initial_parameter_sets(&mut self, parameter_sets: Option<&ParameterSets>) {
+        match parameter_sets {
+            Some(ParameterSets::H264(sets)) => {
+                self.sps = sets.sps.first().cloned();
+                self.pps = sets.pps.first().cloned();
+            }
+            Some(ParameterSets::Hevc(sets)) => {
+                self.vps = sets.vps.first().cloned();
+                self.sps = sets.sps.first().cloned();
+                self.pps = sets.pps.first().cloned();
+            }
+            Some(ParameterSets::Av1(sets)) => {
+                self.av1_sequence_header = sets.config_obus.first().cloned();
+                self.av1_config = self
+                    .av1_sequence_header
+                    .as_deref()
+                    .and_then(|sequence_header| {
+                        find_av1_sequence_header_obu(sequence_header)
+                            .and_then(|(_, payload)| parse_av1_sequence_header(payload))
+                    })
+                    .or(Some(Av1ConfigSummary::default()));
+            }
+            None => {}
+        }
     }
 
     fn ensure_sample_entry(&mut self) {
@@ -541,6 +698,19 @@ impl RecorderState {
                     vps,
                     sps,
                     pps,
+                ))
+            }
+            Codec::Av1 => {
+                let (Some(sequence_header), Some(config)) =
+                    (&self.av1_sequence_header, &self.av1_config)
+                else {
+                    return;
+                };
+                Some(create_av1_sample_entry(
+                    self.width_u16,
+                    self.height_u16,
+                    sequence_header,
+                    *config,
                 ))
             }
         };
@@ -583,7 +753,12 @@ impl RecorderState {
             } else {
                 None
             };
-            let duration = self.sample_duration_for_pts(pending.pts_90k);
+            let duration = pending
+                .duration_90k
+                .unwrap_or_else(|| self.sample_duration_for_pts(pending.pts_90k));
+            if pending.duration_90k.is_some() {
+                self.last_written_pts_90k = Some(pending.pts_90k);
+            }
             self.total_duration_90k = self.total_duration_90k.saturating_add(u64::from(duration));
             let data_offset =
                 u64::try_from(payload.len()).context("segment payload offset overflow")?;
@@ -779,6 +954,10 @@ impl BackendEncoderSession {
             BackendKind::VideoToolbox => Self::VideoToolbox(Box::new(video_hw::EncodeSession::<
                 VtEncoderAdapter,
             >::new(config))),
+            #[allow(unreachable_patterns)]
+            other => {
+                bail!("encoder backend {other} is not compiled into video-hw-fmp4")
+            }
         };
         Ok(session)
     }
@@ -1006,6 +1185,69 @@ fn create_hevc_sample_entry(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Av1ConfigSummary {
+    seq_profile: u8,
+    seq_level_idx_0: u8,
+    seq_tier_0: u8,
+    high_bitdepth: u8,
+    twelve_bit: u8,
+    monochrome: u8,
+    chroma_subsampling_x: u8,
+    chroma_subsampling_y: u8,
+    chroma_sample_position: u8,
+}
+
+impl Default for Av1ConfigSummary {
+    fn default() -> Self {
+        Self {
+            seq_profile: 0,
+            seq_level_idx_0: 31,
+            seq_tier_0: 0,
+            high_bitdepth: 0,
+            twelve_bit: 0,
+            monochrome: 0,
+            chroma_subsampling_x: 1,
+            chroma_subsampling_y: 1,
+            chroma_sample_position: 0,
+        }
+    }
+}
+
+fn create_av1_sample_entry(
+    width: u16,
+    height: u16,
+    sequence_header: &[u8],
+    config: Av1ConfigSummary,
+) -> SampleEntry {
+    SampleEntry::Av01(Av01Box {
+        visual: VisualSampleEntryFields {
+            data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+            width,
+            height,
+            horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+            vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+            frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+            compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+            depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+        },
+        av1c_box: Av1cBox {
+            seq_profile: Uint::new(config.seq_profile),
+            seq_level_idx_0: Uint::new(config.seq_level_idx_0),
+            seq_tier_0: Uint::new(config.seq_tier_0),
+            high_bitdepth: Uint::new(config.high_bitdepth),
+            twelve_bit: Uint::new(config.twelve_bit),
+            monochrome: Uint::new(config.monochrome),
+            chroma_subsampling_x: Uint::new(config.chroma_subsampling_x),
+            chroma_subsampling_y: Uint::new(config.chroma_subsampling_y),
+            chroma_sample_position: Uint::new(config.chroma_sample_position),
+            initial_presentation_delay_minus_one: None,
+            config_obus: sequence_header.to_vec(),
+        },
+        unknown_boxes: vec![],
+    })
+}
+
 fn annexb_chunk_to_avcc_sample(
     annexb: &[u8],
     sps_out: &mut Option<Vec<u8>>,
@@ -1098,6 +1340,23 @@ fn hvcc_chunk_to_hvcc_sample(
     repack_length_prefixed_nalus(&sample_nalus).map(Some)
 }
 
+fn av1_chunk_to_av1_sample(
+    data: &[u8],
+    sequence_header_out: &mut Option<Vec<u8>>,
+    config_out: &mut Option<Av1ConfigSummary>,
+) -> Result<Option<Vec<u8>>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+    if sequence_header_out.is_none()
+        && let Some((obu, payload)) = find_av1_sequence_header_obu(data)
+    {
+        *sequence_header_out = Some(obu.to_vec());
+        *config_out = Some(parse_av1_sequence_header(payload).unwrap_or_default());
+    }
+    Ok(Some(data.to_vec()))
+}
+
 fn split_annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
     let mut nalus = Vec::new();
     let mut cursor = 0usize;
@@ -1171,6 +1430,152 @@ fn hevc_nal_type(nalu: &[u8]) -> u8 {
     (nalu[0] >> 1) & 0x3f
 }
 
+fn find_av1_sequence_header_obu(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let (obu_type, payload_start, end) = parse_av1_obu_bounds(data, offset)?;
+        if obu_type == 1 {
+            return Some((&data[offset..end], &data[payload_start..end]));
+        }
+        offset = end;
+    }
+    None
+}
+
+fn parse_av1_obu_bounds(data: &[u8], offset: usize) -> Option<(u8, usize, usize)> {
+    let header = *data.get(offset)?;
+    let obu_type = (header >> 3) & 0x0f;
+    let has_extension = (header & 0x04) != 0;
+    let has_size_field = (header & 0x02) != 0;
+    let mut cursor = offset.checked_add(1)?;
+    if has_extension {
+        cursor = cursor.checked_add(1)?;
+        data.get(cursor - 1)?;
+    }
+    if !has_size_field {
+        return None;
+    }
+    let (payload_size, leb_len) = read_av1_leb128(&data[cursor..])?;
+    cursor = cursor.checked_add(leb_len)?;
+    let payload_start = cursor;
+    let payload_size = usize::try_from(payload_size).ok()?;
+    let end = cursor.checked_add(payload_size)?;
+    if end > data.len() {
+        return None;
+    }
+    Some((obu_type, payload_start, end))
+}
+
+fn read_av1_leb128(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (i, byte) in data.iter().copied().take(8).enumerate() {
+        value |= u64::from(byte & 0x7f) << (i * 7);
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+    }
+    None
+}
+
+fn parse_av1_sequence_header(payload: &[u8]) -> Option<Av1ConfigSummary> {
+    let mut bits = BitReader::new(payload);
+    let seq_profile = bits.read_bits(3)? as u8;
+    let _still_picture = bits.read_bits(1)?;
+    let reduced_still_picture_header = bits.read_bits(1)? != 0;
+    let mut seq_level_idx_0 = 31;
+    let mut seq_tier_0 = 0;
+    if reduced_still_picture_header {
+        seq_level_idx_0 = bits.read_bits(5)? as u8;
+    } else {
+        let timing_info_present_flag = bits.read_bits(1)? != 0;
+        if timing_info_present_flag {
+            let _num_units_in_display_tick = bits.read_bits(32)?;
+            let _time_scale = bits.read_bits(32)?;
+            let equal_picture_interval = bits.read_bits(1)? != 0;
+            if equal_picture_interval {
+                let _num_ticks_per_picture_minus_1 = bits.read_uvlc()?;
+            }
+            let decoder_model_info_present_flag = bits.read_bits(1)? != 0;
+            if decoder_model_info_present_flag {
+                let buffer_delay_length_minus_1 = bits.read_bits(5)?;
+                let _num_units_in_decoding_tick = bits.read_bits(32)?;
+                let _buffer_removal_time_length_minus_1 = bits.read_bits(5)?;
+                let _frame_presentation_time_length_minus_1 = bits.read_bits(5)?;
+                let _ = buffer_delay_length_minus_1;
+            }
+        }
+        let initial_display_delay_present_flag = bits.read_bits(1)? != 0;
+        let operating_points_cnt_minus_1 = bits.read_bits(5)?;
+        for operating_point in 0..=operating_points_cnt_minus_1 {
+            let _operating_point_idc = bits.read_bits(12)?;
+            let seq_level_idx = bits.read_bits(5)? as u8;
+            let seq_tier = if seq_level_idx > 7 {
+                bits.read_bits(1)? as u8
+            } else {
+                0
+            };
+            if initial_display_delay_present_flag {
+                let initial_display_delay_present_for_this_op = bits.read_bits(1)? != 0;
+                if initial_display_delay_present_for_this_op {
+                    let _initial_display_delay_minus_1 = bits.read_bits(4)?;
+                }
+            }
+            if operating_point == 0 {
+                seq_level_idx_0 = seq_level_idx;
+                seq_tier_0 = seq_tier;
+            }
+        }
+    }
+
+    Some(Av1ConfigSummary {
+        seq_profile,
+        seq_level_idx_0,
+        seq_tier_0,
+        ..Av1ConfigSummary::default()
+    })
+}
+
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u64> {
+        let mut value = 0u64;
+        for _ in 0..count {
+            let byte = *self.data.get(self.bit_offset / 8)?;
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            value = (value << 1) | u64::from(bit);
+            self.bit_offset = self.bit_offset.checked_add(1)?;
+        }
+        Some(value)
+    }
+
+    fn read_uvlc(&mut self) -> Option<u64> {
+        let mut leading_zeroes = 0usize;
+        while self.read_bits(1)? == 0 {
+            leading_zeroes = leading_zeroes.checked_add(1)?;
+        }
+        if leading_zeroes >= 63 {
+            return None;
+        }
+        let suffix = if leading_zeroes == 0 {
+            0
+        } else {
+            self.read_bits(leading_zeroes)?
+        };
+        Some((1u64 << leading_zeroes) - 1 + suffix)
+    }
+}
+
 fn patch_fmp4_init_segment_timing(
     init_segment: &[u8],
     creation_timestamp: Duration,
@@ -1239,4 +1644,89 @@ fn rgba_to_argb_bytes(rgba: &[u8]) -> Vec<u8> {
         argb.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     argb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn av1_chunk_preserves_obu_payload_and_caches_sequence_header() {
+        let sequence_header = av1_obu(1, &[0x00]);
+        let frame = av1_obu(6, &[0x80]);
+        let mut chunk = av1_obu(2, &[]);
+        chunk.extend_from_slice(&sequence_header);
+        chunk.extend_from_slice(&frame);
+
+        let mut cached_sequence_header = None;
+        let mut cached_config = None;
+        let sample =
+            av1_chunk_to_av1_sample(&chunk, &mut cached_sequence_header, &mut cached_config)
+                .expect("AV1 sample conversion")
+                .expect("sample payload");
+
+        assert_eq!(sample, chunk);
+        assert_eq!(
+            cached_sequence_header.as_deref(),
+            Some(sequence_header.as_slice())
+        );
+        assert!(cached_config.is_some());
+
+        let second_frame = av1_obu(6, &[0x81]);
+        let second_sample = av1_chunk_to_av1_sample(
+            &second_frame,
+            &mut cached_sequence_header,
+            &mut cached_config,
+        )
+        .expect("second AV1 sample conversion")
+        .expect("second sample payload");
+        assert_eq!(second_sample, second_frame);
+        assert_eq!(
+            cached_sequence_header.as_deref(),
+            Some(sequence_header.as_slice())
+        );
+    }
+
+    #[test]
+    fn av1_sample_entry_uses_sequence_header_as_av1c_config_obus() {
+        let sequence_header = av1_obu(1, &[0x00]);
+        let entry = create_av1_sample_entry(
+            320,
+            180,
+            &sequence_header,
+            Av1ConfigSummary {
+                seq_profile: 1,
+                seq_level_idx_0: 8,
+                seq_tier_0: 1,
+                high_bitdepth: 1,
+                twelve_bit: 0,
+                monochrome: 0,
+                chroma_subsampling_x: 1,
+                chroma_subsampling_y: 0,
+                chroma_sample_position: 2,
+            },
+        );
+
+        let SampleEntry::Av01(av01) = entry else {
+            panic!("expected av01 sample entry");
+        };
+        assert_eq!(av01.visual.width, 320);
+        assert_eq!(av01.visual.height, 180);
+        assert_eq!(av01.av1c_box.config_obus, sequence_header);
+        assert_eq!(av01.av1c_box.seq_profile.get(), 1);
+        assert_eq!(av01.av1c_box.seq_level_idx_0.get(), 8);
+        assert_eq!(av01.av1c_box.seq_tier_0.get(), 1);
+        assert_eq!(av01.av1c_box.high_bitdepth.get(), 1);
+        assert_eq!(av01.av1c_box.chroma_subsampling_y.get(), 0);
+        assert_eq!(av01.av1c_box.chroma_sample_position.get(), 2);
+    }
+
+    fn av1_obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 128);
+        let mut out = Vec::with_capacity(payload.len() + 2);
+        out.push((obu_type << 3) | 0x02);
+        out.push(payload.len() as u8);
+        out.extend_from_slice(payload);
+        out
+    }
 }

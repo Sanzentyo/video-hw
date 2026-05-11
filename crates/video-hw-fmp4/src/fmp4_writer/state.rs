@@ -15,8 +15,24 @@ impl core::fmt::Debug for SyncRecording {
     }
 }
 
+pub struct SyncEncodedRecording {
+    pub(crate) core: WriterCore,
+}
+
+impl core::fmt::Debug for SyncEncodedRecording {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SyncEncodedRecording")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(feature = "async-session")]
 pub struct AsyncRecording {
+    pub(crate) handle: AsyncWriterHandle,
+}
+
+#[cfg(feature = "async-session")]
+pub struct AsyncEncodedRecording {
     pub(crate) handle: AsyncWriterHandle,
 }
 

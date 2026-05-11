@@ -11,6 +11,8 @@
 - `spec/TEST_SPEC_INVENTORY.md`（現存テスト仕様の棚卸し）
 - `spec/FEATURE_GATING_AND_DEAD_CODE_POLICY.md`（feature有効範囲とdead code運用）
 - `status/STATUS.md`
+- `status/AV1_BACKEND_STATUS_2026-05-06.md`（AV1 backend / fMP4 / FFmpeg parity の完了監査）
+- `status/AV1_COMPLETION_AUDIT_2026-05-06.md`（AV1 目標に対する prompt-to-artifact 監査）
 - `status/BENCHMARK_2026-02-18.md`
 - `status/FFMPEG_VT_COMPARISON_2026-02-19.md`
 - `status/FFMPEG_NV_COMPARISON_2026-02-19.md`
@@ -18,9 +20,17 @@
 - `benchmark/FMP4_DECODE_ACCESS_BENCHMARKS.md`（連続/単発/ランダム decode と `CachedFrameDecoder` の benchmark 手順）
 - `../scripts/README.md`（スクリプト実装方針）
 
+## 責務境界
+
+- `video-hw-core::bitstream` は backend 非依存の codec payload utility です。Annex-B / length-prefixed sample 変換、NALU 分割、parameter set 抽出、access unit assembly を扱います。
+- `video-hw-fmp4` は fMP4/container と sample entry 管理を担当します。raw frame writer と encoded stream writer は typestate session で分岐します。
+- WebRTC/RTP/signaling/GUI/relay policy はこの repository の責務外で、上位アプリが `video-hw-core::bitstream` と `video-hw-fmp4` の public API を組み合わせます。
+
 ## 計画
 
 - `plan/ROADMAP.md`
+- `plan/VULKAN_AV1_IMPLEMENTATION_PLAN_2026-05-06.md`（Vulkan AV1 decode/encode の実装計画）
+- `plan/WEBRTC_VIDEO_TYPESTATE_INTEGRATION_REQUEST_2026-05-07.md`（`webrtc-video` 連携で必要な typestate/newtype API 追加依頼）
 - `plan/NEXT_ACTION_PLAN_2026-02-23.md`（deepresearchベースの短期実行計画）
 - `plan/API_REDESIGN_BLUEPRINT_2026-02-21.md`（互換非維持の新API設計）
 - `plan/PIPELINE_TASK_DISTRIBUTION_DESIGN_2026-02-19.md`

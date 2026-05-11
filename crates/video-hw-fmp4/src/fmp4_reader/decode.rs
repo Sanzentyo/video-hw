@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result, anyhow};
+use shiguredo_mp4::boxes::SampleEntry;
 use video_hw::{
-    AnyDecodeSession, Backend, BackendError, BackendKind, BitstreamInput, DecodeOutputMode,
-    DecodedFrame, DecoderConfig, Timestamp90k,
+    AnyDecodeSession, Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput,
+    Codec, DecodeOutputMode, DecodedFrame, DecoderConfig, Timestamp90k, VtDecoderOptions,
 };
 
 use super::{
@@ -821,6 +822,7 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
+        apply_track_decoder_options(&mut config, &track);
         let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let resolved_backend = diagnostics.resolved_backend;
@@ -913,6 +915,7 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
+        apply_track_decoder_options(&mut config, &track);
         let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let resolved_backend = diagnostics.resolved_backend;
@@ -1022,6 +1025,7 @@ impl<'a> FrameDecoder<'a> {
         };
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
+        apply_track_decoder_options(&mut config, &track);
         let (session, diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let (wanted_sample_ids, sample_meta_by_id, presentation_index_by_id, end_pts) = {
@@ -1148,6 +1152,7 @@ impl<'a> FrameDecoder<'a> {
         let fps = request.fps.unwrap_or_else(|| estimate_fps(&samples)).max(1);
         let mut config = DecoderConfig::new(codec, fps, request.require_hardware);
         config.output_mode = request.output_mode;
+        apply_track_decoder_options(&mut config, &track);
         let (mut session, mut diagnostics) = create_decode_session(request.backend, config)
             .with_context(|| format!("failed to create decoder session for {}", request.backend))?;
         let resolved_backend = diagnostics.resolved_backend;
@@ -1356,6 +1361,47 @@ fn create_decode_session(
     }
 }
 
+fn apply_track_decoder_options(config: &mut DecoderConfig, track: &Fmp4Track) {
+    if config.codec != Codec::Av1 {
+        return;
+    }
+    let Some(SampleEntry::Av01(av01)) = track.sample_entry.as_ref() else {
+        return;
+    };
+    let av1c_box = &av01.av1c_box;
+    config.backend_options = BackendDecoderOptions::VideoToolbox(VtDecoderOptions {
+        video_width: Some(av01.visual.width),
+        video_height: Some(av01.visual.height),
+        av1c_record: Some(av1c_record_from_sample_entry(av01)),
+        av1_config_obus: Some(av1c_box.config_obus.clone()),
+        ..Default::default()
+    });
+}
+
+fn av1c_record_from_sample_entry(av01: &shiguredo_mp4::boxes::Av01Box) -> Vec<u8> {
+    let av1c = &av01.av1c_box;
+    let mut out = Vec::with_capacity(4 + av1c.config_obus.len());
+    out.push(0x80 | 1);
+    out.push((av1c.seq_profile.get() << 5) | av1c.seq_level_idx_0.get());
+    out.push(
+        (av1c.seq_tier_0.get() << 7)
+            | (av1c.high_bitdepth.get() << 6)
+            | (av1c.twelve_bit.get() << 5)
+            | (av1c.monochrome.get() << 4)
+            | (av1c.chroma_subsampling_x.get() << 3)
+            | (av1c.chroma_subsampling_y.get() << 2)
+            | av1c.chroma_sample_position.get(),
+    );
+    out.push(
+        av1c.initial_presentation_delay_minus_one
+            .as_ref()
+            .map(|value| 0x10 | value.get())
+            .unwrap_or(0),
+    );
+    out.extend_from_slice(&av1c.config_obus);
+    out
+}
+
 fn submit_sample(
     session: &mut AnyDecodeSession,
     track: &Fmp4Track,
@@ -1367,12 +1413,12 @@ fn submit_sample(
     if let Some(pts) = pts_90k {
         collect.pts_to_sample.insert(pts.0, sample_id);
     }
-    let annexb = sample
-        .to_annexb()
-        .with_context(|| format!("failed to convert sample {sample_id} to Annex-B"))?;
+    let payload = sample
+        .to_decode_payload()
+        .with_context(|| format!("failed to prepare sample {sample_id} decoder payload"))?;
     loop {
         match session.submit(BitstreamInput::AnnexBChunk {
-            chunk: annexb.clone(),
+            chunk: payload.clone(),
             pts_90k,
         }) {
             Ok(()) => break,
@@ -1878,15 +1924,30 @@ fn window_range_from_order(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    #[cfg(any(
+        all(target_os = "macos", feature = "backend-vt"),
+        all(
+            any(
+                feature = "backend-nvidia",
+                feature = "backend-intel",
+                feature = "backend-vulkan"
+            ),
+            any(target_os = "linux", target_os = "windows")
+        )
+    ))]
     use std::{
         fs,
-        num::NonZeroU32,
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};
+    use shiguredo_mp4::{
+        Uint,
+        boxes::{Av01Box, Av1cBox, VisualSampleEntryFields},
+    };
     #[cfg(any(
         all(target_os = "macos", feature = "backend-vt"),
         all(
@@ -1899,7 +1960,55 @@ mod tests {
         )
     ))]
     use video_hw::{Codec, DecoderConfig};
-    use video_hw::{DecodedFrame, Dimensions};
+
+    #[test]
+    fn av1_track_options_preserve_fmp4_av1c_record() {
+        let entry = Av01Box {
+            visual: VisualSampleEntryFields {
+                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+                width: 320,
+                height: 180,
+                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+            },
+            av1c_box: Av1cBox {
+                seq_profile: Uint::new(0),
+                seq_level_idx_0: Uint::new(31),
+                seq_tier_0: Uint::new(1),
+                high_bitdepth: Uint::new(0),
+                twelve_bit: Uint::new(0),
+                monochrome: Uint::new(0),
+                chroma_subsampling_x: Uint::new(1),
+                chroma_subsampling_y: Uint::new(1),
+                chroma_sample_position: Uint::new(0),
+                initial_presentation_delay_minus_one: Some(Uint::new(3)),
+                config_obus: vec![0x12, 0x00, 0x0a],
+            },
+            unknown_boxes: vec![],
+        };
+        let track = Fmp4Track {
+            track_id: TrackId(1),
+            kind: TrackKind::Video,
+            duration: 1,
+            timescale: NonZeroU32::new(90_000).unwrap(),
+            sample_entry: Some(SampleEntry::Av01(entry)),
+        };
+        let mut config = DecoderConfig::new(Codec::Av1, 30, false);
+        apply_track_decoder_options(&mut config, &track);
+        let BackendDecoderOptions::VideoToolbox(options) = config.backend_options else {
+            panic!("AV1 fMP4 track should attach VideoToolbox decoder options");
+        };
+        assert_eq!(options.video_width, Some(320));
+        assert_eq!(options.video_height, Some(180));
+        assert_eq!(options.av1_config_obus, Some(vec![0x12, 0x00, 0x0a]));
+        assert_eq!(
+            options.av1c_record,
+            Some(vec![0x81, 0x1f, 0x8c, 0x13, 0x12, 0x00, 0x0a])
+        );
+    }
 
     #[test]
     fn frame_decode_request_defaults_to_auto_rgb() {

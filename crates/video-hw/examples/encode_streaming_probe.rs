@@ -234,6 +234,7 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
+        "av1" => Ok(Codec::Av1),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
 }

@@ -24,6 +24,8 @@ struct Cli {
     frames: u32,
     #[arg(long, default_value = "h264")]
     codec: String,
+    #[arg(long, default_value = "auto")]
+    backend: String,
     #[arg(long, default_value_t = 30)]
     fragment_frames: usize,
     #[arg(long, default_value_t = false)]
@@ -35,17 +37,19 @@ fn main() -> Result<()> {
     let codec = match cli.codec.as_str() {
         "h264" => Codec::H264,
         "hevc" | "h265" => Codec::Hevc,
+        "av1" => Codec::Av1,
         other => anyhow::bail!("unsupported codec: {other}"),
     };
     let frame_size = FrameSize::new(
         NonZeroU32::new(cli.width).context("width must be > 0")?,
         NonZeroU32::new(cli.height).context("height must be > 0")?,
     );
+    let backend: Backend = cli.backend.parse()?;
     let config = Fmp4WriterConfig {
         output_path: cli.output,
         frame_size,
         frame_rate: FrameRate::new(NonZeroU32::new(cli.fps).context("fps must be > 0")?),
-        backend: Backend::Auto,
+        backend,
         codec,
         require_hardware: cli.require_hardware,
         intel_force_software: false,

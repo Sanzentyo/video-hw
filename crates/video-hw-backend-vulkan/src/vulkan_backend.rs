@@ -6,26 +6,72 @@ use ash::vk;
 use vk_video::parameters::{DecoderParameters, RateControl, VideoParameters};
 use vk_video::{
     BytesDecoder, BytesEncoder, EncodedInputChunk, Frame as VkFrame, RawFrameData, VulkanDevice,
-    VulkanInstance,
+    VulkanInstance, WgpuTexturesDecoder,
 };
 
 use crate::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame, VideoDecoder,
-    VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
+    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame,
+    Nv12FramePayload, VideoDecoder, VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions,
+    argb_to_nv12, nv12_to_rgb24,
+    vulkan_av1_decode::{
+        Av1DecodeCommandVisit, Av1DecodePictureViews, Av1DecodePrerequisiteProbe,
+        av1_display_readback_indices, build_av1_aligned_key_frame_decode_command_skeleton,
+        build_av1_decode_info_skeleton, build_av1_decode_info_skeletons,
+        build_av1_decode_picture_info_skeleton, build_av1_decode_submit_skeleton,
+        build_av1_key_frame_decode_command_skeleton, count_av1_display_frames,
+        decode_av1_bitstream_to_nv12_frames, extract_av1_std_sequence_header,
+        inspect_av1_low_overhead_obus, probe_av1_decode_prerequisites,
+        probe_av1_decode_session_parameters_for_bitstream, submit_av1_bitstream_without_readback,
+    },
     vulkan_hevc_decode::{
         HevcDecodePrerequisiteProbe, HevcDecodeSubmitExecutionProbe, HevcDecodeSubmitSkeletonProbe,
         HevcVideoSessionCreateProbe, HevcVideoSessionParametersCreateProbe,
         extract_hevc_access_unit_headers, extract_hevc_parameter_sets_annexb,
-        probe_hevc_decode_prerequisites, probe_hevc_decode_session_bootstrap,
-        probe_hevc_decode_session_bootstrap_with_access_unit_limit,
+        probe_hevc_decode_prerequisites,
+        probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index,
     },
-    vulkan_hevc_encode::{HevcEncodePrerequisiteProbe, probe_hevc_encode_prerequisites},
+    vulkan_hevc_encode::{
+        HevcEncodePrerequisiteProbe, encode_hevc_idr_frames_annexb, probe_hevc_encode_prerequisites,
+    },
 };
 
 const HEVC_DECODE_INFO_READBACK_NON_ZERO_FLAG: u32 = 1;
 const HEVC_DECODE_INFO_SLOT_SHIFT: u32 = 1;
 const HEVC_DECODE_INFO_PROBE_COVERED_FLAG: u32 = 1 << 31;
+
+#[derive(Debug, Clone)]
+pub struct VulkanAdapterReport {
+    pub index: usize,
+    pub name: String,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub supports_decoding: bool,
+    pub supports_encoding: bool,
+}
+
+pub fn vulkan_adapter_reports() -> Result<Vec<VulkanAdapterReport>, BackendError> {
+    let instance = VulkanInstance::new().map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to initialize Vulkan: {err}"))
+    })?;
+    let adapters = instance.iter_adapters(None).map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
+    })?;
+    Ok(adapters
+        .enumerate()
+        .map(|(index, adapter)| {
+            let info = adapter.info();
+            VulkanAdapterReport {
+                index,
+                name: info.name.clone(),
+                vendor_id: info.device_properties.vendor_id,
+                device_id: info.device_properties.device_id,
+                supports_decoding: adapter.supports_decoding(),
+                supports_encoding: adapter.supports_encoding(),
+            }
+        })
+        .collect())
+}
 
 pub struct VulkanDecoderAdapter {
     config: DecoderConfig,
@@ -74,8 +120,14 @@ impl VulkanDecoderAdapter {
         if matches!(self.config.codec, Codec::Hevc) {
             return self.decode_pending_hevc_bitstream(bitstream);
         }
+        if matches!(self.config.codec, Codec::Av1) {
+            return self.decode_pending_av1_bitstream(bitstream);
+        }
+        if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+            return self.decode_pending_h264_metadata(bitstream);
+        }
         ensure_vk_codec_supported(self.config.codec, "decode")?;
-        let mut decoder = create_vk_bytes_decoder().map_err(|err| {
+        let mut decoder = create_vk_bytes_decoder(self.options.adapter_index).map_err(|err| {
             if !self.config.require_hardware && self.options.allow_software_fallback.unwrap_or(true)
             {
                 BackendError::UnsupportedConfig(format!(
@@ -104,6 +156,48 @@ impl VulkanDecoderAdapter {
         )
     }
 
+    fn decode_pending_h264_metadata(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
+        ensure_vk_codec_supported(self.config.codec, "decode")?;
+        let mut decoder =
+            create_vk_wgpu_textures_decoder(self.options.adapter_index).map_err(|err| {
+                if !self.config.require_hardware
+                    && self.options.allow_software_fallback.unwrap_or(true)
+                {
+                    BackendError::UnsupportedConfig(format!(
+                        "{err}; software fallback is not available in direct Vulkan backend"
+                    ))
+                } else {
+                    err
+                }
+            })?;
+        let mut decoded = decoder
+            .decode(EncodedInputChunk {
+                data: bitstream,
+                pts: None,
+            })
+            .map_err(|err| {
+                BackendError::UnsupportedConfig(format!("Vulkan metadata decode failed: {err}"))
+            })?;
+        decoded.extend(decoder.flush().map_err(|err| {
+            BackendError::UnsupportedConfig(format!("Vulkan metadata decode flush failed: {err}"))
+        })?);
+        let pts_step = decode_pts_step(self.config.fps);
+        decoded
+            .into_iter()
+            .enumerate()
+            .map(|(index, decoded_frame)| {
+                Ok(metadata_only_frame(
+                    decoded_frame.data.width() as usize,
+                    decoded_frame.data.height() as usize,
+                    Some(
+                        self.next_pts_90k
+                            .saturating_add(usize_to_i64(index).saturating_mul(pts_step)),
+                    ),
+                ))
+            })
+            .collect()
+    }
+
     fn decode_pending_hevc_bitstream(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
         let metadata_only = matches!(self.config.output_mode, DecodeOutputMode::Metadata);
         let access_unit_headers = extract_hevc_access_unit_headers(bitstream).map_err(|err| {
@@ -112,13 +206,26 @@ impl VulkanDecoderAdapter {
             ))
         })?;
         let submit_probe_access_unit_limit = (!metadata_only).then_some(access_unit_headers.len());
-        let bootstrap = probe_hevc_decode_session_bootstrap_with_access_unit_limit(
-            bitstream,
-            submit_probe_access_unit_limit,
-        )
-        .map_err(|_| {
-            BackendError::UnsupportedConfig(hevc_decode_blocker_message_with_bitstream(bitstream))
-        })?;
+        let physical_device_index = resolve_hevc_decode_physical_device_index();
+        let bootstrap =
+            probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                bitstream,
+                submit_probe_access_unit_limit,
+                physical_device_index,
+            )
+            .or_else(|_| {
+                probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                    bitstream,
+                    submit_probe_access_unit_limit,
+                    physical_device_index,
+                )
+            })
+            .map_err(|_| {
+                BackendError::UnsupportedConfig(hevc_decode_blocker_message_with_bitstream(
+                    bitstream,
+                    physical_device_index,
+                ))
+            })?;
         let (
             output_format,
             coded_width,
@@ -158,13 +265,13 @@ impl VulkanDecoderAdapter {
             HevcDecodeSubmitExecutionProbe::Failed(err) => {
                 return Err(BackendError::UnsupportedConfig(format!(
                     "Vulkan HEVC decode submit execution failed: {err}; {}",
-                    hevc_decode_blocker_message_with_bitstream(bitstream)
+                    hevc_decode_blocker_message_with_bitstream(bitstream, physical_device_index)
                 )));
             }
             HevcDecodeSubmitExecutionProbe::Skipped(reason) => {
                 return Err(BackendError::UnsupportedConfig(format!(
                     "Vulkan HEVC decode submit execution was skipped: {reason}; {}",
-                    hevc_decode_blocker_message_with_bitstream(bitstream)
+                    hevc_decode_blocker_message_with_bitstream(bitstream, physical_device_index)
                 )));
             }
         };
@@ -250,6 +357,118 @@ impl VulkanDecoderAdapter {
             self.next_pts_90k,
             pts_step,
         ))
+    }
+
+    fn decode_pending_av1_bitstream(&self, bitstream: &[u8]) -> Result<Vec<Frame>, BackendError> {
+        let decodes = build_av1_decode_info_skeletons(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode could not build decode-info skeletons: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        if matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+            submit_av1_bitstream_without_readback(bitstream).map_err(|err| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan AV1 decode submit failed: {err}; {}",
+                    av1_decode_blocker_message_with_bitstream(bitstream)
+                ))
+            })?;
+            let display_frame_count = count_av1_display_frames(bitstream).map_err(|err| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan AV1 decode could not count display frames: {err}; {}",
+                    av1_decode_blocker_message_with_bitstream(bitstream)
+                ))
+            })?;
+            let Some(first_decode) = decodes.first() else {
+                return Ok(Vec::new());
+            };
+            let width = usize::try_from(first_decode.coded_width).map_err(|_| {
+                BackendError::InvalidInput("decoded AV1 width does not fit in usize".to_string())
+            })?;
+            let height = usize::try_from(first_decode.coded_height).map_err(|_| {
+                BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
+            })?;
+            let pts_step = decode_pts_step(self.config.fps);
+            return (0..display_frame_count)
+                .map(|index| {
+                    let pts = self
+                        .next_pts_90k
+                        .saturating_add(usize_to_i64(index).saturating_mul(pts_step));
+                    let mut frame = metadata_only_frame(width, height, Some(pts));
+                    frame.decode_info_flags = Some(0);
+                    Ok(frame)
+                })
+                .collect();
+        }
+        let display_readback_indices = av1_display_readback_indices(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode could not map display frames: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        let readbacks = decode_av1_bitstream_to_nv12_frames(bitstream).map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode submit/readback failed: {err}; {}",
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            ))
+        })?;
+        let required_readback_count = display_readback_indices
+            .iter()
+            .copied()
+            .map(|index| {
+                usize::try_from(index)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+            })
+            .max()
+            .unwrap_or(0);
+        if readbacks.len() < required_readback_count {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "Vulkan AV1 decode readback frame count is too small: got {}, need {}; {}",
+                readbacks.len(),
+                required_readback_count,
+                av1_decode_blocker_message_with_bitstream(bitstream)
+            )));
+        }
+        let Some(first_readback) = readbacks.first() else {
+            return Ok(Vec::new());
+        };
+        let width = usize::try_from(first_readback.coded_width).map_err(|_| {
+            BackendError::InvalidInput("decoded AV1 width does not fit in usize".to_string())
+        })?;
+        let height = usize::try_from(first_readback.coded_height).map_err(|_| {
+            BackendError::InvalidInput("decoded AV1 height does not fit in usize".to_string())
+        })?;
+        let pts_step = decode_pts_step(self.config.fps);
+        display_readback_indices
+            .into_iter()
+            .enumerate()
+            .map(|(index, readback_index)| {
+                let readback = readbacks
+                    .get(usize::try_from(readback_index).map_err(|_| {
+                        BackendError::InvalidInput(
+                            "AV1 display readback index does not fit usize".to_string(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        BackendError::UnsupportedConfig(format!(
+                            "Vulkan AV1 display readback index {readback_index} is out of range for {} samples",
+                            readbacks.len()
+                        ))
+                    })?;
+                let pts = self
+                    .next_pts_90k
+                    .saturating_add(usize_to_i64(index).saturating_mul(pts_step));
+                let mut frame = metadata_only_frame(width, height, Some(pts));
+                frame.decode_info_flags = Some(if readback.readback_non_zero { 1 } else { 0 });
+                if !matches!(self.config.output_mode, DecodeOutputMode::Metadata) {
+                    frame.pixel_format = Some(u32::from_le_bytes(*b"NV12"));
+                    frame.nv12 = Some(av1_readback_to_nv12_payload(&readback.data, width, height)?);
+                    frame.force_keyframe = true;
+                }
+                Ok(frame)
+            })
+            .collect()
     }
 }
 
@@ -345,27 +564,24 @@ impl VulkanEncoderAdapter {
             ));
         }
         if matches!(self.codec, Codec::Hevc) {
-            let coded_width = u32::try_from(width).map_err(|_| {
-                BackendError::InvalidInput("frame width does not fit in u32".to_string())
-            })?;
-            let coded_height = u32::try_from(height).map_err(|_| {
-                BackendError::InvalidInput("frame height does not fit in u32".to_string())
-            })?;
-            return Err(BackendError::UnsupportedConfig(
-                hevc_encode_blocker_message_with_config(coded_width, coded_height, self.fps),
-            ));
+            return self.encode_pending_hevc_frames(pending_frames, width, height);
         }
         ensure_vk_codec_supported(self.codec, "encode")?;
 
-        let mut encoder = create_vk_bytes_encoder(width, height, self.fps).map_err(|err| {
-            if !self.require_hardware && self.options.allow_software_fallback.unwrap_or(true) {
-                BackendError::UnsupportedConfig(format!(
-                    "{err}; software fallback is not available in direct Vulkan backend"
-                ))
-            } else {
-                err
-            }
-        })?;
+        let mut encoder =
+            create_vk_bytes_encoder(width, height, self.fps, self.options.adapter_index).map_err(
+                |err| {
+                    if !self.require_hardware
+                        && self.options.allow_software_fallback.unwrap_or(true)
+                    {
+                        BackendError::UnsupportedConfig(format!(
+                            "{err}; software fallback is not available in direct Vulkan backend"
+                        ))
+                    } else {
+                        err
+                    }
+                },
+            )?;
 
         let mut packets = Vec::new();
         for frame in pending_frames {
@@ -401,6 +617,62 @@ impl VulkanEncoderAdapter {
         if packets.is_empty() {
             return Err(BackendError::Backend(
                 "Vulkan encoder produced no output packets".to_string(),
+            ));
+        }
+        Ok(packets)
+    }
+
+    fn encode_pending_hevc_frames(
+        &self,
+        pending_frames: &[Frame],
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<EncodedPacket>, BackendError> {
+        let coded_width = u32::try_from(width).map_err(|_| {
+            BackendError::InvalidInput("frame width does not fit in u32".to_string())
+        })?;
+        let coded_height = u32::try_from(height).map_err(|_| {
+            BackendError::InvalidInput("frame height does not fit in u32".to_string())
+        })?;
+        let fps = u32::try_from(self.fps.max(1)).unwrap_or(30);
+        let mut source_frames = Vec::with_capacity(pending_frames.len());
+        let mut pts_values = Vec::with_capacity(pending_frames.len());
+        for frame in pending_frames {
+            if frame.width != width || frame.height != height {
+                return Err(BackendError::InvalidInput(format!(
+                    "mixed frame dimensions are unsupported: expected {}x{}, got {}x{}",
+                    width, height, frame.width, frame.height
+                )));
+            }
+            let raw = frame_to_nv12_payload(frame, width, height)?;
+            source_frames.push(raw.frame);
+            pts_values.push(frame.pts_90k);
+        }
+        let encoded_frames = encode_hevc_idr_frames_annexb(
+            coded_width,
+            coded_height,
+            fps,
+            &source_frames,
+        )
+        .map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "{}; experimental HEVC IDR encode failed: {err}",
+                hevc_encode_blocker_message_with_config(coded_width, coded_height, self.fps)
+            ))
+        })?;
+        let packets = encoded_frames
+            .into_iter()
+            .zip(pts_values)
+            .map(|(data, pts_90k)| EncodedPacket {
+                codec: self.codec,
+                data,
+                pts_90k,
+                is_keyframe: true,
+            })
+            .collect::<Vec<_>>();
+        if packets.is_empty() {
+            return Err(BackendError::Backend(
+                "Vulkan HEVC encoder produced no output packets".to_string(),
             ));
         }
         Ok(packets)
@@ -447,7 +719,384 @@ fn ensure_vk_codec_supported(codec: Codec, operation: &str) -> Result<(), Backen
             };
             Err(BackendError::UnsupportedConfig(message))
         }
+        Codec::Av1 => {
+            let message = if operation == "decode" {
+                av1_decode_blocker_message()
+            } else {
+                av1_encode_blocker_message()
+            };
+            Err(BackendError::UnsupportedConfig(message))
+        }
     }
+}
+
+fn av1_decode_blocker_message() -> String {
+    let base = "Vulkan AV1 decode initialization failed";
+    match probe_av1_decode_prerequisites() {
+        Av1DecodePrerequisiteProbe::Ready => format!(
+            "{base}; runtime prerequisites are present, but AV1 session bootstrap/decode submit is not implemented in video-hw yet"
+        ),
+        Av1DecodePrerequisiteProbe::MissingExtensions { missing } => {
+            format!("{base}; missing Vulkan extensions: {}", missing.join(", "))
+        }
+        Av1DecodePrerequisiteProbe::MissingDecodeQueueFamily => {
+            format!("{base}; no queue family advertises VIDEO_DECODE_KHR with AV1 decode operation")
+        }
+        Av1DecodePrerequisiteProbe::SessionBootstrapFailed(details) => {
+            format!("{base}; AV1 decode session bootstrap failed: {details}")
+        }
+        Av1DecodePrerequisiteProbe::NoCompatibleAdapter => format!(
+            "{base}; required extensions were observed but not on a single adapter that can run AV1 decode prerequisites"
+        ),
+        Av1DecodePrerequisiteProbe::ProbeUnavailable(details) => {
+            format!("{base}; extension probe failed: {details}")
+        }
+    }
+}
+
+fn av1_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
+    let mut message = av1_decode_blocker_message();
+    match inspect_av1_low_overhead_obus(bitstream) {
+        Ok(inspection) => {
+            message.push_str(&format!(
+                "; parsed AV1 OBUs: obu_count={}, temporal_units={}, sequence_header={}, frame_payload={}, sequence_header_obu_len={}, frame_headers={}, key_frames={}, inter_frames={}, intra_only_frames={}, switch_frames={}, show_existing_frames={}, coded={}x{}, std_sequence_header={}, bitstream_session_parameters={}, submit_skeleton={}, picture_info_skeleton={}, decode_info_skeleton={}, decode_info_count={}, command_skeleton={}",
+                inspection.obu_count,
+                inspection.temporal_unit_count,
+                inspection.has_sequence_header,
+                inspection.has_frame_payload,
+                inspection
+                    .sequence_header_obu_len
+                    .map_or_else(|| "none".to_string(), |len| len.to_string()),
+                inspection.frame_header_count,
+                inspection.key_frame_count,
+                inspection.inter_frame_count,
+                inspection.intra_only_frame_count,
+                inspection.switch_frame_count,
+                inspection.show_existing_frame_count,
+                inspection
+                    .coded_width
+                    .map_or_else(|| "unknown".to_string(), |width| width.to_string()),
+                inspection
+                    .coded_height
+                    .map_or_else(|| "unknown".to_string(), |height| height.to_string()),
+                extract_av1_std_sequence_header(bitstream)
+                    .map(|_| "ready".to_string())
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                probe_av1_decode_session_parameters_for_bitstream(bitstream)
+                    .map(|probe| {
+                        format!(
+                            "ready(coded={}x{}, picture_format={:?}, offset_align={}, size_align={}, upload_bytes={}, decode_image_layers={}, decode_image_barrier_layers={}, readback_bytes={}, readback_regions={}, command_record_decodes={}, command_buffer_recorded={}, command_buffer_submitted={}, session_memory_count={}, session_memory_bound={}, session_memory_total={}, session_memory_max_align={})",
+                            probe.coded_width,
+                            probe.coded_height,
+                            probe.picture_format,
+                            probe.min_bitstream_buffer_offset_alignment,
+                            probe.min_bitstream_buffer_size_alignment,
+                            probe.bitstream_upload_bytes,
+                            probe.decode_image_layers,
+                            probe.decode_image_barrier_layers,
+                            probe.readback_bytes,
+                            probe.readback_region_count,
+                            probe.command_record_decode_count,
+                            probe.command_buffer_recorded,
+                            probe.command_buffer_submitted,
+                            probe.session_memory_requirement_count,
+                            probe.session_memory_bound_count,
+                            probe.session_memory_total_size,
+                            probe.session_memory_max_alignment
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_decode_submit_skeleton(bitstream)
+                    .map(|skeleton| {
+                        format!(
+                            "ready(tu={}, frame_header_offset={}, tile_count={})",
+                            skeleton.temporal_unit_index,
+                            skeleton.frame_header_offset,
+                            skeleton.tile_offsets.len()
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_decode_submit_skeleton(bitstream)
+                    .and_then(|skeleton| build_av1_decode_picture_info_skeleton(&skeleton))
+                    .map(|picture| {
+                        format!(
+                            "ready(frame_type={:?}, frame_header_offset={}, vk_frame_header_offset={}, tile_count={}, tile_bytes={}, reference_slots={})",
+                            picture.std_picture_info.frame_type,
+                            picture.frame_header_offset,
+                            picture.vk_picture_info().frame_header_offset,
+                            picture.tile_offsets.len(),
+                            picture.tile_sizes.iter().copied().sum::<u32>(),
+                            picture.reference_name_slot_indices.len()
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_decode_info_skeleton(bitstream)
+                    .map(|decode| {
+                        let mut av1_picture_info = decode.picture_info.vk_picture_info();
+                        let dst_picture_resource =
+                            decode.dst_picture_resource(vk::ImageView::null(), 0);
+                        let mut setup_dpb_info = decode.vk_setup_dpb_slot_info();
+                        let setup_reference_slot = decode.vk_setup_reference_slot(
+                            0,
+                            &dst_picture_resource,
+                            &mut setup_dpb_info,
+                        );
+                        let vk_decode_info = decode.vk_decode_info_with_setup_reference_slot(
+                            vk::Buffer::null(),
+                            dst_picture_resource,
+                            &setup_reference_slot,
+                            &mut av1_picture_info,
+                        );
+                        format!(
+                            "ready(src_offset={}, src_range={}, vk_src_offset={}, vk_src_range={}, coded={}x{}, dst_extent={}x{}, setup_slot={}, setup_slot_chained={}, frame_header_offset={}, tile_count={})",
+                            decode.src_buffer_offset,
+                            decode.src_buffer_range,
+                            vk_decode_info.src_buffer_offset,
+                            vk_decode_info.src_buffer_range,
+                            decode.coded_width,
+                            decode.coded_height,
+                            vk_decode_info.dst_picture_resource.coded_extent.width,
+                            vk_decode_info.dst_picture_resource.coded_extent.height,
+                            setup_reference_slot.slot_index,
+                            !vk_decode_info.p_setup_reference_slot.is_null(),
+                            decode.picture_info.frame_header_offset,
+                            decode.tile_count()
+                        )
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_decode_info_skeletons(bitstream)
+                    .map(|decodes| decodes.len().to_string())
+                    .unwrap_or_else(|err| format!("unavailable({err})")),
+                build_av1_key_frame_decode_command_skeleton(bitstream, 4)
+                    .map(|command| {
+                        let begin_resources =
+                            command.begin_picture_resources(vk::ImageView::null());
+                        let frame_resources = command
+                            .frame_picture_resources(vk::ImageView::null())
+                            .unwrap_or_default();
+                        let frame_bundles = command.frame_record_bundles().unwrap_or_default();
+                        let image_plan = command
+                            .decode_image_plan(vk::Format::G8_B8R8_2PLANE_420_UNORM)
+                            .ok();
+                        let image_layers = image_plan
+                            .as_ref()
+                            .map(|plan| plan.array_layers)
+                            .unwrap_or_default();
+                        let image_usage = image_plan
+                            .as_ref()
+                            .map(|plan| plan.usage)
+                            .unwrap_or_default();
+                        let image_create_layers = image_plan
+                            .as_ref()
+                            .map(|plan| command.vk_decode_image_create_info(plan).array_layers)
+                            .unwrap_or_default();
+                        let begin_reference_infos = command.begin_std_reference_infos();
+                        let mut begin_dpb_infos = command
+                            .begin_dpb_slot_infos(&begin_reference_infos)
+                            .unwrap_or_default();
+                        let begin_reference_slots = command
+                            .begin_reference_slots(&begin_resources, &mut begin_dpb_infos)
+                            .unwrap_or_default();
+                        let begin_coding_info = command
+                            .vk_begin_coding_info(
+                                vk::VideoSessionKHR::null(),
+                                vk::VideoSessionParametersKHR::null(),
+                                &begin_reference_slots,
+                            )
+                            .unwrap_or_default();
+                        let reset_control = command.vk_reset_coding_control_info();
+                        let end_coding_info = command.vk_end_coding_info();
+                        let record_steps = command.record_steps();
+                        format!(
+                            "ready(frames={}, coded={}x{}, begin_slots={}, begin_resources={}, frame_resources={}, frame_bundles={}, image_layers={}, image_create_layers={}, image_usage={:?}, begin_reference_slots={}, vk_begin_refs={}, reset={}, end_flags_empty={}, record_steps={}, slots={})",
+                            command.frames.len(),
+                            command.coded_width,
+                            command.coded_height,
+                            command.begin_slots.len(),
+                            begin_resources.len(),
+                            frame_resources.len(),
+                            frame_bundles.len(),
+                            image_layers,
+                            image_create_layers,
+                            image_usage,
+                            begin_reference_slots.len(),
+                            begin_coding_info.reference_slot_count,
+                            reset_control.flags.contains(vk::VideoCodingControlFlagsKHR::RESET),
+                            end_coding_info.flags.is_empty(),
+                            record_steps.len(),
+                            command
+                                .frames
+                                .iter()
+                                .map(|frame| frame.setup_slot_index.to_string())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        )
+                    })
+                    .and_then(|command_status| {
+                        let (offset_alignment, size_alignment, alignment_source) =
+                            probe_av1_decode_session_parameters_for_bitstream(bitstream)
+                                .map(|probe| {
+                                    (
+                                        probe.min_bitstream_buffer_offset_alignment,
+                                        probe.min_bitstream_buffer_size_alignment,
+                                        "capability",
+                                    )
+                                })
+                                .unwrap_or((4096, 4096, "fallback"));
+                        build_av1_aligned_key_frame_decode_command_skeleton(
+                            bitstream,
+                            4,
+                            offset_alignment,
+                            size_alignment,
+                        )
+                            .map(|(upload_plan, aligned_command)| {
+                                let submit_bundles = upload_plan
+                                    .frame_submit_bundles(&aligned_command)
+                                    .unwrap_or_default();
+                                let first_decode_info_ready = upload_plan
+                                    .with_frame_decode_info(
+                                        &aligned_command,
+                                        0,
+                                        vk::Buffer::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
+                                        |decode_info, _bundle| {
+                                            !decode_info.p_next.is_null()
+                                                && !decode_info.p_setup_reference_slot.is_null()
+                                        },
+                                    )
+                                    .unwrap_or(false);
+                                let decode_info_loop_count = upload_plan
+                                    .with_frame_decode_infos(
+                                        &aligned_command,
+                                        vk::Buffer::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
+                                        |_decode_info, bundle| bundle.frame_index,
+                                    )
+                                    .map(|indices| indices.len())
+                                    .unwrap_or_default();
+                                let mut sequence_visits = 0usize;
+                                let mut sequence_decodes = 0usize;
+                                let mut sequence_begin_refs = 0u32;
+                                let mut sequence_reset = false;
+                                let mut sequence_first_decode_offset = 0u64;
+                                let mut sequence_end_empty = false;
+                                let sequence_ready = upload_plan
+                                    .visit_decode_command_sequence(
+                                        &aligned_command,
+                                        vk::VideoSessionKHR::null(),
+                                        vk::VideoSessionParametersKHR::null(),
+                                        vk::Buffer::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
+                                        |visit| {
+                                            sequence_visits += 1;
+                                            match visit {
+                                                Av1DecodeCommandVisit::BeginCoding(info) => {
+                                                    sequence_begin_refs =
+                                                        info.reference_slot_count;
+                                                }
+                                                Av1DecodeCommandVisit::ResetCoding(info) => {
+                                                    sequence_reset = info.flags.contains(
+                                                        vk::VideoCodingControlFlagsKHR::RESET,
+                                                    );
+                                                }
+                                                Av1DecodeCommandVisit::DecodeFrame {
+                                                    decode_info,
+                                                    bundle,
+                                                } => {
+                                                    sequence_decodes += 1;
+                                                    if bundle.frame_index == 0 {
+                                                        sequence_first_decode_offset =
+                                                            decode_info.src_buffer_offset;
+                                                    }
+                                                }
+                                                Av1DecodeCommandVisit::EndCoding(info) => {
+                                                    sequence_end_empty = info.flags.is_empty();
+                                                }
+                                            }
+                                        },
+                                    )
+                                    .is_ok();
+                                let record_summary = upload_plan
+                                    .record_decode_command_sequence(
+                                        &aligned_command,
+                                        vk::VideoSessionKHR::null(),
+                                        vk::VideoSessionParametersKHR::null(),
+                                        vk::Buffer::null(),
+                                        Av1DecodePictureViews {
+                                            dst: vk::ImageView::null(),
+                                            reference: vk::ImageView::null(),
+                                        },
+                                        |_visit| Ok(()),
+                                    )
+                                    .ok();
+                                let record_summary_valid = record_summary
+                                    .as_ref()
+                                    .is_some_and(|summary| {
+                                        summary.validate_for_command(&aligned_command).is_ok()
+                                    });
+                                format!(
+                                    "{command_status}; aligned_upload=ready(bytes={}, frames={}, submit_bundles={}, first_decode_info={}, decode_info_loop={}, command_sequence={}, record_summary={}, record_summary_valid={}, sequence_visits={}, sequence_decodes={}, sequence_begin_refs={}, sequence_reset={}, sequence_first_decode_offset={}, sequence_end_empty={}, offset_align={}, size_align={}, align_source={}, first_offset={}, first_range={})",
+                                    upload_plan.bytes.len(),
+                                    aligned_command.frames.len(),
+                                    submit_bundles.len(),
+                                    first_decode_info_ready,
+                                    decode_info_loop_count,
+                                    sequence_ready,
+                                    record_summary
+                                        .as_ref()
+                                        .map(|summary| format!(
+                                            "{}/{}/{}/{}",
+                                            summary.begin_count,
+                                            summary.reset_count,
+                                            summary.decode_count,
+                                            summary.end_count
+                                        ))
+                                        .unwrap_or_else(|| "unavailable".to_string()),
+                                    record_summary_valid,
+                                    sequence_visits,
+                                    sequence_decodes,
+                                    sequence_begin_refs,
+                                    sequence_reset,
+                                    sequence_first_decode_offset,
+                                    sequence_end_empty,
+                                    offset_alignment,
+                                    size_alignment,
+                                    alignment_source,
+                                    aligned_command
+                                        .frames
+                                        .first()
+                                        .map(|frame| frame.src_buffer_offset)
+                                        .unwrap_or_default(),
+                                    aligned_command
+                                        .frames
+                                        .first()
+                                        .map(|frame| frame.src_buffer_range)
+                                        .unwrap_or_default()
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|err| format!("unavailable({err})"))
+            ));
+        }
+        Err(err) => {
+            message.push_str(&format!("; OBU inspection failed: {err}"));
+        }
+    }
+    message
+}
+
+fn av1_encode_blocker_message() -> String {
+    "Vulkan AV1 encode initialization failed; ash 0.38.0 exposes VK_KHR_video_decode_av1 bindings but not VK_KHR_video_encode_av1, so video-hw cannot implement Vulkan AV1 encode without updating Vulkan bindings"
+        .to_string()
 }
 
 fn hevc_decode_blocker_message() -> String {
@@ -514,7 +1163,16 @@ fn hevc_encode_blocker_message_with_config(
     }
 }
 
-fn hevc_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
+fn resolve_hevc_decode_physical_device_index() -> Option<usize> {
+    std::env::var("VIDEO_HW_VULKAN_HEVC_DECODE_PHYSICAL_DEVICE_INDEX")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn hevc_decode_blocker_message_with_bitstream(
+    bitstream: &[u8],
+    physical_device_index: Option<usize>,
+) -> String {
     let mut message = hevc_decode_blocker_message();
     match extract_hevc_parameter_sets_annexb(bitstream) {
         Ok(parameter_sets) => {
@@ -526,7 +1184,11 @@ fn hevc_decode_blocker_message_with_bitstream(bitstream: &[u8]) -> String {
                 parameter_sets.coded_width,
                 parameter_sets.coded_height
             ));
-            match probe_hevc_decode_session_bootstrap(bitstream) {
+            match probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+                bitstream,
+                None,
+                physical_device_index,
+            ) {
                 Ok(bootstrap) => {
                     let formats = bootstrap
                         .decode_output_formats
@@ -795,6 +1457,37 @@ fn hevc_probe_readback_to_argb(
     Ok(argb)
 }
 
+fn av1_readback_to_nv12_payload(
+    readback_sample: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Nv12FramePayload, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "Vulkan AV1 non-metadata output currently requires even coded extent, got {}x{}",
+            width, height
+        )));
+    }
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|y| y.checked_add(y / 2))
+        .ok_or_else(|| {
+            BackendError::UnsupportedConfig(
+                "Vulkan AV1 readback size overflow while preparing NV12 payload".to_string(),
+            )
+        })?;
+    if readback_sample.len() < expected_len {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "Vulkan AV1 readback sample too short for NV12 payload: got {}, need at least {expected_len}",
+            readback_sample.len(),
+        )));
+    }
+    Ok(Nv12FramePayload {
+        pitch: width,
+        data: readback_sample[..expected_len].to_vec(),
+    })
+}
+
 fn ensure_hevc_non_metadata_probe_coverage(
     metadata_only: bool,
     total_access_units: usize,
@@ -902,8 +1595,8 @@ fn probe_vulkan_support() -> (bool, bool) {
     (decode_supported, encode_supported)
 }
 
-fn create_vk_bytes_decoder() -> Result<BytesDecoder, BackendError> {
-    let device = create_vk_device(true, false)?;
+fn create_vk_bytes_decoder(adapter_index: Option<usize>) -> Result<BytesDecoder, BackendError> {
+    let device = create_vk_device(true, false, adapter_index)?;
     device
         .create_bytes_decoder(DecoderParameters::default())
         .map_err(|err| {
@@ -911,12 +1604,26 @@ fn create_vk_bytes_decoder() -> Result<BytesDecoder, BackendError> {
         })
 }
 
+fn create_vk_wgpu_textures_decoder(
+    adapter_index: Option<usize>,
+) -> Result<WgpuTexturesDecoder, BackendError> {
+    let device = create_vk_device(true, false, adapter_index)?;
+    device
+        .create_wgpu_textures_decoder(DecoderParameters::default())
+        .map_err(|err| {
+            BackendError::UnsupportedConfig(format!(
+                "failed to create Vulkan texture decoder: {err}"
+            ))
+        })
+}
+
 fn create_vk_bytes_encoder(
     width: usize,
     height: usize,
     fps: i32,
+    adapter_index: Option<usize>,
 ) -> Result<BytesEncoder, BackendError> {
-    let device = create_vk_device(false, true)?;
+    let device = create_vk_device(false, true, adapter_index)?;
     let width_u32 = u32::try_from(width)
         .map_err(|_| BackendError::InvalidInput("frame width does not fit in u32".to_string()))?;
     let height_u32 = u32::try_from(height)
@@ -953,30 +1660,59 @@ fn create_vk_bytes_encoder(
 fn create_vk_device(
     require_decode: bool,
     require_encode: bool,
+    adapter_index: Option<usize>,
 ) -> Result<Arc<VulkanDevice>, BackendError> {
     let instance = VulkanInstance::new().map_err(|err| {
         BackendError::UnsupportedConfig(format!("failed to initialize Vulkan: {err}"))
     })?;
-    let adapter = instance
-        .iter_adapters(None)
-        .map_err(|err| {
-            BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
-        })?
-        .find(|adapter| {
-            (!require_decode || adapter.supports_decoding())
-                && (!require_encode || adapter.supports_encoding())
-        })
-        .ok_or_else(|| {
-            let message = match (require_decode, require_encode) {
-                (true, true) => {
-                    "no Vulkan adapter supports both decode and encode for direct backend"
+    let adapters = instance.iter_adapters(None).map_err(|err| {
+        BackendError::UnsupportedConfig(format!("failed to enumerate Vulkan adapters: {err}"))
+    })?;
+    let adapter = if let Some(adapter_index) = adapter_index {
+        adapters
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, adapter)| (index == adapter_index).then_some(adapter))
+            .ok_or_else(|| {
+                BackendError::UnsupportedConfig(format!(
+                    "Vulkan adapter index {adapter_index} is not available"
+                ))
+            })
+            .and_then(|adapter| {
+                let info = adapter.info();
+                if require_decode && !adapter.supports_decoding() {
+                    return Err(BackendError::UnsupportedConfig(format!(
+                        "Vulkan adapter index {adapter_index} ({}) does not support decode",
+                        info.name
+                    )));
                 }
-                (true, false) => "no Vulkan adapter supports decode for direct backend",
-                (false, true) => "no Vulkan adapter supports encode for direct backend",
-                (false, false) => "no Vulkan adapter is available for direct backend",
-            };
-            BackendError::UnsupportedConfig(message.to_string())
-        })?;
+                if require_encode && !adapter.supports_encoding() {
+                    return Err(BackendError::UnsupportedConfig(format!(
+                        "Vulkan adapter index {adapter_index} ({}) does not support encode",
+                        info.name
+                    )));
+                }
+                Ok(adapter)
+            })?
+    } else {
+        adapters
+            .into_iter()
+            .find(|adapter| {
+                (!require_decode || adapter.supports_decoding())
+                    && (!require_encode || adapter.supports_encoding())
+            })
+            .ok_or_else(|| {
+                let message = match (require_decode, require_encode) {
+                    (true, true) => {
+                        "no Vulkan adapter supports both decode and encode for direct backend"
+                    }
+                    (true, false) => "no Vulkan adapter supports decode for direct backend",
+                    (false, true) => "no Vulkan adapter supports encode for direct backend",
+                    (false, false) => "no Vulkan adapter is available for direct backend",
+                };
+                BackendError::UnsupportedConfig(message.to_string())
+            })?
+    };
     adapter
         .create_device(Default::default(), Default::default(), Default::default())
         .map_err(|err| {
@@ -1067,6 +1803,46 @@ mod tests {
     }
 
     #[test]
+    fn ensure_vk_codec_supported_rejects_av1_with_actionable_message() {
+        for operation in ["decode", "encode"] {
+            let err = ensure_vk_codec_supported(Codec::Av1, operation)
+                .expect_err("AV1 must be rejected until Vulkan AV1 path is implemented");
+            match err {
+                BackendError::UnsupportedConfig(message) => {
+                    assert!(
+                        message.contains(&format!("Vulkan AV1 {operation} initialization failed")),
+                        "expected Vulkan AV1 implementation message: {message}"
+                    );
+                }
+                other => panic!("unexpected AV1 check error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn av1_decode_blocker_message_with_bitstream_appends_obu_status() {
+        let sequence_header = av1_test_obu(1, &av1_test_sequence_header_payload(320, 180));
+        let mut bitstream = av1_test_obu(2, &[]);
+        bitstream.extend_from_slice(&sequence_header);
+        bitstream.extend_from_slice(&av1_test_obu(6, &[0x11, 0x12]));
+        let message = av1_decode_blocker_message_with_bitstream(&bitstream);
+        assert!(message.contains("Vulkan AV1 decode initialization failed"));
+        assert!(message.contains("parsed AV1 OBUs"));
+        assert!(message.contains("sequence_header=true"));
+        assert!(message.contains("frame_headers=1"));
+        assert!(message.contains("key_frames=1"));
+        assert!(message.contains("inter_frames=0"));
+        assert!(message.contains("show_existing_frames=0"));
+        assert!(message.contains("coded=320x180"));
+        assert!(message.contains("aligned_upload=ready"));
+        assert!(message.contains("first_decode_info=true"));
+        assert!(message.contains("decode_info_loop=1"));
+        assert!(message.contains("command_sequence=true"));
+        assert!(message.contains("record_summary=1/1/1/1"));
+        assert!(message.contains("record_summary_valid=true"));
+    }
+
+    #[test]
     fn hevc_encode_blocker_message_with_config_surfaces_base_message() {
         let message = hevc_encode_blocker_message_with_config(1920, 1080, 30);
         assert!(message.contains("Vulkan HEVC encode initialization failed"));
@@ -1081,8 +1857,16 @@ mod tests {
     }
 
     #[test]
+    fn av1_capability_report_never_claims_hardware_acceleration() {
+        let report = vulkan_capability_report(Codec::Av1);
+        assert!(!report.decode_supported);
+        assert!(!report.encode_supported);
+        assert!(!report.hardware_acceleration);
+    }
+
+    #[test]
     fn hevc_decode_blocker_message_with_bitstream_appends_parameter_set_status() {
-        let message = hevc_decode_blocker_message_with_bitstream(&[0_u8, 1, 2, 3]);
+        let message = hevc_decode_blocker_message_with_bitstream(&[0_u8, 1, 2, 3], None);
         assert!(message.contains("Vulkan HEVC decode initialization failed"));
         assert!(message.contains("parameter-set extraction failed"));
     }
@@ -1130,6 +1914,21 @@ mod tests {
             }
             other => panic!("unexpected error for unsupported readback format: {other:?}"),
         }
+    }
+
+    #[test]
+    fn av1_readback_to_nv12_payload_uses_expected_even_extent_size() {
+        let payload = av1_readback_to_nv12_payload(&[1, 2, 3, 4, 5, 6], 2, 2)
+            .expect("2x2 NV12 readback should map to one payload");
+        assert_eq!(payload.pitch, 2);
+        assert_eq!(payload.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn av1_readback_to_nv12_payload_rejects_odd_extent() {
+        let err = av1_readback_to_nv12_payload(&[0; 16], 3, 2)
+            .expect_err("odd AV1 readback extent should be rejected for facade NV12");
+        assert!(matches!(err, BackendError::UnsupportedConfig(_)));
     }
 
     #[test]
@@ -1235,5 +2034,72 @@ mod tests {
             pocs_and_pts,
             vec![(0, 0), (1, 3_000), (2, 6_000), (3, 9_000), (4, 12_000)]
         );
+    }
+
+    fn av1_test_obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![(obu_type << 3) | 0x02];
+        out.extend(av1_test_leb128(payload.len()));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn av1_test_leb128(mut value: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn av1_test_sequence_header_payload(width: u32, height: u32) -> Vec<u8> {
+        let width_minus_1 = width.checked_sub(1).expect("width must be positive");
+        let height_minus_1 = height.checked_sub(1).expect("height must be positive");
+        let width_bits = 32 - width_minus_1.leading_zeros();
+        let height_bits = 32 - height_minus_1.leading_zeros();
+        let mut writer = Av1TestBitWriter::default();
+        writer.write_bits(0, 3);
+        writer.write_bits(1, 1);
+        writer.write_bits(1, 1);
+        writer.write_bits(0, 5);
+        writer.write_bits(u64::from(width_bits - 1), 4);
+        writer.write_bits(u64::from(height_bits - 1), 4);
+        writer.write_bits(u64::from(width_minus_1), width_bits as usize);
+        writer.write_bits(u64::from(height_minus_1), height_bits as usize);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.write_bits(0, 1);
+        writer.finish()
+    }
+
+    #[derive(Default)]
+    struct Av1TestBitWriter {
+        data: Vec<u8>,
+        bit_offset: usize,
+    }
+
+    impl Av1TestBitWriter {
+        fn write_bits(&mut self, value: u64, count: usize) {
+            for shift in (0..count).rev() {
+                if self.bit_offset.is_multiple_of(8) {
+                    self.data.push(0);
+                }
+                let bit = ((value >> shift) & 1) as u8;
+                let byte = self.data.last_mut().expect("byte exists after push");
+                *byte |= bit << (7 - (self.bit_offset % 8));
+                self.bit_offset += 1;
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.data
+        }
     }
 }

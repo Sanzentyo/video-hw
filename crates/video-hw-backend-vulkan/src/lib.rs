@@ -162,6 +162,8 @@ pub fn argb_to_nv12(
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+mod vulkan_av1_decode;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_decode;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan_hevc_encode;
@@ -170,4 +172,6 @@ mod vulkan_hevc_encode;
 mod vulkan_backend;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub use vulkan_backend::{VulkanDecoderAdapter, VulkanEncoderAdapter};
+pub use vulkan_backend::{
+    VulkanAdapterReport, VulkanDecoderAdapter, VulkanEncoderAdapter, vulkan_adapter_reports,
+};

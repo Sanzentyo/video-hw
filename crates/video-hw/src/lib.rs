@@ -10,12 +10,13 @@ mod transform;
 pub use contract::Nv12FramePayload;
 pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
-    CapabilityReport, Codec, ColorMetadata, DecodeOutputMode, DecodeSummary, DecodedFrame,
-    DecoderConfig, Dimensions, EncodeFrame, EncodedChunk, EncodedLayout, EncoderConfig,
-    IntelDecoderOptions, IntelEncoderOptions, NvidiaDecoderOptions, NvidiaEncoderOptions,
-    NvidiaSessionConfig, RawFrameBuffer, SessionSwitchMode, SessionSwitchRequest, Timestamp90k,
-    VtDecoderOptions, VtEncoderOptions, VtSessionConfig, VulkanDecoderOptions,
-    VulkanEncoderOptions,
+    CapabilityReport, Codec, ColorConvertOptions, ColorMatrix, ColorMetadata, ColorRange,
+    DecodeOutputMode, DecodeSummary, DecodedFrame, DecoderConfig, Dimensions, EncodeFrame,
+    EncodedChunk, EncodedLayout, EncoderConfig, IntelDecoderOptions, IntelEncoderOptions,
+    Nv12FrameRef, NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig, PitchBytes,
+    PixelBufferOwned, PixelHeight, PixelOutputLayout, PixelWidth, RawFrameBuffer, Rgb24FrameRef,
+    SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtDecoderOptions, VtEncoderOptions,
+    VtSessionConfig, VulkanDecoderOptions, VulkanEncoderOptions,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -44,7 +45,13 @@ pub use video_hw_backend_vt::{VtDecoderAdapter, VtEncoderAdapter};
     feature = "backend-vulkan",
     any(target_os = "linux", target_os = "windows")
 ))]
+pub use video_hw_backend_vulkan::{VulkanAdapterReport, vulkan_adapter_reports};
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub use video_hw_backend_vulkan::{VulkanDecoderAdapter, VulkanEncoderAdapter};
+pub use video_hw_core::bitstream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -647,6 +654,44 @@ fn backend_supports_output_mode(kind: BackendKind, mode: DecodeOutputMode) -> bo
     }
 }
 
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn preflight_decoder_capability(
+    kind: BackendKind,
+    config: &DecoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    probe_decoder_capability(kind, config)
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+fn preflight_decoder_capability(
+    _kind: BackendKind,
+    _config: &DecoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    Err(BackendError::UnsupportedConfig(
+        "no backend feature enabled".to_string(),
+    ))
+}
+
 pub trait EncoderBackend: VideoEncoder {
     const BACKEND_KIND: BackendKind;
 
@@ -677,6 +722,87 @@ trait DynEncodeSession {
 
 pub struct AnyDecodeSession {
     inner: Box<dyn DynDecodeSession>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodePreflightRequest {
+    pub backend: Backend,
+    pub codec: Codec,
+    pub output_mode: DecodeOutputMode,
+    pub require_hardware: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodePreflightReport {
+    pub requested_backend: Backend,
+    pub resolved_backend: Option<BackendKind>,
+    pub output_mode: DecodeOutputMode,
+    pub supported_by_contract: bool,
+    pub usable_in_current_runtime: bool,
+    pub reason: Option<String>,
+}
+
+pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightReport {
+    let mut config = DecoderConfig::new(request.codec, 30, request.require_hardware);
+    config.output_mode = request.output_mode;
+    let resolved = request.backend.resolve_decoder(&config);
+    let Ok(kind) = resolved else {
+        return DecodePreflightReport {
+            requested_backend: request.backend,
+            resolved_backend: None,
+            output_mode: request.output_mode,
+            supported_by_contract: false,
+            usable_in_current_runtime: false,
+            reason: Some(resolved.unwrap_err().to_string()),
+        };
+    };
+    let supported_by_contract = backend_supports_output_mode(kind, request.output_mode);
+    if !supported_by_contract {
+        return DecodePreflightReport {
+            requested_backend: request.backend,
+            resolved_backend: Some(kind),
+            output_mode: request.output_mode,
+            supported_by_contract,
+            usable_in_current_runtime: false,
+            reason: Some(format!(
+                "{kind:?} decoder does not support DecodeOutputMode::{} by contract",
+                request.output_mode
+            )),
+        };
+    }
+    let runtime = preflight_decoder_capability(kind, &config);
+    match runtime {
+        Ok(capability) => {
+            let usable = capability.decode_supported
+                && (!request.require_hardware || capability.hardware_acceleration)
+                && capability.supports_decode_output_mode(request.output_mode);
+            DecodePreflightReport {
+                requested_backend: request.backend,
+                resolved_backend: Some(kind),
+                output_mode: request.output_mode,
+                supported_by_contract,
+                usable_in_current_runtime: usable,
+                reason: if usable {
+                    None
+                } else {
+                    Some(format!(
+                        "decode_supported={}, hardware_acceleration={}, output_mode_supported={}",
+                        capability.decode_supported,
+                        capability.hardware_acceleration,
+                        capability.supports_decode_output_mode(request.output_mode)
+                    ))
+                },
+            }
+        }
+        Err(err) => DecodePreflightReport {
+            requested_backend: request.backend,
+            resolved_backend: Some(kind),
+            output_mode: request.output_mode,
+            supported_by_contract,
+            usable_in_current_runtime: false,
+            reason: Some(err.to_string()),
+        },
+    }
 }
 
 impl AnyDecodeSession {
@@ -845,25 +971,7 @@ impl<D: VideoDecoder> DecodeSession<D> {
     }
 
     pub fn submit(&mut self, input: BitstreamInput) -> Result<(), BackendError> {
-        let (annexb, pts_90k) = match input {
-            BitstreamInput::AnnexBChunk { chunk, pts_90k } => (chunk, pts_90k.map(|v| v.0)),
-            BitstreamInput::AccessUnitRawNal {
-                codec: _,
-                nalus,
-                pts_90k,
-            } => (
-                pack_access_unit_nalus_to_annexb(&nalus),
-                pts_90k.map(|v| v.0),
-            ),
-            BitstreamInput::LengthPrefixedSample {
-                codec: _,
-                sample,
-                pts_90k,
-            } => (
-                unpack_length_prefixed_sample_to_annexb(&sample)?,
-                pts_90k.map(|v| v.0),
-            ),
-        };
+        let (annexb, pts_90k) = normalize_bitstream_input(input)?;
         let outputs = self
             .decoder_inner
             .push_bitstream_chunk(&annexb, pts_90k)?
@@ -1286,36 +1394,40 @@ impl EncoderBackend for VulkanEncoderAdapter {
     }
 }
 
-fn pack_access_unit_nalus_to_annexb(nalus: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for nal in nalus {
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(nal);
-    }
-    out
-}
-
-fn unpack_length_prefixed_sample_to_annexb(sample: &[u8]) -> Result<Vec<u8>, BackendError> {
-    let mut out = Vec::new();
-    let mut payload = sample;
-    while payload.len() >= 4 {
-        let nal_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-        payload = &payload[4..];
-        if nal_len == 0 || payload.len() < nal_len {
-            return Err(BackendError::InvalidBitstream(
-                "invalid length-prefixed sample payload".to_string(),
-            ));
+fn normalize_bitstream_input(
+    input: BitstreamInput,
+) -> Result<(Vec<u8>, Option<i64>), BackendError> {
+    match input {
+        BitstreamInput::AnnexBChunk { chunk, pts_90k } => Ok((chunk, pts_90k.map(|v| v.0))),
+        BitstreamInput::AccessUnitRawNal {
+            codec: _,
+            nalus,
+            pts_90k,
+        } => {
+            let mut out = Vec::new();
+            for nalu in nalus {
+                bitstream::append_annexb_nalu(&mut out, &nalu);
+            }
+            Ok((out, pts_90k.map(|v| v.0)))
         }
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(&payload[..nal_len]);
-        payload = &payload[nal_len..];
+        BitstreamInput::LengthPrefixedSample {
+            codec: Codec::Av1,
+            sample,
+            pts_90k,
+        } => Ok((sample, pts_90k.map(|v| v.0))),
+        BitstreamInput::LengthPrefixedSample {
+            codec: _,
+            sample,
+            pts_90k,
+        } => Ok((
+            bitstream::length_prefixed_to_annexb(
+                bitstream::LengthPrefixedSampleRef::new(&sample),
+                bitstream::NalLengthSize::Four,
+            )?
+            .into_inner(),
+            pts_90k.map(|v| v.0),
+        )),
     }
-    if !payload.is_empty() {
-        return Err(BackendError::InvalidBitstream(
-            "trailing bytes after length-prefixed sample parse".to_string(),
-        ));
-    }
-    Ok(out)
 }
 
 fn backend_frame_to_decoded_frame(
@@ -1666,11 +1778,23 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
         (BackendKind::VideoToolbox, Codec::H264) => EncodedLayout::Avcc,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         (BackendKind::VideoToolbox, Codec::Hevc) => EncodedLayout::Hvcc,
+        #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+        (BackendKind::VideoToolbox, Codec::Av1) => EncodedLayout::Av1,
+        #[cfg(all(
+            feature = "backend-nvidia",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        (BackendKind::Nvidia, Codec::Av1) => EncodedLayout::Av1,
         #[cfg(all(
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
         (BackendKind::Nvidia, _) => EncodedLayout::AnnexB,
+        #[cfg(all(
+            feature = "backend-intel",
+            any(target_os = "linux", target_os = "windows")
+        ))]
+        (BackendKind::Intel, Codec::Av1) => EncodedLayout::Av1,
         #[cfg(all(
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
@@ -1877,7 +2001,12 @@ mod tests {
             0, 0, 0, 2, 0x67, 0x64, //
             0, 0, 0, 3, 0x68, 0xEE, 0x3C,
         ];
-        let annexb = unpack_length_prefixed_sample_to_annexb(&sample).unwrap();
+        let annexb = bitstream::length_prefixed_to_annexb(
+            bitstream::LengthPrefixedSampleRef::new(&sample),
+            bitstream::NalLengthSize::Four,
+        )
+        .unwrap()
+        .into_inner();
         assert_eq!(
             annexb,
             vec![
@@ -1885,6 +2014,20 @@ mod tests {
                 0, 0, 0, 1, 0x68, 0xEE, 0x3C
             ]
         );
+    }
+
+    #[test]
+    fn av1_length_prefixed_sample_is_forwarded_as_obu_payload() {
+        let sample = vec![0x12, 0x00, 0x0a, 0x0b, 0x14, 0x00, 0x24];
+        let (chunk, pts) = normalize_bitstream_input(BitstreamInput::LengthPrefixedSample {
+            codec: Codec::Av1,
+            sample: sample.clone(),
+            pts_90k: Some(Timestamp90k(1234)),
+        })
+        .expect("AV1 MP4 sample should be forwarded as OBU payload");
+
+        assert_eq!(chunk, sample);
+        assert_eq!(pts, Some(1234));
     }
 
     #[test]
@@ -2099,6 +2242,17 @@ mod tests {
                 },
             );
             assert_eq!(vt_hevc.layout, EncodedLayout::Hvcc);
+
+            let vt_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::VideoToolbox,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1, 2, 3],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(vt_av1.layout, EncodedLayout::Av1);
         }
 
         #[cfg(all(
@@ -2116,6 +2270,17 @@ mod tests {
                 },
             );
             assert_eq!(nv.layout, EncodedLayout::AnnexB);
+
+            let nv_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::Nvidia,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(nv_av1.layout, EncodedLayout::Av1);
         }
         #[cfg(all(
             feature = "backend-intel",
@@ -2132,6 +2297,17 @@ mod tests {
                 },
             );
             assert_eq!(intel.layout, EncodedLayout::AnnexB);
+
+            let intel_av1 = backend_packet_to_encoded_chunk(
+                BackendKind::Intel,
+                EncodedPacket {
+                    codec: Codec::Av1,
+                    data: vec![1],
+                    pts_90k: None,
+                    is_keyframe: false,
+                },
+            );
+            assert_eq!(intel_av1.layout, EncodedLayout::Av1);
         }
         #[cfg(all(
             feature = "backend-vulkan",

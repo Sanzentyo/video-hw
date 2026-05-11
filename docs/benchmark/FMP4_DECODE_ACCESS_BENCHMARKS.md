@@ -19,6 +19,13 @@ override this:
 cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs --features "backend-nvidia backend-intel backend-vulkan" -- --backend nvidia --require-hardware
 ```
 
+For generated AV1 fMP4 input, the wrapper can first run
+`write_synthetic_fmp4` and then pass the generated file to the benchmark:
+
+```sh
+cargo +nightly -Zscript scripts/benchmark_fmp4_decode_access.rs --features "backend-nvidia backend-intel backend-vulkan" --generate-codec av1 --generate-backend nvidia --generate-width 320 --generate-height 180 --generate-frames 90 --generate-fragment-frames 30 --generate-require-hardware -- --backend nvidia --require-hardware --frame-count 90
+```
+
 The report is written to:
 
 ```text
@@ -116,3 +123,34 @@ Key numbers:
   30 requests, 168 encoded sample reads, 63 inserts, 0 evictions.
 - `cached_decode_sample_ping_pong`: 53 decoded cache hits for 60 requests,
   showing expected reuse when recently decoded frames are revisited.
+
+## AV1 fMP4 Hardware Runs
+
+Generated AV1 fMP4 inputs were created with `write_synthetic_fmp4` and measured
+with the same access-pattern benchmark. Both runs compare RGB24 output against
+FFmpeg software decode and therefore report frame correctness through max MSE /
+min PSNR in addition to cache behavior.
+
+- NVIDIA AV1 fMP4, 320x180, 90 frames:
+  `output/benchmark-fmp4-decode-access-1778069696.md`.
+  `decode_range_iter_contiguous` returned all 90 frames in 1.049 s with min
+  PSNR 45.950 dB. Per-sample sequential and reverse no-cache calls replayed GOP
+  data and took 7.430 s / 7.149 s with 1395 sample reads. The decoded-frame LRU
+  reduced sequential and reverse-before access to 0.847 s / 0.846 s with 80 hits
+  and 10 misses; reverse-after stayed slow at 7.458 s because the prefetch
+  direction intentionally mismatched reverse access.
+- Intel oneVPL AV1 fMP4, 320x180, 24 frames:
+  `output/benchmark-fmp4-decode-access-1778070138.md`.
+  `decode_range_iter_contiguous` returned all 24 frames in 1.276 s with min
+  PSNR 46.064 dB. Per-sample sequential and reverse no-cache calls took 29.358 s
+  / 31.215 s with 300 sample reads. The decoded-frame LRU reduced sequential and
+  reverse-before access to 5.957 s / 6.879 s; reverse-after stayed near the
+  no-cache reverse cost at 31.230 s. A 90-frame Intel AV1 run exceeded the
+  240-second local timeout, so larger Intel runs should be treated as a stress
+  case rather than a default smoke.
+- Wrapper generation smoke:
+  `output/benchmark-fmp4-decode-access-1778070314.md`.
+  The one-command `--generate-codec av1 --generate-backend nvidia` path produced
+  an 8-frame 320x180 AV1 fMP4 and completed all access cases with min PSNR
+  46.045 dB. A 160x90 AV1 smoke generated successfully but failed NVDEC submit
+  with `CUDA_ERROR_UNKNOWN`, so 320x180 remains the documented smoke size.

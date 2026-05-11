@@ -16,3 +16,4 @@ video-hw-core = { path = "../video-hw-core", default-features = false }
 vk-video = { version = "0.2.1" }
 ash = { version = "0.38.0" }
 scuffle-h265 = { version = "0.2.2" }
+oxideav-av1 = "0.1.5"

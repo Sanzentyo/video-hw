@@ -2,8 +2,9 @@
 //!
 //! This example captures camera frames via `shiguredo_video_device`,
 //! previews them in an `eframe` window, and can toggle recording ON/OFF.
-//! Recorded chunks are encoded with `video-hw` (H.264) and muxed into
+//! Recorded chunks are encoded with `video-hw` (H.264/HEVC) and muxed into
 //! fragmented MP4 (`ftyp+moov` + repeated `moof+mdat`) via `shiguredo_mp4`.
+//! Use the `video-hw-fmp4` crate examples for AV1 fMP4 recording.
 
 use std::{
     borrow::Cow,
@@ -684,6 +685,7 @@ impl RecorderState {
                     pps,
                 ))
             }
+            Codec::Av1 => None,
         };
     }
 
@@ -1553,6 +1555,7 @@ impl CameraRecordApp {
                     .selected_text(match self.selected_codec {
                         Codec::H264 => "h264",
                         Codec::Hevc => "hevc",
+                        Codec::Av1 => "av1 (video-hw-fmp4 only)",
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.selected_codec, Codec::H264, "h264");
@@ -1920,6 +1923,10 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
+        "av1" => anyhow::bail!(
+            "AV1 fMP4 is supported by the video-hw-fmp4 examples; \
+             this legacy example only records H.264/HEVC"
+        ),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
 }

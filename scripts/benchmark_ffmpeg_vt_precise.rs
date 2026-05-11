@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 impl Codec {
@@ -28,6 +29,7 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "av1",
         }
     }
 
@@ -35,6 +37,7 @@ impl Codec {
         match self {
             Self::H264 => "sample-videos/sample-10s.h264",
             Self::Hevc => "sample-videos/sample-10s.h265",
+            Self::Av1 => "output/benchmark-vt-av1-decode-input.mp4",
         }
     }
 
@@ -42,6 +45,7 @@ impl Codec {
         match self {
             Self::H264 => "h264_videotoolbox",
             Self::Hevc => "hevc_videotoolbox",
+            Self::Av1 => "av1_videotoolbox",
         }
     }
 
@@ -49,11 +53,12 @@ impl Codec {
         match self {
             Self::H264 => "h264",
             Self::Hevc => "hevc",
+            Self::Av1 => "obu",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Case {
     VideoHwDecode,
     VideoHwEncode,
@@ -113,6 +118,9 @@ struct Args {
 
     #[arg(long)]
     vt_pipeline_queue_capacity: Option<usize>,
+
+    #[arg(long, default_value_t = 40.0)]
+    min_psnr_y: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +194,11 @@ impl Stats {
         let mean = sorted.iter().sum::<f64>() / count as f64;
         let variance = sorted.iter().map(|x| (*x - mean).powi(2)).sum::<f64>() / count as f64;
         let stddev = variance.sqrt();
-        let cv_percent = if mean > 0.0 { (stddev / mean) * 100.0 } else { 0.0 };
+        let cv_percent = if mean > 0.0 {
+            (stddev / mean) * 100.0
+        } else {
+            0.0
+        };
 
         Self {
             min: *sorted.first().unwrap_or(&0.0),
@@ -212,30 +224,41 @@ fn percentile_nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
         return 0.0;
     }
     let n = sorted.len();
-    let rank = ((percentile / 100.0) * n as f64).ceil().clamp(1.0, n as f64) as usize;
+    let rank = ((percentile / 100.0) * n as f64)
+        .ceil()
+        .clamp(1.0, n as f64) as usize;
     sorted[rank - 1]
 }
 
 fn main() -> Result<()> {
+    let args = Args::parse();
+
     if !cfg!(target_os = "macos") {
         bail!("this benchmark is intended for macOS (VideoToolbox)");
     }
 
-    let args = Args::parse();
     if args.repeat == 0 {
         bail!("--repeat must be >= 1");
     }
-
     let profile = if args.release { "release" } else { "debug" };
     let output_dir = PathBuf::from("output");
     fs::create_dir_all(&output_dir).context("create output directory")?;
 
     build_examples(profile)?;
 
-    let decode_bin = example_bin_path(profile, "decode_annexb");
+    if args.codec == Codec::Av1 {
+        generate_av1_fmp4_decode_input(&args, Path::new(args.codec.sample_input()))?;
+    }
+
+    let decode_bin = if args.codec == Codec::Av1 {
+        example_bin_path(profile, "decode_to_yuv")
+    } else {
+        example_bin_path(profile, "decode_annexb")
+    };
     let encode_bin = example_bin_path(profile, "encode_synthetic");
     let encode_raw_bin = example_bin_path(profile, "encode_raw_argb");
-    let video_hw_output = output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
+    let video_hw_output =
+        output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-vt-{}-precise.bin", args.codec.as_cli()));
     let raw_input = output_dir.join(format!(
         "benchmark-input-argb-{}x{}-{}f.raw",
@@ -247,12 +270,16 @@ fn main() -> Result<()> {
         write_raw_argb_input(&raw_input, args.width, args.height, args.frame_count)?;
     }
 
-    let cases = [
-        Case::VideoHwDecode,
-        Case::VideoHwEncode,
-        Case::FfmpegDecode,
-        Case::FfmpegEncode,
-    ];
+    let cases: Vec<Case> = if args.codec == Codec::Av1 {
+        vec![Case::VideoHwDecode, Case::FfmpegDecode]
+    } else {
+        vec![
+            Case::VideoHwDecode,
+            Case::VideoHwEncode,
+            Case::FfmpegDecode,
+            Case::FfmpegEncode,
+        ]
+    };
     let mut samples = cases
         .iter()
         .copied()
@@ -281,13 +308,9 @@ fn main() -> Result<()> {
             )?;
             println!("  {:<16} {:.3}s", case.label(), run.seconds);
             if !is_warmup {
-                let idx = match case {
-                    Case::VideoHwDecode => 0,
-                    Case::VideoHwEncode => 1,
-                    Case::FfmpegDecode => 2,
-                    Case::FfmpegEncode => 3,
-                };
-                samples[idx].push(run.seconds);
+                if let Some(case_samples) = samples.iter_mut().find(|s| s.case == *case) {
+                    case_samples.push(run.seconds);
+                }
                 if let Some(metrics) = run.metrics {
                     match metrics {
                         InternalMetrics::Decode {
@@ -376,6 +399,14 @@ fn main() -> Result<()> {
         "vt_pipeline_queue_capacity: {:?}",
         args.vt_pipeline_queue_capacity
     )?;
+    if args.codec == Codec::Av1 {
+        writeln!(
+            &mut report,
+            "av1_note: decode-only; VideoToolbox AV1 encode remains unsupported"
+        )?;
+        writeln!(&mut report, "decode_input: {}", args.codec.sample_input())?;
+        writeln!(&mut report, "min_psnr_y: {:.4}", args.min_psnr_y)?;
+    }
     writeln!(&mut report)?;
     writeln!(
         &mut report,
@@ -511,16 +542,72 @@ fn main() -> Result<()> {
         }
     }
 
-    if args.verify {
+    if args.verify && args.codec == Codec::Av1 {
         writeln!(&mut report)?;
         writeln!(&mut report, "## Verification")?;
-        convert_length_prefixed_to_annexb(&video_hw_output, &video_hw_verify_input)
-            .with_context(|| {
+        let ffmpeg_ref_nv12 = output_dir.join(format!(
+            "ffmpeg-vt-av1-reference-nv12-{}x{}-{}f.raw",
+            args.width, args.height, args.frame_count
+        ));
+        generate_ffmpeg_nv12_reference(
+            Path::new(args.codec.sample_input()),
+            &ffmpeg_ref_nv12,
+            args.frame_count,
+        )?;
+        let bytes = fs::metadata(&video_hw_output).map(|m| m.len()).unwrap_or(0);
+        let expected_min = args
+            .width
+            .saturating_mul(args.height)
+            .saturating_mul(3)
+            .saturating_div(2)
+            .saturating_mul(args.frame_count.saturating_div(10).max(1));
+        writeln!(
+            &mut report,
+            "- video-hw decode raw bytes: {bytes} (expected_min={expected_min})"
+        )?;
+        if bytes < expected_min as u64 {
+            bail!("video-hw AV1 decode output is smaller than expected");
+        }
+        let psnr = compare_nv12_psnr_y(
+            &video_hw_output,
+            &ffmpeg_ref_nv12,
+            args.width,
+            args.height,
+            args.frame_count,
+        )?;
+        writeln!(
+            &mut report,
+            "- video-hw vs ffmpeg software NV12 PSNR-Y: avg={:.4}, min={:.4}, frames={}",
+            psnr.avg_y, psnr.min_y, psnr.frames
+        )?;
+        if psnr.min_y < args.min_psnr_y {
+            bail!(
+                "VideoToolbox AV1 PSNR-Y below threshold: min={:.4}, threshold={:.4}",
+                psnr.min_y,
+                args.min_psnr_y
+            );
+        }
+        let summary = ffprobe_summary(
+            Path::new(args.codec.sample_input()),
+            args.codec,
+            args.frame_count,
+        )?;
+        writeln!(
+            &mut report,
+            "- input: codec={}, {}x{}, frames={}",
+            summary.codec_name, summary.width, summary.height, summary.nb_read_frames
+        )?;
+    } else if args.verify {
+        writeln!(&mut report)?;
+        writeln!(&mut report, "## Verification")?;
+        convert_length_prefixed_to_annexb(&video_hw_output, &video_hw_verify_input).with_context(
+            || {
                 format!(
                     "convert video-hw output to annexb: {}",
                     video_hw_output.display()
                 )
-            })?;
+            },
+        )?;
         match ffprobe_summary(&video_hw_verify_input, args.codec, args.frame_count) {
             Ok(summary) => {
                 if let Err(err) = run_ffmpeg_decode_verify(&video_hw_verify_input, null_sink) {
@@ -565,9 +652,22 @@ fn main() -> Result<()> {
 }
 
 fn build_examples(profile: &str) -> Result<()> {
-    let mut args = vec!["build", "--examples", "--features", "backend-vt", "--profile", profile];
+    let mut args = vec![
+        "build",
+        "--examples",
+        "--features",
+        "backend-vt",
+        "--profile",
+        profile,
+    ];
     if profile == "release" {
-        args = vec!["build", "--examples", "--features", "backend-vt", "--release"];
+        args = vec![
+            "build",
+            "--examples",
+            "--features",
+            "backend-vt",
+            "--release",
+        ];
     }
     run_command("cargo", &args, &[])?;
     Ok(())
@@ -595,16 +695,35 @@ fn run_case(
     match case {
         Case::VideoHwDecode => {
             let mut cmd = Command::new(decode_bin);
-            cmd.args([
-                "--backend",
-                "vt",
-                "--codec",
-                args.codec.as_cli(),
-                "--input",
-                args.codec.sample_input(),
-                "--chunk-bytes",
-                &args.chunk_bytes.to_string(),
-            ]);
+            if args.codec == Codec::Av1 {
+                cmd.args([
+                    "--backend",
+                    "vt",
+                    "--codec",
+                    "av1",
+                    "--input",
+                    args.codec.sample_input(),
+                    "--input-format",
+                    "mp4",
+                    "--output-mode",
+                    "nv12",
+                    "--output",
+                    &video_hw_output.to_string_lossy(),
+                    "--fps",
+                    "30",
+                ]);
+            } else {
+                cmd.args([
+                    "--backend",
+                    "vt",
+                    "--codec",
+                    args.codec.as_cli(),
+                    "--input",
+                    args.codec.sample_input(),
+                    "--chunk-bytes",
+                    &args.chunk_bytes.to_string(),
+                ]);
+            }
             apply_vt_options(&mut cmd, args);
             run_timed_command(cmd)
         }
@@ -734,7 +853,158 @@ fn apply_vt_options(cmd: &mut Command, args: &Args) {
     }
 }
 
-fn write_raw_argb_input(path: &Path, width: usize, height: usize, frame_count: usize) -> Result<()> {
+fn generate_av1_fmp4_decode_input(args: &Args, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create input dir: {}", parent.display()))?;
+    }
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={}x{}:rate=30", args.width, args.height),
+            "-frames:v",
+            &args.frame_count.to_string(),
+            "-c:v",
+            "libaom-av1",
+            "-cpu-used",
+            "8",
+            "-g",
+            "30",
+            "-lag-in-frames",
+            "0",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            &path.to_string_lossy(),
+        ])
+        .output()
+        .with_context(|| format!("generate AV1 fMP4 input: {}", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "ffmpeg AV1 fMP4 input generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn generate_ffmpeg_nv12_reference(
+    input: &Path,
+    output_path: &Path,
+    frame_count: usize,
+) -> Result<()> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-i",
+            &input.to_string_lossy(),
+            "-frames:v",
+            &frame_count.to_string(),
+            "-pix_fmt",
+            "nv12",
+            "-f",
+            "rawvideo",
+            &output_path.to_string_lossy(),
+        ])
+        .output()
+        .with_context(|| format!("generate FFmpeg NV12 reference: {}", output_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "ffmpeg NV12 reference generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PsnrSummary {
+    frames: usize,
+    avg_y: f64,
+    min_y: f64,
+}
+
+fn compare_nv12_psnr_y(
+    actual_path: &Path,
+    reference_path: &Path,
+    width: usize,
+    height: usize,
+    requested_frames: usize,
+) -> Result<PsnrSummary> {
+    let actual = fs::read(actual_path)
+        .with_context(|| format!("read video-hw NV12 output: {}", actual_path.display()))?;
+    let reference = fs::read(reference_path)
+        .with_context(|| format!("read FFmpeg NV12 reference: {}", reference_path.display()))?;
+    let y_size = width
+        .checked_mul(height)
+        .context("NV12 luma plane size overflow")?;
+    let frame_size = y_size
+        .checked_mul(3)
+        .and_then(|v| v.checked_div(2))
+        .context("NV12 frame size overflow")?;
+    let frames = actual
+        .len()
+        .min(reference.len())
+        .checked_div(frame_size)
+        .unwrap_or(0)
+        .min(requested_frames);
+    if frames == 0 {
+        bail!(
+            "no full NV12 frames to compare: actual_bytes={}, reference_bytes={}, frame_size={frame_size}",
+            actual.len(),
+            reference.len()
+        );
+    }
+
+    let mut values = Vec::with_capacity(frames);
+    for frame in 0..frames {
+        let offset = frame * frame_size;
+        let actual_y = &actual[offset..offset + y_size];
+        let reference_y = &reference[offset..offset + y_size];
+        values.push(psnr_y(actual_y, reference_y));
+    }
+    let avg_y = values.iter().sum::<f64>() / values.len() as f64;
+    let min_y = values.iter().copied().fold(f64::INFINITY, f64::min);
+    Ok(PsnrSummary {
+        frames,
+        avg_y,
+        min_y,
+    })
+}
+
+fn psnr_y(actual: &[u8], reference: &[u8]) -> f64 {
+    let mse = actual
+        .iter()
+        .zip(reference.iter())
+        .map(|(a, b)| {
+            let diff = f64::from(*a) - f64::from(*b);
+            diff * diff
+        })
+        .sum::<f64>()
+        / actual.len().max(1) as f64;
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * ((255.0 * 255.0) / mse).log10()
+    }
+}
+
+fn write_raw_argb_input(
+    path: &Path,
+    width: usize,
+    height: usize,
+    frame_count: usize,
+) -> Result<()> {
     let frame_size = width
         .checked_mul(height)
         .and_then(|px| px.checked_mul(4))
@@ -862,9 +1132,7 @@ fn run_timed_command(mut cmd: Command) -> Result<CaseRun> {
     cmd.stderr(Stdio::piped());
 
     let start = Instant::now();
-    let output = cmd
-        .output()
-        .context("spawn command for benchmark case")?;
+    let output = cmd.output().context("spawn command for benchmark case")?;
     let elapsed = start.elapsed().as_secs_f64();
 
     if !output.status.success() {

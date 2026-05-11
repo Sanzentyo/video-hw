@@ -9,7 +9,7 @@ use clap::Parser;
 use video_hw::{
     AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
     EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
-    VtEncoderOptions,
+    VtEncoderOptions, VulkanEncoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -59,6 +59,8 @@ struct Args {
     vt_pipeline_queue_capacity: Option<usize>,
     #[arg(long, default_value_t = false)]
     intel_force_software: bool,
+    #[arg(long)]
+    vulkan_adapter_index: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -121,6 +123,11 @@ fn main() -> Result<()> {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
             force_software: args.intel_force_software,
             hevc_use_vpp: None,
+            ..Default::default()
+        });
+    } else if backend_is_vulkan(resolved_backend) {
+        config.backend_options = BackendEncoderOptions::Vulkan(VulkanEncoderOptions {
+            adapter_index: args.vulkan_adapter_index,
             ..Default::default()
         });
     }
@@ -263,6 +270,7 @@ fn parse_codec(raw: &str) -> Result<Codec> {
     match raw.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
         "hevc" | "h265" => Ok(Codec::Hevc),
+        "av1" => Ok(Codec::Av1),
         other => anyhow::bail!("unsupported codec: {other}"),
     }
 }
@@ -306,6 +314,22 @@ fn backend_is_vt(backend: BackendKind) -> bool {
 
 #[cfg(not(all(target_os = "macos", feature = "backend-vt")))]
 fn backend_is_vt(_backend: BackendKind) -> bool {
+    false
+}
+
+#[cfg(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn backend_is_vulkan(backend: BackendKind) -> bool {
+    matches!(backend, BackendKind::Vulkan)
+}
+
+#[cfg(not(all(
+    feature = "backend-vulkan",
+    any(target_os = "linux", target_os = "windows")
+)))]
+fn backend_is_vulkan(_backend: BackendKind) -> bool {
     false
 }
 

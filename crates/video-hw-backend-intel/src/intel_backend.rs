@@ -118,11 +118,11 @@ impl IntelDecoderAdapter {
 
 impl VideoDecoder for IntelDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -267,11 +267,11 @@ impl IntelEncoderAdapter {
 
 impl VideoEncoder for IntelEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc);
+        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
         Ok(CapabilityReport {
             codec,
             decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc),
+            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
             hardware_acceleration: true,
             decode_output_modes: if decode_supported {
                 vec![
@@ -395,7 +395,7 @@ async fn decode_with_onevpl(
         .ok()
         .and_then(|raw| raw.parse::<u16>().ok())
         .filter(|depth| (1..=16).contains(depth))
-        .unwrap_or(10);
+        .unwrap_or(16);
     decode_params.set_async_depth(decode_async_depth);
     let decoder = session
         .decoder(decode_params)
@@ -585,10 +585,7 @@ fn surface_to_backend_frame(
     let argb = if matches!(output_mode, DecodeOutputMode::Metadata) {
         None
     } else {
-        let mut data = Vec::new();
-        surface.read_to_end(&mut data).map_err(|err| {
-            BackendError::Backend(format!("failed to read decoded frame payload: {err}"))
-        })?;
+        let data = read_surface_payload(surface, width, height, fourcc)?;
         Some(surface_payload_to_argb(&data, width, height, fourcc)?)
     };
 
@@ -620,6 +617,156 @@ fn surface_payload_to_argb(
         _ => Err(BackendError::UnsupportedConfig(format!(
             "unsupported decoded pixel format from Intel backend: {fourcc:?}"
         ))),
+    }
+}
+
+fn read_surface_payload(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+    fourcc: FourCC,
+) -> Result<Vec<u8>, BackendError> {
+    if width == 0 || height == 0 {
+        return Err(BackendError::InvalidInput(
+            "decoded frame dimensions must be positive".to_string(),
+        ));
+    }
+    surface
+        .map(MemoryFlag::READ)
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::map"))?;
+    let read_result = match fourcc {
+        FourCC::NV12 => read_mapped_nv12_surface(surface, width, height),
+        FourCC::IyuvOrI420 | FourCC::YV12 => read_mapped_i420_surface(surface, width, height),
+        FourCC::Rgb4OrBgra => read_mapped_bgra_surface(surface, width, height),
+        _ => Err(BackendError::UnsupportedConfig(format!(
+            "unsupported decoded pixel format from Intel backend: {fourcc:?}"
+        ))),
+    };
+
+    let unmap_result = surface
+        .unmap()
+        .map_err(|status| map_onevpl_status(status, "FrameSurface::unmap"));
+
+    let data = read_result?;
+    unmap_result?;
+    Ok(data)
+}
+
+fn read_mapped_nv12_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(
+            "NV12 decode currently requires even frame dimensions".to_string(),
+        ));
+    }
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    if pitch < width {
+        return Err(BackendError::Backend(format!(
+            "unexpected NV12 surface pitch (smaller than width): pitch={}, width={width}",
+            bounds.pitch
+        )));
+    }
+    let y_plane = surface.y();
+    let y_ptr = y_plane.as_ptr();
+    let uv_ptr = surface.u().as_ptr();
+    let y_size = width
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
+    let uv_size = y_size / 2;
+    let mut out = vec![0_u8; y_size + uv_size];
+    copy_pitched_rows(y_ptr, pitch, width, height, &mut out[..y_size]);
+    copy_pitched_rows(uv_ptr, pitch, width, height / 2, &mut out[y_size..]);
+    Ok(out)
+}
+
+fn read_mapped_i420_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(
+            "I420 decode currently requires even frame dimensions".to_string(),
+        ));
+    }
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    let chroma_pitch = pitch / 2;
+    let chroma_width = width / 2;
+    if pitch < width || chroma_pitch < chroma_width {
+        return Err(BackendError::Backend(format!(
+            "unexpected I420 surface pitch: pitch={}, width={width}",
+            bounds.pitch
+        )));
+    }
+    let y_plane = surface.y();
+    let y_ptr = y_plane.as_ptr();
+    let u_ptr = surface.u().as_ptr();
+    let v_ptr = surface.v().as_ptr();
+    let y_size = width
+        .checked_mul(height)
+        .ok_or_else(|| BackendError::InvalidInput("i420 luma size overflow".to_string()))?;
+    let uv_size = y_size / 4;
+    let mut out = vec![0_u8; y_size + uv_size * 2];
+    copy_pitched_rows(y_ptr, pitch, width, height, &mut out[..y_size]);
+    copy_pitched_rows(
+        u_ptr,
+        chroma_pitch,
+        chroma_width,
+        height / 2,
+        &mut out[y_size..(y_size + uv_size)],
+    );
+    copy_pitched_rows(
+        v_ptr,
+        chroma_pitch,
+        chroma_width,
+        height / 2,
+        &mut out[(y_size + uv_size)..],
+    );
+    Ok(out)
+}
+
+fn read_mapped_bgra_surface(
+    surface: &mut onevpl::FrameSurface<'_>,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, BackendError> {
+    let bounds = surface.bounds();
+    let pitch = usize::from(bounds.pitch);
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| BackendError::InvalidInput("BGRA row size overflow".to_string()))?;
+    if pitch < row_bytes {
+        return Err(BackendError::Backend(format!(
+            "unexpected BGRA surface pitch (smaller than row): pitch={}, row={row_bytes}",
+            bounds.pitch
+        )));
+    }
+    let b_plane = surface.b();
+    let mut out = vec![0_u8; row_bytes * height];
+    copy_pitched_rows(b_plane.as_ptr(), pitch, row_bytes, height, &mut out);
+    Ok(out)
+}
+
+fn copy_pitched_rows(
+    src: *const u8,
+    source_pitch: usize,
+    row_bytes: usize,
+    rows: usize,
+    dst: &mut [u8],
+) {
+    debug_assert!(dst.len() >= row_bytes * rows);
+    for row in 0..rows {
+        // SAFETY: The caller obtained `src` from a mapped oneVPL surface plane and
+        // validated that `source_pitch >= row_bytes`. The destination slice is sized
+        // for all requested rows.
+        let source = unsafe { std::slice::from_raw_parts(src.add(row * source_pitch), row_bytes) };
+        let target = &mut dst[(row * row_bytes)..((row + 1) * row_bytes)];
+        target.copy_from_slice(source);
     }
 }
 
@@ -999,15 +1146,8 @@ async fn encode_with_onevpl(
         .max(min_bitstream_capacity);
     let mut backing_buffer = vec![0_u8; buffer_size];
     let mut bitstream = Bitstream::with_codec(&mut backing_buffer, to_onevpl_codec(codec));
-    struct PendingEncodeSubmission<'a> {
-        _surface: Option<onevpl::FrameSurface<'a>>,
-        bitstream: Bitstream<'static>,
-        submission: onevpl::encode::EncodeSubmission,
-    }
     let mut packets = Vec::new();
     let mut pending_pts = VecDeque::new();
-    let mut pending_encode_submissions = VecDeque::new();
-    let encode_queue_limit = usize::from(async_depth.max(1));
     let aligned_width = usize::from(hw_width);
     let aligned_height = usize::from(hw_height);
 
@@ -1059,114 +1199,17 @@ async fn encode_with_onevpl(
                 .get_surface()
                 .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
             write_argb_to_nv12_surface(&mut input_surface, argb, width, height)?;
-            let mut queued_surface = Some(input_surface);
-            let max_queued_bitstream_capacity = 32 * 1024 * 1024;
-            let mut queued_bitstream_capacity = buffer_size;
-            let mut queued_bitstream = Some(Bitstream::with_owned_capacity(
-                queued_bitstream_capacity,
-                to_onevpl_codec(codec),
-            ));
-            let mut queued = false;
-            loop {
-                let submission_result = encoder.encode_async(
-                    &mut ctrl,
-                    queued_surface.as_mut(),
-                    queued_bitstream
-                        .as_mut()
-                        .expect("queued bitstream is initialized"),
-                );
-                match submission_result {
-                    Ok(submission) => {
-                        pending_encode_submissions.push_back(PendingEncodeSubmission {
-                            _surface: queued_surface.take(),
-                            bitstream: queued_bitstream
-                                .take()
-                                .expect("queued bitstream is initialized"),
-                            submission,
-                        });
-                        queued = true;
-                        break;
-                    }
-                    Err(MfxStatus::MoreData) => break,
-                    Err(MfxStatus::NotEnoughBuffer) => {
-                        let next_capacity = queued_bitstream_capacity
-                            .saturating_mul(2)
-                            .min(max_queued_bitstream_capacity);
-                        if next_capacity <= queued_bitstream_capacity {
-                            let context = format!(
-                                "Encoder::encode_async (hardware hevc-nv12, bitstream_capacity={} reached max {})",
-                                queued_bitstream_capacity, max_queued_bitstream_capacity
-                            );
-                            return Err(map_onevpl_status(MfxStatus::NotEnoughBuffer, &context));
-                        }
-                        queued_bitstream_capacity = next_capacity;
-                        queued_bitstream = Some(Bitstream::with_owned_capacity(
-                            queued_bitstream_capacity,
-                            to_onevpl_codec(codec),
-                        ));
-                    }
-                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
-                        if let Some(mut pending) = pending_encode_submissions.pop_front() {
-                            match encoder.sync_encode(
-                                pending.submission,
-                                &pending.bitstream,
-                                Some(0),
-                            ) {
-                                Ok(_) => {
-                                    collect_packets(
-                                        &mut pending.bitstream,
-                                        codec,
-                                        &mut pending_pts,
-                                        &mut packets,
-                                    )?;
-                                }
-                                Err(
-                                    MfxStatus::InExecution
-                                    | MfxStatus::DeviceBusy
-                                    | MfxStatus::TaskBusy,
-                                ) => {
-                                    pending_encode_submissions.push_back(pending);
-                                }
-                                Err(status) => {
-                                    return Err(map_onevpl_status(
-                                        status,
-                                        "Encoder::sync_encode (hardware hevc-nv12)",
-                                    ));
-                                }
-                            }
-                        }
-                        std::thread::yield_now();
-                    }
-                    Err(status) => {
-                        return Err(map_onevpl_status(
-                            status,
-                            "Encoder::encode_async (hardware hevc-nv12)",
-                        ));
-                    }
-                }
-            }
-            if queued
-                && pending_encode_submissions.len() >= encode_queue_limit
-                && let Some(mut pending) = pending_encode_submissions.pop_front()
+            match encoder
+                .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
+                .await
             {
-                match encoder.sync_encode(pending.submission, &pending.bitstream, Some(0)) {
-                    Ok(_) => {
-                        collect_packets(
-                            &mut pending.bitstream,
-                            codec,
-                            &mut pending_pts,
-                            &mut packets,
-                        )?;
-                    }
-                    Err(MfxStatus::InExecution | MfxStatus::DeviceBusy | MfxStatus::TaskBusy) => {
-                        pending_encode_submissions.push_back(pending);
-                    }
-                    Err(status) => {
-                        return Err(map_onevpl_status(
-                            status,
-                            "Encoder::sync_encode (hardware hevc-nv12)",
-                        ));
-                    }
+                Ok(_) => collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?,
+                Err(MfxStatus::MoreData) => {}
+                Err(status) => {
+                    return Err(map_onevpl_status(
+                        status,
+                        "Encoder::encode (hardware hevc-nv12)",
+                    ));
                 }
             }
             continue;
@@ -1283,22 +1326,6 @@ async fn encode_with_onevpl(
         }
     }
 
-    if hevc_cpu_nv12 {
-        while let Some(mut pending) = pending_encode_submissions.pop_front() {
-            encoder
-                .sync_encode(pending.submission, &pending.bitstream, None)
-                .map_err(|status| {
-                    map_onevpl_status(status, "Encoder::sync_encode drain (hardware hevc-nv12)")
-                })?;
-            collect_packets(
-                &mut pending.bitstream,
-                codec,
-                &mut pending_pts,
-                &mut packets,
-            )?;
-        }
-    }
-
     loop {
         let mut ctrl = EncodeCtrl::new();
         match encoder.encode(&mut ctrl, None, &mut bitstream, None).await {
@@ -1322,6 +1349,13 @@ fn collect_packets(
         return Ok(());
     }
 
+    if bitstream.offset() > 0 {
+        bitstream.write_all(&[]).map_err(|err| {
+            BackendError::Backend(format!(
+                "failed to normalize encoded bitstream offset before read: {err}"
+            ))
+        })?;
+    }
     let mut data = vec![0_u8; data_len];
     bitstream.read_exact(&mut data).map_err(|err| {
         BackendError::Backend(format!("failed to read encoded bitstream payload: {err}"))
@@ -1924,6 +1958,7 @@ fn to_onevpl_codec(codec: Codec) -> OneVplCodec {
     match codec {
         Codec::H264 => OneVplCodec::AVC,
         Codec::Hevc => OneVplCodec::HEVC,
+        Codec::Av1 => OneVplCodec::AV1,
     }
 }
 
@@ -1950,7 +1985,7 @@ fn parse_rate_control_method(raw: &str) -> Option<RateControlMethod> {
 fn default_rate_control_method(codec: Codec) -> RateControlMethod {
     match codec {
         Codec::H264 => RateControlMethod::CBR,
-        Codec::Hevc => RateControlMethod::CQP,
+        Codec::Hevc | Codec::Av1 => RateControlMethod::CQP,
     }
 }
 

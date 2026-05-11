@@ -22,7 +22,7 @@ pub use transform::{
 mod backend_transform_adapter;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-mod bitstream;
+mod nv_bitstream;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod pipeline_scheduler;

@@ -2,9 +2,12 @@
 
 `video-hw` の encoder/decoder を使って fragmented MP4 を扱うための crate です。
 
+H.264 (`avc1`), HEVC (`hvc1`), AV1 (`av01`) の video sample entry を扱えます。AV1 は `av1C` に sequence header OBU を保存し、sample payload は `EncodedLayout::Av1` の低オーバーヘッド OBU として保持します。`EncodedSample::to_annexb()` は互換上 AV1 payload をそのまま返し、crate 内部の decode path は keyframe submit 時に `av1C.config_obus` を sample payload の前に付与します。
+
 - Writer は typestate
   - `Fmp4Writer<Ready>`
   - `Fmp4Writer<SyncRecording>`
+  - `Fmp4Writer<SyncEncodedRecording>`
   - `Fmp4Writer<AsyncRecording>`
   - `Fmp4Writer<Finished>`
 - Reader も typestate
@@ -27,6 +30,13 @@
   - `shiguredo_mp4::SampleEntry` は外部 runtime 型のため serde 対象外です。`Fmp4Track` / `EncodedSample` の `sample_entry` は serialization では省略され、deserialization では `None` になります
   - `Mp4IndexSnapshot::track_descriptions` には codec / layout / NAL length size / parameter sets / basic audio-video fields を含む軽量 description が入ります
   - `DecodeDiagnostics` は backend と output mode を文字列として serialize します。deserialize では有効化済み backend feature に含まれる `resolved_backend` だけを復元できます
+
+## Responsibility Boundary
+
+- `video-hw-core::bitstream` は H.264/HEVC の Annex-B / length-prefixed payload 変換、NALU 分割、parameter set 抽出、access unit assembly などの codec payload utility を提供します。
+- `video-hw-fmp4` は fragmented MP4 container の reader/writer と MP4 sample entry 管理を担当します。WebRTC/RTP packetizer/depacketizer、signaling、GUI preview、relay policy は上位アプリの責務です。
+- `EncodedLayout::Av1` は Annex-B ではありません。互換 API の `to_annexb()` は AV1 payload passthrough、`to_decode_payload()` は decode 用 payload を返す API です。
+- `EncodedLayout::Opaque` は変換 API では明示 error になります。
 
 ## Writer Example
 
@@ -111,6 +121,20 @@ fn main() -> Result<()> {
 cargo run -p video-hw-fmp4 --example write_synthetic_fmp4 --features backend-vt
 ```
 
+AV1 / NVIDIA で書き出す場合:
+
+```bash
+cargo run -p video-hw-fmp4 --features backend-nvidia --example write_synthetic_fmp4 --release -- --codec av1 --frames 30 --width 320 --height 180 --fps 30 --fragment-frames 10 --output output/synthetic-av1-fmp4.mp4 --require-hardware
+ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=codec_name,width,height,nb_read_frames -of default=noprint_wrappers=1 output/synthetic-av1-fmp4.mp4
+```
+
+backend を固定して確認する場合は `--backend nvidia` / `--backend intel` などを指定できます。Intel AV1 の確認例:
+
+```bash
+cargo run -p video-hw-fmp4 --features 'backend-intel async-session' --example write_synthetic_fmp4 --release -- --backend intel --codec av1 --frames 30 --width 320 --height 180 --fps 30 --fragment-frames 10 --output output/synthetic-intel-av1-fmp4.mp4 --require-hardware
+ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=codec_name,codec_tag_string,width,height,nb_read_frames -of default=noprint_wrappers=1 output/synthetic-intel-av1-fmp4.mp4
+```
+
 - file read
 
 ```bash
@@ -144,7 +168,7 @@ cargo run -p video-hw-fmp4 --example read_fmp4_slider_gui --features 'backend-nv
 - `DecodedSampleFrame` は `sample_id`、fMP4 由来の `sample_meta`（`pts` / `dts` / `duration` など）、返却ベクタ内の `presentation_index`、backend の `frame` を持ちます。decode-order が必要な caller は `sample_meta.dts` または `sample_id` / `sample_meta` から明示的に並べ替えてください。
 - `DecodeDiagnostics` は `returned_frame_order`、要求 sample 数、decoder から得た frame 数、返却 frame 数、sample metadata 付き frame 数、drop/unmatched 数、不確実な fallback sample association 数、missing sample ids を返します。`decode_window` / `decode_range` / `decode_sample` の返却ベクタは `ReturnedFrameOrder::Presentation` として報告されます。
 - `CachedFrameDecoder` は明示的に opt-in する decoded-frame LRU です。`DecodedFrameCacheConfig` の `max_frames` / `max_bytes` で容量を制御し、`decode_sample_cached` は `FrameDecodeWindowRequest.before/after` を prefetch window として使って中心 sample を返します。長い連続処理では引き続き `decode_range_iter` を使ってください。
-- `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
+- `EncodedSample::to_annexb()` は MP4 sample entry の NAL length size（1/2/4 byte）に従います。AV1 では OBU payload passthrough です。decoder に渡す bytes が必要な場合は `EncodedSample::to_decode_payload()` を使うと、H.264/HEVC は Annex-B、AV1 keyframe は `av1C.config_obus` を前置した OBU payload になります。`index_snapshot()` は metadata report 用、`clear_cache()` は range cache の明示解放用です。
 - `status()` は global / track別 / sample別の payload read stats と range cache stats を返します。`DecodeDiagnostics` は要求 backend、実解決 backend、output mode、fallback 有無と理由も返します。
 - decode access pattern の性能を見る場合は `scripts/benchmark_fmp4_decode_access.rs` を使って、`decode_range_iter`、単発 `decode_sample`、`CachedFrameDecoder` を比較できます。レポートには decoded cache stats、encoded payload read 数、byte range cache hit/miss、FFmpeg RGB24 reference との MSE/PSNR が入ります。
 - `serde` feature 有効時は `SampleMeta`、`Mp4IndexSnapshot`、`SampleLookup`、`Fmp4ReaderStatus` などの metadata/report 型を JSON 等へ保存できます。

@@ -1,0 +1,380 @@
+# Vulkan AV1 Implementation Plan - 2026-05-06
+
+## Goal
+
+Add real Vulkan AV1 decode/encode support where the driver exposes Vulkan Video
+AV1 capability, then validate fMP4 integration, PSNR, and FFmpeg parity. This
+plan covers the missing work tracked in
+`docs/status/AV1_BACKEND_STATUS_2026-05-06.md`.
+
+## Current Boundary
+
+- NVIDIA and Intel oneVPL AV1 are implemented and verified.
+- Vulkan AV1 decode now supports generated keyframe-only OBU/fMP4, short GOP,
+  long-GOP OBU, and long-GOP fMP4 replay scopes on NVIDIA and is still not a
+  full capability claim for arbitrary AV1 streams.
+- Vulkan AV1 decode prerequisite probing and low-overhead OBU inspection are now
+  implemented in `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`.
+- FFmpeg `av1_vulkan` decode and encode work on the NVIDIA adapter in this
+  Windows environment when encode is sent to a null muxer for throughput
+  measurement.
+- FFmpeg Vulkan AV1 decode on the Intel adapter still exits with Windows access
+  violation `0xc0000005`; Intel AV1 is usable through QSV on this host, not
+  through the Vulkan Video path.
+- Intel Vulkan AV1 encode is not available here because FFmpeg also fails on the
+  Intel adapter without the required encode queue/path.
+
+## Decode-First Scope
+
+Start with decode. It has a clearer acceptance gate than encode: the backend
+must decode an AV1 OBU elementary stream to `Metadata`, `Nv12`, and `Rgb24`, and
+the pixel output must pass PSNR against FFmpeg software decode.
+
+### Phase 1: Capability And Device Plumbing
+
+Files:
+
+- `crates/video-hw-backend-vulkan/src/lib.rs`
+- `crates/video-hw-backend-vulkan/src/vulkan_backend.rs`
+- new `crates/video-hw-backend-vulkan/src/vulkan_av1_decode.rs`
+
+Tasks:
+
+1. Add a Vulkan AV1 decode prerequisite probe beside the HEVC probe. Done.
+2. Query `VK_KHR_video_queue`, `VK_KHR_video_decode_queue`, and
+   `VK_KHR_video_decode_av1`. Done.
+3. Build `vk::VideoProfileInfoKHR` with
+   `vk::VideoCodecOperationFlagsKHR::DECODE_AV1` and
+   `vk::VideoDecodeAV1ProfileInfoKHR`. Done.
+4. Query `vk::VideoDecodeAV1CapabilitiesKHR` and output formats. Done.
+5. Keep `CapabilityReport` conservative until the supported decode scope is
+   broader than generated keyframe-only streams, matching the existing Vulkan
+   HEVC safety pattern.
+
+Relevant ash binding names already available:
+
+- `vk::VideoDecodeAV1ProfileInfoKHR`
+- `vk::VideoDecodeAV1CapabilitiesKHR`
+- `vk::VideoDecodeAV1SessionParametersCreateInfoKHR`
+- `vk::VideoDecodeAV1PictureInfoKHR`
+- `vk::VideoDecodeAV1DpbSlotInfoKHR`
+- `vk::VideoCodecOperationFlagsKHR::DECODE_AV1`
+
+### Phase 2: OBU Parser And Sequence Header Model
+
+Files:
+
+- new `vulkan_av1_decode.rs`
+- share parser ideas with `video-hw-fmp4` writer helpers only if the shared API
+  stays small and codec-local.
+
+Tasks:
+
+1. Parse low-overhead AV1 OBUs with LEB128 size fields.
+2. Extract sequence header OBU and populate `StdVideoAV1SequenceHeader`.
+   Low-overhead OBU extraction and reduced-still coded extent parsing are done;
+   reduced-still `StdVideoAV1SequenceHeader` skeleton population is done; full
+   color/timing and non-reduced header coverage remains.
+3. Split temporal units / frame OBUs into access units suitable for Vulkan
+   submit. Ordered multi-frame submit/decode-info skeleton extraction is now
+   covered for temporal-delimiter-separated frame OBUs, and multiple tile-group
+   OBUs following one frame header are grouped into one submit skeleton.
+4. Reject unsupported input forms explicitly:
+   - IVF container bytes passed as elementary stream. Done.
+   - OBUs without size fields if the submit path cannot packetize them safely;
+   - missing sequence header before first frame. Done for decode-info skeleton
+     extraction, including late sequence-header rejection.
+   - normal non-reduced streams whose frame header cannot be safely split from
+     tile data. `show_existing_frame` and inter-frame `frame_type=1` now fail
+     before submit skeleton construction instead of being interpreted as tile
+     payload.
+5. Unit tests:
+   - sequence header extraction;
+   - temporal delimiter + sequence header + frame split;
+   - truncated LEB128 / truncated payload rejection;
+   - multiple frames keep presentation order.
+
+### Phase 3: Session Bootstrap
+
+Tasks:
+
+1. Create video session using `VideoDecodeAV1SessionParametersCreateInfoKHR`
+   chained to `VideoSessionParametersCreateInfoKHR`. Prerequisite probe now
+   covers synthetic reduced-still session/session-parameters creation; decode
+   blocker messages now also probe real-bitstream session-parameters creation.
+   The probe now also queries video-session memory requirements and reports the
+   count, total size, and maximum alignment; it also allocates, binds, and frees
+   the required session memory before session-parameter creation.
+2. Bind video session memory using the same non-zero memory-requirement contract
+   used by HEVC. Do not enable the Intel zero-memory workaround experiments for
+   AV1 without a valid Vulkan contract.
+3. Allocate output and DPB images from the formats accepted by the AV1 profile.
+   Decode image creation is now planned from the command skeleton using the
+   selected format, coded extent, DPB array-layer count, and
+   `VIDEO_DECODE_DST_KHR|VIDEO_DECODE_DPB_KHR|TRANSFER_SRC` usage. Real-bitstream
+   probing now creates the image with an AV1 `VideoProfileListInfoKHR`, binds
+   memory, creates a 2D-array view, and destroys the probe resources.
+4. Build a skeleton submit probe that records begin/control/end without frame
+   decode, then a submit execution probe for a single key frame. Bitstream
+   submit skeleton extraction now covers frame-header offset and tile
+   offset/size discovery, and key-frame `StdVideoDecodeAV1PictureInfo` skeleton
+   plus `vk::VideoDecodeAV1PictureInfoKHR` construction is covered; Vulkan
+   decode-info source range construction now covers `srcBufferOffset`,
+   `srcBufferRange`, coded extent propagation, and relative AV1 frame/tile
+   offsets within the range; ash `VideoDecodeInfoKHR` construction with the AV1
+   picture-info `pNext` chain and HEVC-style destination picture resource
+   construction are now covered. Key-frame setup-reference scaffolding now
+   builds AV1 std reference info, AV1 DPB slot info, and the Vulkan reference
+   slot chain; key-frame command skeleton extraction also assigns frames to
+   deterministic rotating setup slots, and decode-info construction can attach
+   that setup slot. Begin-coding DPB slot bindings and picture resources are
+   now modeled, including AV1 DPB slot info and Vulkan reference-slot chains.
+   `VideoBeginCodingInfoKHR` and the mandatory first RESET control info are now
+   modeled, along with default `VideoEndCodingInfoKHR`. Vulkan command
+   recording order is now modeled as begin, RESET, decode frames, end; actual
+   command buffer calls remain. Frame-level destination picture resources are
+   now mapped from the planned setup DPB slots, and frame record bundles tie
+   decode-info indices to destination base layers. Aligned bitstream upload
+   planning now rewrites per-frame `srcBufferOffset` / `srcBufferRange` to
+   caller-provided alignment boundaries while copying only the minimal decode
+   payload bytes into a compact submit buffer; bitstream session diagnostics now
+   surface the adapter's Vulkan Video bitstream offset/range alignments so the
+   plan can use capability-derived values instead of a fixed constant. The
+   aligned upload plan can now validate each command frame's source range
+   against the compact buffer, produce per-frame submit bundles, and materialize
+   callback-scoped `VideoDecodeInfoKHR` chains for all frames in command order
+   before real command recording consumes them. A command-sequence visitor now
+   materializes begin-coding, RESET, per-frame decode, and end-coding data in the
+   order the future recorder will issue Vulkan calls; a result-returning record
+   callback wrapper now provides the insertion point for the actual unsafe ash
+   command calls and validates begin/reset/decode/end counts against the planned
+   frames. Real-bitstream probing now also creates, binds, uploads, and destroys
+   a `VIDEO_DECODE_SRC_KHR` source buffer from the aligned upload plan, keeps
+   that source buffer together with the decode image/view, video session,
+   session parameters, and bound session memory while materializing the command
+   sequence, and reports the planned decode-command count using real non-null
+   handles. Command-buffer setup now has pure builders for the source-buffer
+   HOST_WRITE -> VIDEO_DECODE_READ memory barrier and decode-image UNDEFINED ->
+   VIDEO_DECODE_DST_KHR initialization barrier. An opt-in
+   `VIDEO_HW_VULKAN_AV1_RECORD_COMMAND_BUFFER=1` probe can record a real command
+   buffer with begin/reset/decode/end commands against those live resources.
+   The record path now also materializes key-frame/single-tile default AV1 std
+   substructures for `pTileInfo`, `pQuantization`, `pSegmentation`,
+   `pLoopFilter`, `pCDEF`, `pLoopRestoration`, and `pGlobalMotion`, matching
+   the non-NULL picture-info shape used by FFmpeg's Vulkan AV1 path.
+   Actual queue submit and readback are now covered by opt-in live probes rather
+   than hidden inside the default capability probe.
+5. Cache bootstrap results by bitstream hash, access-unit limit, and optional
+   physical-device index as HEVC does.
+
+Acceptance:
+
+- invalid AV1 bitstream returns `UnsupportedConfig` with sequence-header status;
+- valid FFmpeg-generated AV1 input reaches a non-crashing submit probe on NVIDIA.
+
+### Phase 4: Decode Submit And Readback
+
+Tasks:
+
+1. Populate `StdVideoDecodeAV1PictureInfo` for key-frame-only streams first.
+2. Chain `VideoDecodeAV1PictureInfoKHR` onto `VideoDecodeInfoKHR`. The pure
+   decode-info skeleton now validates the source bitstream range and relative
+   AV1 offsets, and can build the ash decode-info chain with caller-owned
+   source buffers plus destination image views/base layers; real buffer/image
+   allocation and command submission remain.
+3. For reference frames, populate `StdVideoDecodeAV1ReferenceInfo` and chain
+   `VideoDecodeAV1DpbSlotInfoKHR` on setup/reference slots. Key-frame setup
+   reference construction is covered; inter-frame reference lists remain. The
+   first inter-frame parser step now uses `oxideav-av1` for real frame headers,
+   maps those fields into the picture-info skeleton, and reports `order_hint`,
+   `primary_ref_frame`, `refresh_frame_flags`, `ref_frame_idx`, and tile payload
+   offset before stopping at reference-slot replay.
+4. Reuse the HEVC readback path for NV12 output only after verifying the output
+   image format and coded extent constraints match AV1 capabilities. AV1 now
+   has a pure NV12 readback plan for `G8_B8R8_2PLANE_420_UNORM` that matches the
+   HEVC plane-copy layout, including odd-dimension chroma rounding and 4-byte
+   plane offset alignment; the opt-in `--readback` live probe records the
+   decode-output image transition, copies both NV12 planes into a host-visible
+   buffer, orders transfer writes before host reads, submits the command buffer,
+   and maps the full planned byte range. The same probe can now accept an
+   external AV1 low-overhead OBU stream, and
+   `scripts/check_vulkan_av1_record_probe.rs --generate-ffmpeg-obu --readback`
+   verifies a one-frame FFmpeg `libaom-av1` OBU through submit/readback on
+   adapters where the selected decode queue also supports transfer. Intel on
+   this host exposes AV1 decode on a decode-only queue, so production Intel
+   readback still needs a separate transfer queue/ownership-transfer path. The
+   explicit Vulkan backend path now submits the command buffer through the
+   option path rather than depending on probe environment variables, initializes
+   the readback buffer with a sentinel before copy, and reuses this for
+   one-frame key-frame OBU inputs. PSNR is still low. The current parser pass
+   separates Frame OBU header bytes from tile payload bytes and feeds observed
+   quantizer, loop-filter, CDEF, tx-mode, picture flags, and sequence feature
+   flags into the std structs. Session parameters now include an 8-bit 4:2:0
+   `StdVideoAV1ColorConfig`, and begin-coding reference slots now bind the
+   current reconstruction resource as inactive (`slotIndex = -1`) like FFmpeg.
+   The submit path now also passes a zeroed `StdVideoAV1TimingInfo`, uses
+   FFmpeg's `[1, 1, 1]` loop-restoration size defaults when restoration is
+   disabled, and runs the initial decoder RESET in a separate command-buffer
+   submit before the frame decode command buffer. The image path now also uses
+   FFmpeg's non-layered decode/DPB image layout and a plain 2D image view for
+   one-layer decode images, plus the same output decode/DPB image-view usage
+   pNext shape; setup/reference DPB slots now bind a separate DPB-only image view
+   over the same image, matching FFmpeg's output/reference view split. Session
+   creation now uses the capability maximum coded extent, as FFmpeg does, rather
+   than the input frame extent. The sequence-header parser now follows FFmpeg
+   `trace_headers` field ordering around screen-content/integer-mv selection and
+   `order_hint_bits_minus_1`, and global motion defaults now use identity matrix
+   params (`gm_params[2]` and `[5]` equal to `1 << 16`) like FFmpeg. An opt-in
+   `VIDEO_HW_VULKAN_AV1_QUERY_STATUS=1` diagnostic can also wrap the decode in a
+   result-status query; NVIDIA returns `decode_query_status_raw=Some(1)` for the
+   generated OBU probe. Generated-OBU PSNR gates now pass at `--min-psnr-y 60`
+   with `psnr_y_min=inf`, matching the FFmpeg software-reference Y plane for
+   keyframe-only cases. The fMP4 path now also forwards AV1 MP4 samples as OBU
+   payload, prepends `av1C.config_obus` for keyframes, and passes the generated
+   `av01` fragmented-MP4 PSNR gate at `--min-psnr-y 60` when the fixture is
+   generated with `delay_moov`. Multi-frame keyframe-only readback copies each
+   decode image layer into a distinct NV12 sample; OBU and fMP4 8-frame gates
+   both pass with `psnr_y_min=inf`.
+5. Convert NV12 to RGB24 through the existing facade conversion path. Done for
+   the one-frame explicit Vulkan AV1 path.
+
+Acceptance:
+
+- `decode_to_yuv --backend vulkan --codec av1 --output-mode metadata` returns
+  the expected frame count for generated key-frame-only input.
+- `--output-mode nv12` and `--output-mode rgb24` return non-empty payloads.
+- `scripts/check_vulkan_av1_psnr.rs` records the current FFmpeg-reference
+  decode PSNR and passes generated keyframe-only gates at
+  `--min-psnr-y 60` for both OBU and fMP4 input.
+- Current verified reports:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206093.md` and
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778067206134.md`, both with
+  `psnr_y_min=inf` over 8 generated keyframe-only frames.
+- `scripts/check_vulkan_av1_psnr.rs --gop-size <N>` now allows the same PSNR
+  gate to generate non-keyframe-only GOP input. On the current implementation
+  `--gop-size 30` fails at the Vulkan decode stage
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068076063.md`), which is the
+  expected failure until AV1 reference-frame replay is implemented. The script
+  writes FAIL markdown reports even when decode or PSNR setup fails before
+  per-frame PSNR can be computed, including the stderr tail that reports the
+  first unsupported `frame_type=1`.
+- Reference-frame replay is now present in the decode skeleton path:
+  parsed `ref_frame_idx` values are resolved through an 8-entry AV1 reference
+  frame state that is updated by `refresh_frame_flags`, command recording
+  carries the resulting reference slots into each `VideoDecodeInfoKHR`, and
+  begin-coding starts with zero active references after RESET. The
+  std-picture parity pass maps the remaining oxideav frame-header
+  flags needed by short generated GOPs, starts the submitted source range at the
+  Frame/Header OBU start as required by Vulkan, and fixes setup-slot rotation to
+  use allocated DPB slots. With that pass, `--frames 1 --gop-size 2`,
+  `--frames 2 --gop-size 2`, and `--frames 8 --gop-size 2` all pass with
+  `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778074489393.md`,
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074616975.md`,
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778074633347.md`). Follow-up
+  DPB-aware parsing and replay now matches FFmpeg's reference-name state:
+  `OrderHints` are populated in INTRA/LAST..ALTREF order, per-reference
+  `SavedOrderHints` are preserved, and `RefFrameSignBias` is computed from
+  relative reference/current `OrderHint` values. Generated long-GOP OBU replay
+  now passes at `psnr_y_min=inf`:
+  `output/vulkan-av1-psnr/vulkan-av1-psnr-1778075814861.md`
+  (`--frames 8 --gop-size 30`, threshold 60 dB).
+- The same gate now covers fragmented MP4 input:
+  `--input-format fmp4 --gop-size 1` passes at `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778068139781.md`), and
+  `--input-format fmp4 --gop-size 30` now passes at `psnr_y_min=inf`
+  (`output/vulkan-av1-psnr/vulkan-av1-psnr-1778075801683.md`).
+
+### Phase 5: Integrated Benchmark
+
+Tasks:
+
+1. Update `scripts/benchmark_ffmpeg_backends.rs` so Vulkan AV1 video-hw decode
+   is measured when the bootstrap probe passes. The runner now accepts
+   `--vulkan-av1-gop-size` and defaults generated AV1 Vulkan decode inputs to
+   `-g 30 -lag-in-frames 0`, with `--vulkan-av1-gop-size 1` available for
+   legacy keyframe-only comparison. When `--verify` is requested for Vulkan
+   AV1, the runner now calls `scripts/check_vulkan_av1_psnr.rs` with the same
+   generated input and measured `decode_to_yuv` binary, then records a
+   `video-hw PSNR verify` row for each `video-hw` Vulkan adapter.
+2. Keep FFmpeg `av1_vulkan` adapter comparison in the report.
+3. Treat Intel Vulkan encode as unavailable when FFmpeg also cannot encode on
+   that adapter; do not claim parity for unsupported hardware.
+
+Acceptance:
+
+- integrated AV1 report has a passing Vulkan NVIDIA decode row;
+- failure rows remain explicit for unsupported adapters;
+- docs/status is updated with exact report paths and fps/seconds.
+
+Current verified report:
+
+- `output/benchmark-backends-av1-1778068460.md`
+- `output/benchmark-vulkan-av1-1778068460.md`
+- NVIDIA: video-hw Vulkan AV1 decode 55.105 fps vs FFmpeg Vulkan decode
+  25.293 fps for 8 generated keyframe-only OBU 320x180 frames
+  (`--release true`, warmup 1, repeat 3).
+- `--vulkan-decode-input-format fmp4` now exercises the same integrated Vulkan
+  benchmark through fragmented MP4 (`av01`) input. Current report:
+  `output/benchmark-backends-av1-1778068469.md` /
+  `output/benchmark-vulkan-av1-1778068469.md`; NVIDIA video-hw Vulkan AV1 fMP4
+  decode is 55.412 fps vs FFmpeg Vulkan fMP4 decode 25.712 fps for 8 generated
+  keyframe-only 320x180 frames (`--release true`, warmup 1, repeat 3).
+- Intel: FFmpeg Vulkan AV1 decode/encode failures remain explicit report rows.
+
+## Encode Scope
+
+Only start encode after decode is stable.
+
+Tasks:
+
+1. Probe `VK_KHR_video_encode_queue` and `VK_KHR_video_encode_av1`.
+2. Add a separate `vulkan_av1_encode.rs`; do not overload HEVC encode structs.
+3. Generate key-frame-only AV1 first, then consider reference-frame/GOP encode.
+4. Produce low-overhead OBU output compatible with `EncodedLayout::Av1` and the
+   fMP4 writer's `av01` path.
+5. Compare against FFmpeg `av1_vulkan` on the same adapter and against software
+   FFmpeg decode for PSNR.
+
+Acceptance:
+
+- `encode_synthetic --backend vulkan --codec av1` emits decodable OBU output on
+  adapters exposing AV1 encode.
+- `write_synthetic_fmp4 --backend vulkan --codec av1` writes an `av01` MP4 that
+  `ffprobe` and FFmpeg decode accept.
+- integrated benchmark records video-hw vs FFmpeg `av1_vulkan` encode parity.
+
+Current binding blocker: `ash 0.38.0+1.3.281` exposes
+`VK_KHR_video_decode_av1` bindings but not `VK_KHR_video_encode_av1`. Update the
+Vulkan binding stack before starting this section. As of the latest local
+check, `cargo info ash` still reports `0.38.0+1.3.281` as the crates.io version,
+and registry source inspection finds decode AV1 bindings but no
+`video_encode_av1` / `VideoEncodeAV1*` / `ENCODE_AV1` symbols.
+
+## Non-Goals For First Merge
+
+- AV1 film grain synthesis parity.
+- Full reference-frame GOP encode.
+- Supporting Intel Vulkan AV1 encode when the driver/FFmpeg path lacks encode
+  queue support.
+- Treating capability extension presence alone as support.
+
+## Regression Gates Before Claiming Support
+
+Run on a host with Vulkan AV1 hardware:
+
+```powershell
+cargo fmt --all --check
+cargo test -p video-hw-backend-vulkan --features backend-vulkan av1
+cargo check -p video-hw --features backend-vulkan --examples
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --frames 8 --gop-size 30 --min-psnr-y 60
+cargo +nightly -Zscript scripts/check_vulkan_av1_psnr.rs --input-format fmp4 --frames 8 --gop-size 30 --min-psnr-y 60
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --warmup 1 --repeat 3 --verify --allow-failures true
+cargo +nightly -Zscript scripts/benchmark_ffmpeg_backends.rs --backends vulkan --codec av1 --vulkan-decode-input-format fmp4 --warmup 1 --repeat 3 --verify --allow-failures true
+```
+
+Do not claim full Vulkan AV1 support until these gates pass for the broadened
+stream scope, inter-frame/GOP replay is covered, and the status document records
+the exact report paths.

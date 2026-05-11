@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use video_hw::{Backend, Codec};
+use video_hw::{Backend, Codec, bitstream::ParameterSets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pts90k(u64);
@@ -15,6 +15,45 @@ impl Pts90k {
     }
 
     pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SampleDuration90k(u32);
+
+impl SampleDuration90k {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompositionOffset90k(i32);
+
+impl CompositionOffset90k {
+    pub const fn new(value: i32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrackTimescale(NonZeroU32);
+
+impl TrackTimescale {
+    pub const fn new(value: NonZeroU32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> NonZeroU32 {
         self.0
     }
 }
@@ -86,6 +125,16 @@ pub struct Fmp4WriterConfig {
     pub require_hardware: bool,
     pub intel_force_software: bool,
     pub fragment_frames: FragmentFrames,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodedTrackConfig {
+    pub output_path: PathBuf,
+    pub frame_size: FrameSize,
+    pub frame_rate: FrameRate,
+    pub codec: Codec,
+    pub fragment_frames: FragmentFrames,
+    pub initial_parameter_sets: Option<ParameterSets>,
 }
 
 #[derive(Debug, Clone)]

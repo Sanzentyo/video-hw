@@ -3175,6 +3175,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-av1"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "735c79cbc466767a75badac1416417a021d2d62dc22c65405e3a7775a66da452"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f732aebfdc4c4b274220f1f16e378c11983301e81410374eaaa3fc0c3a3c1dc"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4532,6 +4552,7 @@ name = "video-hw-backend-vulkan"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "oxideav-av1",
  "scuffle-h265",
  "video-hw-core",
  "vk-video",

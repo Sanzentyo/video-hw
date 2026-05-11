@@ -15,8 +15,9 @@ use ash::vk::native::{
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_422,
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_444,
     StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_MONOCHROME,
-    StdVideoH265DecPicBufMgr, StdVideoH265LevelIdc, StdVideoH265LongTermRefPicsSps,
-    StdVideoH265PictureParameterSet, StdVideoH265PpsFlags, StdVideoH265ProfileIdc,
+    StdVideoH265DecPicBufMgr, StdVideoH265HrdFlags, StdVideoH265HrdParameters,
+    StdVideoH265LevelIdc, StdVideoH265LongTermRefPicsSps, StdVideoH265PictureParameterSet,
+    StdVideoH265PpsFlags, StdVideoH265ProfileIdc,
     StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN, StdVideoH265ProfileTierLevel,
     StdVideoH265ProfileTierLevelFlags, StdVideoH265SequenceParameterSet,
     StdVideoH265SequenceParameterSetVui, StdVideoH265ShortTermRefPicSet,
@@ -152,6 +153,14 @@ struct ParsedHevcVps {
     vps_video_parameter_set_id: u8,
     vps_max_sub_layers_minus1: u8,
     vps_temporal_id_nesting_flag: bool,
+    profile_tier_level: StdVideoH265ProfileTierLevel,
+    vps_sub_layer_ordering_info_present_flag: bool,
+    vps_dec_pic_buf_mgr: StdVideoH265DecPicBufMgr,
+    vps_timing_info_present_flag: bool,
+    vps_num_units_in_tick: u32,
+    vps_time_scale: u32,
+    vps_poc_proportional_to_timing_flag: bool,
+    vps_num_ticks_poc_diff_one_minus1: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +261,7 @@ struct HevcDecodeBootstrapCacheKey {
     bitstream_hash: u64,
     bitstream_len: usize,
     submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,10 +328,14 @@ pub(crate) struct HevcStdParameterSetStorage {
     sps: [StdVideoH265SequenceParameterSet; 1],
     pps: [StdVideoH265PictureParameterSet; 1],
     profile_tier_level: Box<StdVideoH265ProfileTierLevel>,
+    vps_profile_tier_level: Box<StdVideoH265ProfileTierLevel>,
     dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
     short_term_ref_pic_sets: Box<[StdVideoH265ShortTermRefPicSet]>,
     long_term_ref_pics_sps: Option<Box<StdVideoH265LongTermRefPicsSps>>,
     sequence_parameter_set_vui: Option<Box<StdVideoH265SequenceParameterSetVui>>,
+    sequence_parameter_set_vui_hrd: Option<Box<StdVideoH265HrdParameters>>,
+    vps_dec_pic_buf_mgr: Box<StdVideoH265DecPicBufMgr>,
+    vps_hrd_parameters: Box<StdVideoH265HrdParameters>,
 }
 
 impl HevcStdParameterSetStorage {
@@ -359,10 +373,27 @@ impl HevcStdParameterSetStorage {
         self.pps[0].init_qp_minus26
     }
 
+    #[cfg(test)]
+    pub(crate) fn encode_sps_picture_size(&self) -> (u32, u32) {
+        (
+            self.sps[0].pic_width_in_luma_samples,
+            self.sps[0].pic_height_in_luma_samples,
+        )
+    }
+
     pub(crate) fn override_encode_sps_vui_parameters_present_flag(&mut self, present: bool) {
         self.sps[0]
             .flags
             .set_vui_parameters_present_flag(bool_to_u32(present));
+    }
+
+    pub(crate) fn override_encode_sps_picture_size(&mut self, coded_width: u32, coded_height: u32) {
+        self.sps[0].pic_width_in_luma_samples = coded_width;
+        self.sps[0].pic_height_in_luma_samples = coded_height;
+        self.sps[0].conf_win_left_offset = 0;
+        self.sps[0].conf_win_right_offset = 0;
+        self.sps[0].conf_win_top_offset = 0;
+        self.sps[0].conf_win_bottom_offset = 0;
     }
 }
 
@@ -633,17 +664,25 @@ pub(crate) fn estimate_hevc_access_unit_count(bitstream: &[u8]) -> Result<usize,
     Ok(extract_hevc_access_unit_headers(bitstream)?.len())
 }
 
+#[cfg(test)]
 pub(crate) fn probe_hevc_decode_session_bootstrap(
     bitstream: &[u8],
 ) -> Result<HevcDecodeSessionBootstrap, String> {
-    probe_hevc_decode_session_bootstrap_with_access_unit_limit(bitstream, None)
+    probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
+        bitstream, None, None,
+    )
 }
 
-pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
+pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit_and_physical_device_index(
     bitstream: &[u8],
     submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
 ) -> Result<HevcDecodeSessionBootstrap, String> {
-    let cache_key = hevc_decode_bootstrap_cache_key(bitstream, submit_probe_access_unit_limit);
+    let cache_key = hevc_decode_bootstrap_cache_key(
+        bitstream,
+        submit_probe_access_unit_limit,
+        physical_device_index,
+    );
     if let Some(cached) = lookup_hevc_decode_bootstrap_cache(cache_key) {
         return Ok(cached);
     }
@@ -663,7 +702,7 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
         .map_err(|err| format!("failed to create Vulkan instance: {err}"))?;
 
     let bootstrap_result = (|| -> Result<HevcDecodeSessionBootstrap, String> {
-        let machine = machine.probe_capabilities(&entry, &instance)?;
+        let machine = machine.probe_capabilities(&entry, &instance, physical_device_index)?;
         let (
             session_probe,
             session_parameters_probe,
@@ -697,6 +736,7 @@ pub(crate) fn probe_hevc_decode_session_bootstrap_with_access_unit_limit(
 fn hevc_decode_bootstrap_cache_key(
     bitstream: &[u8],
     submit_probe_access_unit_limit: Option<usize>,
+    physical_device_index: Option<usize>,
 ) -> HevcDecodeBootstrapCacheKey {
     let mut hasher = DefaultHasher::new();
     bitstream.hash(&mut hasher);
@@ -704,6 +744,7 @@ fn hevc_decode_bootstrap_cache_key(
         bitstream_hash: hasher.finish(),
         bitstream_len: bitstream.len(),
         submit_probe_access_unit_limit,
+        physical_device_index,
     }
 }
 
@@ -750,6 +791,7 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
         self,
         entry: &ash::Entry,
         instance: &ash::Instance,
+        requested_physical_device_index: Option<usize>,
     ) -> Result<HevcSessionBootstrapMachine<CapabilityProbeComplete>, String> {
         let video_queue = ash::khr::video_queue::Instance::new(entry, instance);
 
@@ -762,7 +804,12 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
 
         let mut probe_errors = Vec::new();
         let mut selected_candidate: Option<(u32, CapabilityProbeComplete)> = None;
-        for physical_device in physical_devices {
+        for (physical_device_index, physical_device) in physical_devices.into_iter().enumerate() {
+            if let Some(requested_index) = requested_physical_device_index
+                && physical_device_index != requested_index
+            {
+                continue;
+            }
             let support = query_adapter_decode_support(instance, physical_device)
                 .map_err(|err| format!("failed to enumerate device extensions: {err}"))?;
             if !support.extensions.supports_hevc_decode() {
@@ -874,7 +921,12 @@ impl HevcSessionBootstrapMachine<AwaitingCapabilityProbe> {
         }
 
         if probe_errors.is_empty() {
-            Err("no Vulkan adapter passed HEVC decode bootstrap checks".to_string())
+            match requested_physical_device_index {
+                Some(index) => Err(format!(
+                    "Vulkan physical device index {index} did not pass HEVC decode bootstrap checks"
+                )),
+                None => Err("no Vulkan adapter passed HEVC decode bootstrap checks".to_string()),
+            }
         } else {
             Err(format!(
                 "HEVC decode bootstrap checks failed on all candidate adapters: {}",
@@ -1371,6 +1423,15 @@ fn probe_hevc_decode_submit_execution(
             .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
             .push_next(&mut decode_h265_profile)
             .push_next(&mut decode_usage);
+        let session_max_dpb_slots = hevc_decode_session_limit_from_env(
+            "VIDEO_HW_VULKAN_HEVC_DECODE_SESSION_DPB_SLOTS",
+            capability_snapshot.max_dpb_slots,
+        );
+        let session_max_active_reference_pictures = hevc_decode_session_limit_from_env_allow_zero(
+            "VIDEO_HW_VULKAN_HEVC_DECODE_SESSION_ACTIVE_REFS",
+            capability_snapshot.max_active_reference_pictures,
+        )
+        .min(session_max_dpb_slots);
         let create_info = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(queue_family_index.0)
             .video_profile(&profile)
@@ -1380,8 +1441,8 @@ fn probe_hevc_decode_submit_execution(
                 height: parameter_sets.coded_height,
             })
             .reference_picture_format(output_format)
-            .max_dpb_slots(capability_snapshot.max_dpb_slots.max(1))
-            .max_active_reference_pictures(capability_snapshot.max_active_reference_pictures.max(1))
+            .max_dpb_slots(session_max_dpb_slots)
+            .max_active_reference_pictures(session_max_active_reference_pictures)
             .std_header_version(&capability_snapshot.std_header_version);
         // SAFETY: All pointers in `create_info` reference stack data valid for this call.
         let session_create_result = unsafe {
@@ -2936,6 +2997,25 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     }
 }
 
+fn hevc_decode_session_limit_from_env(env_key: &str, capability_limit: u32) -> u32 {
+    let default_limit = capability_limit.max(1);
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(default_limit))
+        .unwrap_or(default_limit)
+}
+
+fn hevc_decode_session_limit_from_env_allow_zero(env_key: &str, capability_limit: u32) -> u32 {
+    let default_limit = capability_limit.max(1);
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.min(default_limit))
+        .unwrap_or(default_limit)
+}
+
 fn hevc_experimental_dpb_mode() -> HevcExperimentalDpbMode {
     parse_hevc_experimental_dpb_mode(
         std::env::var("VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB")
@@ -3290,6 +3370,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     let short_term_ref_pic_sets = build_std_short_term_ref_pic_sets(&parameter_sets.sps, sps)?;
     let long_term_ref_pics_sps = build_std_long_term_ref_pics_sps(sps)?;
     let sequence_parameter_set_vui = build_std_sequence_parameter_set_vui(sps)?;
+    let sequence_parameter_set_vui_hrd = sequence_parameter_set_vui
+        .as_ref()
+        .map(|_| Box::new(empty_hrd_parameters()));
 
     let has_conformance_window = sps.conformance_window.conf_win_left_offset != 0
         || sps.conformance_window.conf_win_right_offset != 0
@@ -3304,8 +3387,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     sps_flags.set_sps_sub_layer_ordering_info_present_flag(bool_to_u32(
         inferred_sub_layer_ordering_present,
     ));
-    sps_flags.set_scaling_list_enabled_flag(bool_to_u32(sps.scaling_list_data.is_some()));
-    sps_flags.set_sps_scaling_list_data_present_flag(bool_to_u32(sps.scaling_list_data.is_some()));
+    // Do not advertise scaling lists until `pScalingLists` is populated below.
+    sps_flags.set_scaling_list_enabled_flag(0);
+    sps_flags.set_sps_scaling_list_data_present_flag(0);
     sps_flags.set_amp_enabled_flag(bool_to_u32(sps.amp_enabled_flag));
     sps_flags.set_sample_adaptive_offset_enabled_flag(bool_to_u32(
         sps.sample_adaptive_offset_enabled_flag,
@@ -3474,6 +3558,14 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
     let mut vps_flags = empty_vps_flags();
     vps_flags
         .set_vps_temporal_id_nesting_flag(bool_to_u32(parsed_vps.vps_temporal_id_nesting_flag));
+    vps_flags.set_vps_sub_layer_ordering_info_present_flag(bool_to_u32(
+        parsed_vps.vps_sub_layer_ordering_info_present_flag,
+    ));
+    vps_flags
+        .set_vps_timing_info_present_flag(bool_to_u32(parsed_vps.vps_timing_info_present_flag));
+    vps_flags.set_vps_poc_proportional_to_timing_flag(bool_to_u32(
+        parsed_vps.vps_poc_proportional_to_timing_flag,
+    ));
 
     let std_vps = StdVideoH265VideoParameterSet {
         flags: vps_flags,
@@ -3481,9 +3573,9 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         vps_max_sub_layers_minus1: parsed_vps.vps_max_sub_layers_minus1,
         reserved1: 0,
         reserved2: 0,
-        vps_num_units_in_tick: 0,
-        vps_time_scale: 0,
-        vps_num_ticks_poc_diff_one_minus1: 0,
+        vps_num_units_in_tick: parsed_vps.vps_num_units_in_tick,
+        vps_time_scale: parsed_vps.vps_time_scale,
+        vps_num_ticks_poc_diff_one_minus1: parsed_vps.vps_num_ticks_poc_diff_one_minus1,
         reserved3: 0,
         pDecPicBufMgr: std::ptr::null(),
         pHrdParameters: std::ptr::null(),
@@ -3578,16 +3670,26 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         sps: [std_sps],
         pps: [std_pps],
         profile_tier_level: Box::new(profile_tier_level),
+        vps_profile_tier_level: Box::new(parsed_vps.profile_tier_level),
         dec_pic_buf_mgr: Box::new(dec_pic_buf_mgr),
         short_term_ref_pic_sets: short_term_ref_pic_sets.into_boxed_slice(),
         long_term_ref_pics_sps: long_term_ref_pics_sps.map(Box::new),
         sequence_parameter_set_vui: sequence_parameter_set_vui.map(Box::new),
+        sequence_parameter_set_vui_hrd,
+        vps_dec_pic_buf_mgr: Box::new(parsed_vps.vps_dec_pic_buf_mgr),
+        vps_hrd_parameters: Box::new(empty_hrd_parameters()),
     };
 
     let profile_ptr = storage.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
+    let vps_profile_ptr =
+        storage.vps_profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel;
     let dec_pic_buf_mgr_ptr = storage.dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
-    storage.vps[0].pProfileTierLevel = profile_ptr;
-    storage.vps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
+    let vps_dec_pic_buf_mgr_ptr =
+        storage.vps_dec_pic_buf_mgr.as_ref() as *const StdVideoH265DecPicBufMgr;
+    storage.vps[0].pProfileTierLevel = vps_profile_ptr;
+    storage.vps[0].pDecPicBufMgr = vps_dec_pic_buf_mgr_ptr;
+    storage.vps[0].pHrdParameters =
+        storage.vps_hrd_parameters.as_ref() as *const StdVideoH265HrdParameters;
     storage.sps[0].pProfileTierLevel = profile_ptr;
     storage.sps[0].pDecPicBufMgr = dec_pic_buf_mgr_ptr;
 
@@ -3608,6 +3710,12 @@ pub(crate) fn build_hevc_std_parameter_set_storage(
         .map_or(std::ptr::null(), |vui| {
             vui.as_ref() as *const StdVideoH265SequenceParameterSetVui
         });
+    if let (Some(vui), Some(hrd)) = (
+        storage.sequence_parameter_set_vui.as_mut(),
+        storage.sequence_parameter_set_vui_hrd.as_ref(),
+    ) {
+        vui.pHrdParameters = hrd.as_ref() as *const StdVideoH265HrdParameters;
+    }
 
     Ok(storage)
 }
@@ -3670,9 +3778,8 @@ fn build_std_sequence_parameter_set_vui(
     flags.set_vui_poc_proportional_to_timing_flag(bool_to_u32(
         timing_info.is_some_and(|timing| timing.poc_proportional_to_timing_flag),
     ));
-    flags.set_vui_hrd_parameters_present_flag(bool_to_u32(
-        timing_info.is_some_and(|timing| timing.hrd_parameters.is_some()),
-    ));
+    // Do not advertise HRD parameters until `pHrdParameters` is populated below.
+    flags.set_vui_hrd_parameters_present_flag(0);
 
     let bitstream_restriction_present = vui
         .bitstream_restriction
@@ -3980,6 +4087,55 @@ fn skip_hevc_profile_tier_level(
     Ok(())
 }
 
+fn parse_hevc_profile_tier_level(
+    reader: &mut RbspBitReader<'_>,
+    max_sub_layers_minus1: usize,
+) -> Result<StdVideoH265ProfileTierLevel, String> {
+    let profile_space_tier_profile_idc = reader.read_bits(8)?;
+    let tier_flag = ((profile_space_tier_profile_idc >> 5) & 1) != 0;
+    let profile_idc = profile_space_tier_profile_idc & 0x1f;
+    let _general_profile_compatibility_flags = reader.read_bits(32)?;
+    let constraint_indicator_hi = reader.read_bits(32)?;
+    let _constraint_indicator_lo = reader.read_bits(16)?;
+    let general_level_idc = narrow_u32_to_u8(reader.read_bits(8)?, "general_level_idc")?;
+
+    let mut profile_tier_flags = empty_profile_tier_level_flags();
+    profile_tier_flags.set_general_tier_flag(bool_to_u32(tier_flag));
+    profile_tier_flags.set_general_progressive_source_flag((constraint_indicator_hi >> 31) & 1);
+    profile_tier_flags.set_general_interlaced_source_flag((constraint_indicator_hi >> 30) & 1);
+    profile_tier_flags.set_general_non_packed_constraint_flag((constraint_indicator_hi >> 29) & 1);
+    profile_tier_flags.set_general_frame_only_constraint_flag((constraint_indicator_hi >> 28) & 1);
+
+    let mut sub_layer_profile_present = [false; 7];
+    let mut sub_layer_level_present = [false; 7];
+    for i in 0..max_sub_layers_minus1 {
+        sub_layer_profile_present[i] = reader.read_flag()?;
+        sub_layer_level_present[i] = reader.read_flag()?;
+    }
+    if max_sub_layers_minus1 > 0 {
+        for _ in max_sub_layers_minus1..8 {
+            let _reserved_zero_2bits = reader.read_bits(2)?;
+        }
+    }
+    for i in 0..max_sub_layers_minus1 {
+        if sub_layer_profile_present[i] {
+            let _sub_layer_profile_space_tier_profile_idc = reader.read_bits(8)?;
+            let _sub_layer_profile_compatibility_flags = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_hi = reader.read_bits(32)?;
+            let _sub_layer_constraint_indicator_flags_lo = reader.read_bits(16)?;
+        }
+        if sub_layer_level_present[i] {
+            let _sub_layer_level_idc = reader.read_bits(8)?;
+        }
+    }
+
+    Ok(StdVideoH265ProfileTierLevel {
+        flags: profile_tier_flags,
+        general_profile_idc: StdVideoH265ProfileIdc::from(profile_idc),
+        general_level_idc: StdVideoH265LevelIdc::from(general_level_idc),
+    })
+}
+
 fn skip_hevc_scaling_list_data(reader: &mut RbspBitReader<'_>) -> Result<(), String> {
     for size_id in 0..4 {
         let matrix_count = if size_id == 3 { 2 } else { 6 };
@@ -4151,11 +4307,73 @@ fn parse_hevc_vps(vps_nalu: &[u8]) -> Result<ParsedHevcVps, String> {
         narrow_u32_to_u8(reader.read_bits(3)?, "vps_max_sub_layers_minus1")?;
     let vps_temporal_id_nesting_flag = reader.read_flag()?;
     let _vps_reserved_0xffff_16bits = reader.read_bits(16)?;
+    let profile_tier_level =
+        parse_hevc_profile_tier_level(&mut reader, usize::from(vps_max_sub_layers_minus1))?;
+
+    let vps_sub_layer_ordering_info_present_flag = reader.read_flag()?;
+    let mut vps_dec_pic_buf_mgr = StdVideoH265DecPicBufMgr {
+        max_latency_increase_plus1: [0; 7],
+        max_dec_pic_buffering_minus1: [0; 7],
+        max_num_reorder_pics: [0; 7],
+    };
+    let first_ordering_index = if vps_sub_layer_ordering_info_present_flag {
+        0
+    } else {
+        usize::from(vps_max_sub_layers_minus1)
+    };
+    for index in first_ordering_index..=usize::from(vps_max_sub_layers_minus1) {
+        vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[index] =
+            narrow_u32_to_u8(reader.read_ue()?, "vps_max_dec_pic_buffering_minus1")?;
+        vps_dec_pic_buf_mgr.max_num_reorder_pics[index] =
+            narrow_u32_to_u8(reader.read_ue()?, "vps_max_num_reorder_pics")?;
+        vps_dec_pic_buf_mgr.max_latency_increase_plus1[index] = reader.read_ue()?;
+    }
+    if !vps_sub_layer_ordering_info_present_flag {
+        let inferred_index = usize::from(vps_max_sub_layers_minus1);
+        for index in 0..inferred_index {
+            vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[index] =
+                vps_dec_pic_buf_mgr.max_dec_pic_buffering_minus1[inferred_index];
+            vps_dec_pic_buf_mgr.max_num_reorder_pics[index] =
+                vps_dec_pic_buf_mgr.max_num_reorder_pics[inferred_index];
+            vps_dec_pic_buf_mgr.max_latency_increase_plus1[index] =
+                vps_dec_pic_buf_mgr.max_latency_increase_plus1[inferred_index];
+        }
+    }
+
+    let vps_max_layer_id = reader.read_bits(6)?;
+    let vps_num_layer_sets_minus1 = reader.read_ue()?;
+    for _ in 1..=vps_num_layer_sets_minus1 {
+        for _ in 0..=vps_max_layer_id {
+            let _layer_id_included_flag = reader.read_flag()?;
+        }
+    }
+
+    let vps_timing_info_present_flag = reader.read_flag()?;
+    let mut vps_num_units_in_tick = 0;
+    let mut vps_time_scale = 0;
+    let mut vps_poc_proportional_to_timing_flag = false;
+    let mut vps_num_ticks_poc_diff_one_minus1 = 0;
+    if vps_timing_info_present_flag {
+        vps_num_units_in_tick = reader.read_bits(32)?;
+        vps_time_scale = reader.read_bits(32)?;
+        vps_poc_proportional_to_timing_flag = reader.read_flag()?;
+        if vps_poc_proportional_to_timing_flag {
+            vps_num_ticks_poc_diff_one_minus1 = reader.read_ue()?;
+        }
+    }
 
     Ok(ParsedHevcVps {
         vps_video_parameter_set_id,
         vps_max_sub_layers_minus1,
         vps_temporal_id_nesting_flag,
+        profile_tier_level,
+        vps_sub_layer_ordering_info_present_flag,
+        vps_dec_pic_buf_mgr,
+        vps_timing_info_present_flag,
+        vps_num_units_in_tick,
+        vps_time_scale,
+        vps_poc_proportional_to_timing_flag,
+        vps_num_ticks_poc_diff_one_minus1,
     })
 }
 
@@ -4994,6 +5212,33 @@ fn empty_sps_vui_flags() -> StdVideoH265SpsVuiFlags {
     }
 }
 
+fn empty_hrd_flags() -> StdVideoH265HrdFlags {
+    StdVideoH265HrdFlags {
+        _bitfield_align_1: [],
+        _bitfield_1: Default::default(),
+    }
+}
+
+fn empty_hrd_parameters() -> StdVideoH265HrdParameters {
+    StdVideoH265HrdParameters {
+        flags: empty_hrd_flags(),
+        tick_divisor_minus2: 0,
+        du_cpb_removal_delay_increment_length_minus1: 0,
+        dpb_output_delay_du_length_minus1: 0,
+        bit_rate_scale: 0,
+        cpb_size_scale: 0,
+        cpb_size_du_scale: 0,
+        initial_cpb_removal_delay_length_minus1: 0,
+        au_cpb_removal_delay_length_minus1: 0,
+        dpb_output_delay_length_minus1: 0,
+        cpb_cnt_minus1: [0; 7],
+        elemental_duration_in_tc_minus1: [0; 7],
+        reserved: [0; 3],
+        pSubLayerHrdParametersNal: std::ptr::null(),
+        pSubLayerHrdParametersVcl: std::ptr::null(),
+    }
+}
+
 fn empty_pps_flags() -> StdVideoH265PpsFlags {
     StdVideoH265PpsFlags {
         _bitfield_align_1: [],
@@ -5524,14 +5769,99 @@ mod tests {
 
         let std_parameter_sets = build_hevc_std_parameter_set_storage(&parameter_sets)
             .expect("sample parameter sets should map to StdVideo structs");
+        let parsed_vps = parse_hevc_vps(&parameter_sets.vps)
+            .expect("repository VPS should expose StdVideo VPS fields");
         assert_eq!(std_parameter_sets.vps.len(), 1);
         assert_eq!(std_parameter_sets.sps.len(), 1);
         assert_eq!(std_parameter_sets.pps.len(), 1);
+        assert!(!std_parameter_sets.vps[0].pProfileTierLevel.is_null());
+        assert!(!std_parameter_sets.vps[0].pDecPicBufMgr.is_null());
         assert!(!std_parameter_sets.sps[0].pProfileTierLevel.is_null());
+        assert_eq!(
+            std_parameter_sets.sps[0].flags.scaling_list_enabled_flag(),
+            0
+        );
+        assert_eq!(
+            std_parameter_sets.sps[0]
+                .flags
+                .sps_scaling_list_data_present_flag(),
+            0
+        );
+        assert!(std_parameter_sets.sps[0].pScalingLists.is_null());
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_max_sub_layers_minus1,
+            parsed_vps.vps_max_sub_layers_minus1
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0]
+                .flags
+                .vps_sub_layer_ordering_info_present_flag(),
+            bool_to_u32(parsed_vps.vps_sub_layer_ordering_info_present_flag)
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0]
+                .flags
+                .vps_timing_info_present_flag(),
+            bool_to_u32(parsed_vps.vps_timing_info_present_flag)
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_num_units_in_tick,
+            parsed_vps.vps_num_units_in_tick
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].vps_time_scale,
+            parsed_vps.vps_time_scale
+        );
+        assert_eq!(
+            std_parameter_sets
+                .vps_profile_tier_level
+                .general_profile_idc,
+            parsed_vps.profile_tier_level.general_profile_idc
+        );
+        assert_eq!(
+            std_parameter_sets.vps_profile_tier_level.general_level_idc,
+            parsed_vps.profile_tier_level.general_level_idc
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].pProfileTierLevel,
+            std_parameter_sets.vps_profile_tier_level.as_ref()
+                as *const StdVideoH265ProfileTierLevel
+        );
+        assert_eq!(
+            std_parameter_sets.vps[0].pHrdParameters,
+            std_parameter_sets.vps_hrd_parameters.as_ref() as *const StdVideoH265HrdParameters
+        );
+        assert_eq!(
+            std_parameter_sets
+                .vps_hrd_parameters
+                .flags
+                .nal_hrd_parameters_present_flag(),
+            0
+        );
+        assert_eq!(
+            std_parameter_sets.sps[0].pProfileTierLevel,
+            std_parameter_sets.profile_tier_level.as_ref() as *const StdVideoH265ProfileTierLevel
+        );
         assert_eq!(
             std_parameter_sets.sps[0].sps_video_parameter_set_id,
             parameter_sets.parsed_sps.sps_video_parameter_set_id
         );
+        if !std_parameter_sets.sps[0].pSequenceParameterSetVui.is_null() {
+            let vui = std_parameter_sets
+                .sequence_parameter_set_vui
+                .as_ref()
+                .unwrap();
+            assert_eq!(vui.flags.vui_hrd_parameters_present_flag(), 0);
+            let hrd = std_parameter_sets
+                .sequence_parameter_set_vui_hrd
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                vui.pHrdParameters,
+                hrd.as_ref() as *const StdVideoH265HrdParameters
+            );
+            assert_eq!(hrd.flags.nal_hrd_parameters_present_flag(), 0);
+        }
     }
 
     #[test]
@@ -5833,6 +6163,58 @@ mod tests {
             parse_hevc_experimental_dpb_mode(Some("on")),
             HevcExperimentalDpbMode::On
         );
+    }
+
+    #[test]
+    fn hevc_decode_session_limit_from_env_defaults_and_clamps() {
+        const ENV_KEY: &str = "VIDEO_HW_TEST_HEVC_DECODE_SESSION_LIMIT";
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "4");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 4);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "99");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "0");
+        }
+        assert_eq!(hevc_decode_session_limit_from_env(ENV_KEY, 15), 15);
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
+    }
+
+    #[test]
+    fn hevc_decode_session_limit_allow_zero_accepts_zero_override() {
+        const ENV_KEY: &str = "VIDEO_HW_TEST_HEVC_DECODE_SESSION_LIMIT_ZERO";
+        unsafe {
+            std::env::set_var(ENV_KEY, "0");
+        }
+        assert_eq!(
+            hevc_decode_session_limit_from_env_allow_zero(ENV_KEY, 15),
+            0
+        );
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "99");
+        }
+        assert_eq!(
+            hevc_decode_session_limit_from_env_allow_zero(ENV_KEY, 15),
+            15
+        );
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
     }
 
     #[test]
@@ -6286,9 +6668,11 @@ mod tests {
     #[test]
     fn hevc_decode_bootstrap_cache_keys_on_access_unit_limit() {
         let bitstream = [0_u8, 0, 0, 1, 0x26, 0x01];
-        let uncapped_key = hevc_decode_bootstrap_cache_key(&bitstream, None);
-        let capped_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303));
+        let uncapped_key = hevc_decode_bootstrap_cache_key(&bitstream, None, None);
+        let capped_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303), None);
+        let adapter_key = hevc_decode_bootstrap_cache_key(&bitstream, Some(303), Some(1));
         assert_ne!(uncapped_key, capped_key);
+        assert_ne!(capped_key, adapter_key);
 
         let bootstrap = HevcDecodeSessionBootstrap {
             coded_width: 1920,

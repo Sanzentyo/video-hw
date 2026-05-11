@@ -20,6 +20,7 @@ use crate::{
 use core_foundation::{
     base::{CFAllocator, CFType, TCFType, kCFAllocatorSystemDefault},
     boolean::CFBoolean,
+    data::CFData,
     dictionary::{CFDictionary, CFMutableDictionary},
     number::CFNumber,
     string::CFString,
@@ -29,8 +30,9 @@ use core_media::{
     format_description::{
         CMFormatDescription, CMFormatDescriptionRef, CMVideoCodecType, CMVideoFormatDescription,
         CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMVideoCodecType_H264,
-        kCMVideoCodecType_HEVC,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+        kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms, kCMVideoCodecType_AV1,
+        kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
     },
     sample_buffer::{
         CMSampleBuffer, CMSampleBufferGetFormatDescription, CMSampleBufferRef, CMSampleTimingInfo,
@@ -86,6 +88,30 @@ impl SamplePacker for AvccHvccPacker {
     }
 }
 
+#[derive(Debug)]
+struct VtSamplePacker<'a> {
+    av1_config_obus: Option<&'a [u8]>,
+}
+
+impl<'a> VtSamplePacker<'a> {
+    fn new(av1_config_obus: Option<&'a [u8]>) -> Self {
+        Self { av1_config_obus }
+    }
+}
+
+impl SamplePacker for VtSamplePacker<'_> {
+    fn pack(&mut self, access_unit: &AccessUnit) -> Result<PackedSample, BackendError> {
+        if let Some(config_obus) = self.av1_config_obus {
+            let mut data = access_unit.nalus.concat();
+            if data.starts_with(config_obus) {
+                data.drain(..config_obus.len());
+            }
+            return Ok(PackedSample { data });
+        }
+        AvccHvccPacker.pack(access_unit)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct DecodeOutputState {
     decoded_frames: usize,
@@ -101,10 +127,12 @@ struct VtDecoderSession {
     format_description: CMVideoFormatDescription,
     decode_state: Box<Mutex<DecodeOutputState>>,
     next_pts: Mutex<i64>,
+    av1_config_obus: Option<Vec<u8>>,
 }
 
 impl VtDecoderSession {
     fn new(config: &DecoderConfig, parameter_sets: &[Vec<u8>]) -> Result<Self, BackendError> {
+        ensure_vt_codec_implemented(config.codec, "decode")?;
         let codec_type = to_cm_codec_type(config.codec);
         if config.require_hardware
             && !VTDecompressionSession::is_hardware_decode_supported(codec_type)
@@ -115,7 +143,8 @@ impl VtDecoderSession {
             )));
         }
 
-        let format_description = create_format_description(config.codec, parameter_sets)?;
+        let options = vt_decoder_options(config);
+        let format_description = create_format_description(config.codec, parameter_sets, &options)?;
 
         let decoder_specification = if config.require_hardware {
             let mut spec = CFMutableDictionary::<CFString, CFType>::new();
@@ -156,6 +185,7 @@ impl VtDecoderSession {
             format_description,
             decode_state,
             next_pts: Mutex::new(0),
+            av1_config_obus: options.av1_config_obus,
         })
     }
 
@@ -164,9 +194,12 @@ impl VtDecoderSession {
         access_units: &[AccessUnit],
         fps: i32,
     ) -> Result<(), BackendError> {
-        let mut packer = AvccHvccPacker;
+        let mut packer = VtSamplePacker::new(self.av1_config_obus.as_deref());
         for access_unit in access_units {
             let packed = packer.pack(access_unit)?;
+            if packed.data.is_empty() {
+                continue;
+            }
 
             let block_buffer = unsafe {
                 let block_buffer = CMBlockBuffer::new_with_memory_block(
@@ -420,7 +453,7 @@ impl VideoDecoder for VtDecoderAdapter {
         Ok(CapabilityReport {
             codec,
             decode_supported: true,
-            encode_supported: true,
+            encode_supported: codec != Codec::Av1,
             hardware_acceleration: VTDecompressionSession::is_hardware_decode_supported(cm_codec),
             decode_output_modes: vec![
                 DecodeOutputMode::Metadata,
@@ -435,6 +468,7 @@ impl VideoDecoder for VtDecoderAdapter {
         chunk: &[u8],
         pts_90k: Option<i64>,
     ) -> Result<Vec<Frame>, BackendError> {
+        ensure_vt_codec_implemented(self.config.codec, "decode")?;
         let submit_start = Instant::now();
         let (access_units, cache) = self
             .assembler
@@ -461,6 +495,7 @@ impl VideoDecoder for VtDecoderAdapter {
     }
 
     fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+        ensure_vt_codec_implemented(self.config.codec, "decode")?;
         let submit_start = Instant::now();
         let (access_units, cache) = self.assembler.flush()?;
         let input_copy_bytes = packed_access_units_bytes(&access_units);
@@ -817,6 +852,21 @@ fn expect_metadata_only_decoded_unit(
 
 impl VideoEncoder for VtEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
+        if codec == Codec::Av1 {
+            return Ok(CapabilityReport {
+                codec,
+                decode_supported: true,
+                encode_supported: false,
+                hardware_acceleration: VTDecompressionSession::is_hardware_decode_supported(
+                    to_cm_codec_type(codec),
+                ),
+                decode_output_modes: vec![
+                    DecodeOutputMode::Metadata,
+                    DecodeOutputMode::Nv12,
+                    DecodeOutputMode::Rgb24,
+                ],
+            });
+        }
         Ok(CapabilityReport {
             codec,
             decode_supported: true,
@@ -831,6 +881,7 @@ impl VideoEncoder for VtEncoderAdapter {
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
+        ensure_vt_codec_implemented(self.codec, "encode")?;
         let mut frame = frame;
         if self.pending_switch.is_some() && frame.force_keyframe {
             self.apply_pending_switch_if_needed()?;
@@ -882,6 +933,7 @@ impl VideoEncoder for VtEncoderAdapter {
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        ensure_vt_codec_implemented(self.codec, "encode")?;
         let flush_start = Instant::now();
         if self.pending_frames.is_empty() {
             return Ok(Vec::new());
@@ -1084,6 +1136,7 @@ fn to_cm_codec_type(codec: Codec) -> CMVideoCodecType {
     match codec {
         Codec::H264 => kCMVideoCodecType_H264,
         Codec::Hevc => kCMVideoCodecType_HEVC,
+        Codec::Av1 => kCMVideoCodecType_AV1,
     }
 }
 
@@ -1091,12 +1144,23 @@ fn codec_label(codec: Codec) -> &'static str {
     match codec {
         Codec::H264 => "h264",
         Codec::Hevc => "hevc",
+        Codec::Av1 => "av1",
     }
+}
+
+fn ensure_vt_codec_implemented(codec: Codec, operation: &str) -> Result<(), BackendError> {
+    if codec == Codec::Av1 && operation == "encode" {
+        return Err(BackendError::UnsupportedConfig(format!(
+            "VideoToolbox AV1 {operation} is not implemented in video-hw yet"
+        )));
+    }
+    Ok(())
 }
 
 fn create_format_description(
     codec: Codec,
     parameter_sets: &[Vec<u8>],
+    options: &VtDecoderOptions,
 ) -> Result<CMVideoFormatDescription, BackendError> {
     let refs = parameter_sets
         .iter()
@@ -1114,7 +1178,59 @@ fn create_format_description(
                     cm_error("CMVideoFormatDescription::from_hevc_parameter_sets", status)
                 })
         }
+        Codec::Av1 => create_av1_format_description(options),
     }
+}
+
+fn create_av1_format_description(
+    options: &VtDecoderOptions,
+) -> Result<CMVideoFormatDescription, BackendError> {
+    let width = options.video_width.ok_or_else(|| {
+        BackendError::UnsupportedConfig(
+            "VideoToolbox AV1 decode requires fMP4 track width in VtDecoderOptions".to_string(),
+        )
+    })?;
+    let height = options.video_height.ok_or_else(|| {
+        BackendError::UnsupportedConfig(
+            "VideoToolbox AV1 decode requires fMP4 track height in VtDecoderOptions".to_string(),
+        )
+    })?;
+    let av1c_record = options.av1c_record.as_ref().ok_or_else(|| {
+        BackendError::UnsupportedConfig(
+            "VideoToolbox AV1 decode requires av1C record in VtDecoderOptions".to_string(),
+        )
+    })?;
+    if options
+        .av1_config_obus
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(BackendError::UnsupportedConfig(
+            "VideoToolbox AV1 decode requires av1C config OBUs in VtDecoderOptions".to_string(),
+        ));
+    }
+
+    let av1c_data = CFData::from_buffer(av1c_record);
+    let av1c_type = av1c_data.as_CFType();
+    let mut atoms = CFMutableDictionary::<CFString, CFType>::new();
+    atoms.add(&CFString::new("av1C"), &av1c_type);
+
+    let mut extensions = CFMutableDictionary::<CFString, CFType>::new();
+    let sample_description_atoms_key = unsafe {
+        CFString::wrap_under_get_rule(kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms)
+    };
+    let atoms_dict = atoms.to_immutable();
+    let atoms_type = atoms_dict.as_CFType();
+    extensions.add(&sample_description_atoms_key, &atoms_type);
+
+    CMVideoFormatDescription::new(
+        kCMVideoCodecType_AV1,
+        i32::from(width),
+        i32::from(height),
+        Some(&extensions.to_immutable()),
+    )
+    .map_err(|status| vt_error("CMVideoFormatDescriptionCreate(AV1)", status))
 }
 
 fn empty_dictionary() -> CFDictionary<CFString, CFType> {
@@ -1154,7 +1270,7 @@ fn make_bgra_frame(
     let total = bytes_per_row.saturating_mul(height);
     let base_ptr = unsafe { pixel_buffer.get_base_address() } as *mut u8;
 
-    let write_result = if !base_ptr.is_null() && total > 0 {
+    let write_result: Result<(), BackendError> = if !base_ptr.is_null() && total > 0 {
         unsafe {
             let buffer = std::slice::from_raw_parts_mut(base_ptr, total);
             if let Some(argb) = argb {
@@ -1344,6 +1460,7 @@ fn detect_keyframe_from_avcc_hvcc_payload(codec: Codec, payload: &[u8]) -> Optio
                     saw_slice = true;
                 }
             }
+            Codec::Av1 => return None,
         }
     }
 
@@ -1362,6 +1479,7 @@ fn parameter_sets_from_sample_buffer_ref(
     match codec {
         Codec::H264 => h264_parameter_sets(format_description_ref),
         Codec::Hevc => hevc_parameter_sets(format_description_ref),
+        Codec::Av1 => None,
     }
 }
 
@@ -1672,6 +1790,70 @@ mod tests {
     }
 
     #[test]
+    fn av1_capability_report_claims_decode_only_vt_support() {
+        let decoder = VtDecoderAdapter::new(DecoderConfig {
+            codec: Codec::Av1,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Default,
+        });
+        let decode_report = decoder.query_capability(Codec::Av1).unwrap();
+        assert!(decode_report.decode_supported);
+        assert!(!decode_report.encode_supported);
+        assert!(!decode_report.decode_output_modes.is_empty());
+
+        let encoder = VtEncoderAdapter::with_config(Codec::Av1, 30, false);
+        let encode_report = encoder.query_capability(Codec::Av1).unwrap();
+        assert!(encode_report.decode_supported);
+        assert!(!encode_report.encode_supported);
+        assert!(!encode_report.decode_output_modes.is_empty());
+    }
+
+    #[test]
+    fn vt_av1_runtime_paths_return_actionable_unsupported_errors() {
+        let mut decoder = VtDecoderAdapter::new(DecoderConfig {
+            codec: Codec::Av1,
+            fps: 30,
+            require_hardware: false,
+            output_mode: DecodeOutputMode::Metadata,
+            backend_options: BackendDecoderOptions::Default,
+        });
+        let err = decoder
+            .push_bitstream_chunk(&[0x12, 0x00], None)
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedConfig(message) => {
+                assert!(message.contains("VideoToolbox AV1 decode requires fMP4 track width"));
+            }
+            other => panic!("unexpected VT AV1 decode error: {other:?}"),
+        }
+
+        let mut encoder = VtEncoderAdapter::with_config(Codec::Av1, 30, false);
+        let err = encoder
+            .push_frame(Frame {
+                width: 16,
+                height: 16,
+                pixel_format: None,
+                pts_90k: Some(0),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
+                argb: Some(vec![0; 16 * 16 * 4]),
+                nv12: None,
+                force_keyframe: true,
+            })
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedConfig(message) => {
+                assert!(message.contains("VideoToolbox AV1 encode is not implemented"));
+            }
+            other => panic!("unexpected VT AV1 encode error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn vt_switch_immediate_updates_generation_hint() {
         let mut adapter = VtEncoderAdapter::with_config(Codec::H264, 30, false);
         assert_eq!(adapter.pipeline_generation_hint(), Some(1));
@@ -1774,6 +1956,7 @@ mod tests {
                 report_metrics: Some(true),
                 enable_pipeline_scheduler: Some(true),
                 pipeline_queue_capacity: Some(3),
+                ..Default::default()
             }),
         });
 
