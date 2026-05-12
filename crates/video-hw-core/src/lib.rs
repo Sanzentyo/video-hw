@@ -181,28 +181,18 @@ pub enum PixelOutputLayout {
     Bgra8888,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMatrix {
     Bt601,
+    #[default]
     Bt709,
 }
 
-impl Default for ColorMatrix {
-    fn default() -> Self {
-        Self::Bt709
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorRange {
+    #[default]
     Limited,
     Full,
-}
-
-impl Default for ColorRange {
-    fn default() -> Self {
-        Self::Limited
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

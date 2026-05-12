@@ -16,29 +16,19 @@ pub enum BitstreamError {
     AccessUnitTooLarge { actual: usize, limit: usize },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationLevel {
     Full,
+    #[default]
     StructuralOnly,
     TrustCaller,
 }
 
-impl Default for ValidationLevel {
-    fn default() -> Self {
-        Self::StructuralOnly
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyPolicy {
+    #[default]
     BorrowWhenPossible,
     AlwaysOwned,
-}
-
-impl Default for CopyPolicy {
-    fn default() -> Self {
-        Self::BorrowWhenPossible
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

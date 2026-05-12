@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::backend_transform_adapter::{DecodedUnit, VtTransformAdapter};
-use crate::bitstream::{AccessUnit, ParameterSetCache, StatefulBitstreamAssembler};
 use crate::pipeline_scheduler::PipelineScheduler;
+use crate::vt_bitstream::{AccessUnit, ParameterSetCache, StatefulBitstreamAssembler};
 use crate::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
     ColorRequest, DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame,

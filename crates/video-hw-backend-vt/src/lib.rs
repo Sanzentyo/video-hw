@@ -21,9 +21,9 @@ pub use transform::{
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod backend_transform_adapter;
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-mod bitstream;
-#[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod pipeline_scheduler;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+mod vt_bitstream;
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 mod vt_backend;
