@@ -273,6 +273,10 @@ fn main() -> Result<()> {
     let video_hw_output =
         output_dir.join(format!("video-hw-vt-{}-precise.bin", args.codec.as_cli()));
     let ffmpeg_output = output_dir.join(format!("ffmpeg-vt-{}-precise.bin", args.codec.as_cli()));
+    let ffmpeg_decode_output = output_dir.join(format!(
+        "ffmpeg-vt-{}-decode-raw.bin",
+        args.codec.as_cli()
+    ));
     let raw_input = output_dir.join(format!(
         "benchmark-input-argb-{}x{}-{}f.raw",
         args.width, args.height, args.frame_count
@@ -316,6 +320,7 @@ fn main() -> Result<()> {
                 &encode_raw_bin,
                 &video_hw_output,
                 &ffmpeg_output,
+                &ffmpeg_decode_output,
                 &raw_input,
                 null_sink,
             )?;
@@ -454,6 +459,10 @@ fn main() -> Result<()> {
             "av1_note: decode-only; VideoToolbox AV1 encode remains unsupported"
         )?;
         writeln!(&mut report, "decode_input: {}", args.codec.sample_input())?;
+        writeln!(
+            &mut report,
+            "decode_compare_output: video-hw and ffmpeg both write NV12 raw frames during timing"
+        )?;
         writeln!(&mut report, "min_psnr_y: {:.4}", args.min_psnr_y)?;
     }
     writeln!(&mut report)?;
@@ -795,6 +804,7 @@ fn run_case(
     encode_raw_bin: &Path,
     video_hw_output: &Path,
     ffmpeg_output: &Path,
+    ffmpeg_decode_output: &Path,
     raw_input: &Path,
     null_sink: &str,
 ) -> Result<CaseRun> {
@@ -830,7 +840,9 @@ fn run_case(
                     &args.chunk_bytes.to_string(),
                 ]);
             }
-            apply_vt_options(&mut cmd, args);
+            if args.codec != Codec::Av1 {
+                apply_vt_options(&mut cmd, args);
+            }
             run_timed_command(cmd)
         }
         Case::VideoHwEncode => {
@@ -877,20 +889,41 @@ fn run_case(
         }
         Case::FfmpegDecode => {
             let mut cmd = Command::new("ffmpeg");
-            cmd.args([
-                "-y",
-                "-hide_banner",
-                "-benchmark",
-                "-v",
-                "error",
-                "-hwaccel",
-                "videotoolbox",
-                "-i",
-                args.codec.sample_input(),
-                "-f",
-                "null",
-                null_sink,
-            ]);
+            if args.codec == Codec::Av1 {
+                cmd.args([
+                    "-y",
+                    "-hide_banner",
+                    "-benchmark",
+                    "-v",
+                    "error",
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-i",
+                    args.codec.sample_input(),
+                    "-frames:v",
+                    &args.frame_count.to_string(),
+                    "-pix_fmt",
+                    "nv12",
+                    "-f",
+                    "rawvideo",
+                    &ffmpeg_decode_output.to_string_lossy(),
+                ]);
+            } else {
+                cmd.args([
+                    "-y",
+                    "-hide_banner",
+                    "-benchmark",
+                    "-v",
+                    "error",
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-i",
+                    args.codec.sample_input(),
+                    "-f",
+                    "null",
+                    null_sink,
+                ]);
+            }
             run_timed_command(cmd)
         }
         Case::FfmpegEncode => {
@@ -1028,7 +1061,7 @@ fn select_ffmpeg_av1_encoder() -> Result<FfmpegAv1Encoder> {
             extra_args: &["-preset", "13"],
         },
         FfmpegAv1Encoder {
-            name: "rav1e",
+            name: "librav1e",
             extra_args: &["-speed", "10"],
         },
     ] {
@@ -1036,7 +1069,7 @@ fn select_ffmpeg_av1_encoder() -> Result<FfmpegAv1Encoder> {
             return Ok(encoder);
         }
     }
-    bail!("ffmpeg does not list a supported AV1 encoder (tried libaom-av1, libsvtav1, rav1e)")
+    bail!("ffmpeg does not list a supported AV1 encoder (tried libaom-av1, libsvtav1, librav1e)")
 }
 
 fn generate_ffmpeg_nv12_reference(

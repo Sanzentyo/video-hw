@@ -68,13 +68,14 @@ or better.
   - generated fragmented MP4 `av01` decode input is recorded as `decode_input_format: fmp4`
   - NVIDIA: video-hw Vulkan AV1 fMP4 decode 0.144s / 55.412 fps vs FFmpeg Vulkan fMP4 decode 0.311s / 25.712 fps for 8 generated keyframe-only frames at 320x180 (`--release true`, warmup 1, repeat 3)
 - VideoToolbox AV1 fMP4 decode benchmark:
-  - `output/benchmark-vt-precise-av1-1778473171.md`
+  - `output/benchmark-vt-precise-av1-1778553361.md`
   - generated 30-frame 320x180 fMP4 `av01` input with FFmpeg `libsvtav1`
     fallback because this host's FFmpeg does not provide `libaom-av1`
   - preflight reports `decode_hardware_acceleration=true`,
     `decode_supported=true`, and `decode_usable_in_current_runtime=true`
-  - video-hw VT decode mean 0.110s vs FFmpeg `-hwaccel videotoolbox` decode mean
-    0.136s (`--release true`, warmup 1, repeat 3)
+  - video-hw VT decode mean 0.087s vs FFmpeg `-hwaccel videotoolbox` decode mean
+    0.105s (`--release true`, warmup 1, repeat 3); both paths write NV12 raw
+    frames during timing
   - PSNR-Y against FFmpeg software NV12 reference: avg 43.0278 dB, min 41.6512
     dB over 30 frames
 - VideoToolbox AV1 fMP4 decode access-order benchmark:
@@ -569,12 +570,12 @@ Current safeguards and evidence:
   an AV1 fMP4 input and records decode-only video-hw VT vs FFmpeg VT results,
   including PSNR-Y against an FFmpeg software NV12 reference. Input generation
   now uses the first available FFmpeg AV1 encoder among `libaom-av1`,
-  `libsvtav1`, and `rav1e`;
+  `libsvtav1`, and `librav1e`;
   `scripts/run_vt_precise_suite.rs --include-av1` includes that AV1 pass in the
   serial VT suite;
 - macOS local smoke
   `cargo +nightly -Zscript scripts/benchmark_ffmpeg_vt_precise.rs --codec av1 --release true --warmup 1 --repeat 3 --frame-count 30 --width 320 --height 180 --verify`
-  passes and records `output/benchmark-vt-precise-av1-1778473171.md`;
+  passes and records `output/benchmark-vt-precise-av1-1778553361.md`;
 - `scripts/benchmark_fmp4_decode_access.rs --features backend-vt --release true -- --input output/benchmark-vt-av1-decode-input.mp4 --backend vt --require-hardware --frame-count 30 --reference sequential-baseline`
   passes and records `output/benchmark-fmp4-decode-access-1778473184.md`;
 - `cargo check --features backend-vt` and

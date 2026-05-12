@@ -39,11 +39,12 @@ Generated:
 - `output/benchmark-vt-precise-h264-1777946337.md`
 
 VT AV1 decode-only release benchmark is recorded in
-`output/benchmark-vt-precise-av1-1778473171.md`: preflight reports
-`decode_hardware_acceleration=true`, video-hw VT decode mean is 0.110 s,
-FFmpeg `-hwaccel videotoolbox` decode mean is 0.136 s, and PSNR-Y against an
-FFmpeg software NV12 reference is avg 43.0278 dB / min 41.6512 dB over 30
-frames. AV1 encode remains unsupported for the VideoToolbox backend.
+`output/benchmark-vt-precise-av1-1778553361.md`: preflight reports
+`decode_hardware_acceleration=true`, video-hw VT decode mean is 0.087 s,
+FFmpeg `-hwaccel videotoolbox` decode mean is 0.105 s, and both timed decode
+paths write NV12 raw frames. PSNR-Y against an FFmpeg software NV12 reference is
+avg 43.0278 dB / min 41.6512 dB over 30 frames. AV1 encode remains unsupported
+for the VideoToolbox backend.
 
 The integrated runner writes an aggregate report to:
 
