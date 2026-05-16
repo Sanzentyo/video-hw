@@ -9,7 +9,6 @@ readme = "README.md"
 default = []
 async-session = ["dep:tokio"]
 serde = ["dep:serde"]
-unstable-raw-inputs = ["video-hw/unstable-raw-inputs"]
 backend-vt = ["video-hw/backend-vt"]
 backend-nvidia = ["video-hw/backend-nvidia"]
 backend-intel = ["video-hw/backend-intel"]

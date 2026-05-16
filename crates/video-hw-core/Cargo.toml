@@ -10,7 +10,6 @@ backend-vt = []
 backend-nvidia = []
 backend-intel = []
 backend-vulkan = []
-unstable-raw-inputs = []
 
 [dependencies]
 thiserror = "2.0.18"

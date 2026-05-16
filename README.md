@@ -56,12 +56,15 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 - decode 出力型は `DecodedFrame::{Metadata,Nv12,Rgb24}` を持つ
   - NVIDIA decode は NVDEC の mapped surface を CPU NV12 payload として readback し、`Nv12` と `Rgb24` を返せる
-  - backend ごとの decode 出力可否は `CapabilityReport::decode_output_modes` で確認する
+  - backend ごとの decode 出力可否と native/converted の違いは `CapabilityReport::contract.decode.output_modes` で確認する
   - ただし標準 decode 経路の出力は `Metadata` 中心
-- encode 入力型は `RawFrameBuffer::{Argb8888,Argb8888Shared,Nv12,Rgb24}` を持つ
-  - ただし現行 encode が受理するのは `Argb8888` / `Argb8888Shared` のみ
-  - `Nv12` / `Rgb24` は `BackendError::InvalidInput`
-- `reap_timeout` は現行実装では `try_reap` と同挙動（実質 non-blocking）
+- encode 入力型は `RawFrameBuffer::{Argb8888,Argb8888Shared,Nv12}` を持つ
+  - `EncoderConfig.input_format` と投入 frame の形式は一致している必要がある
+  - NVIDIA / VideoToolbox は `Argb8888` のみ、Intel / Vulkan は `Argb8888` と `Nv12`
+  - 非対応形式は synthetic 映像へ置き換えず `BackendError::InvalidInput` または `UnsupportedConfig`
+- `CapabilityReport` は `contract` と `runtime` に分かれる。encode の入力形式、出力 layout、streaming/fallback 方針は `contract.encode` を確認する
+- `preflight_encode()` は backend/codec/input format/layout の事前確認に使える
+- `reap_timeout` は timeout 上限まで待機して回収し、期限内に出力がなければ `None`
 
 ## NVIDIA backend 依存
 
@@ -317,8 +320,8 @@ cargo run --features backend-intel --example encode_synthetic -- --backend intel
 # encode (Vulkan)
 cargo run --features backend-vulkan --example encode_synthetic -- --backend vulkan --codec h264 --fps 30 --frame-count 300 --require-hardware --output output/video-hw-vulkan-h264.bin
 
-# encode raw (Intel NV12 input, unstable-raw-inputs)
-cargo run --features "backend-intel unstable-raw-inputs" --example encode_raw_argb -- --backend intel --codec hevc --fps 30 --frame-count 300 --width 640 --height 360 --input-raw output/benchmark-input-nv12-640x360-300f.raw --input-pix-fmt nv12 --require-hardware --output output/video-hw-intel-hevc-nv12.bin
+# encode raw (Intel NV12 input)
+cargo run --features backend-intel --example encode_raw_argb -- --backend intel --codec hevc --fps 30 --frame-count 300 --width 640 --height 360 --input-raw output/benchmark-input-nv12-640x360-300f.raw --input-pix-fmt nv12 --require-hardware --output output/video-hw-intel-hevc-nv12.bin
 
 # camera preview + fragmented MP4 recorder (list devices)
 cargo run --example camera_record_fmp4 -- --list-devices

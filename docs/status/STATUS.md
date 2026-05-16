@@ -6,10 +6,12 @@
 
 - workspace 構成へ移行済み
   - `crates/video-hw-core`: 共通型・エラー・契約
-  - `crates/video-hw`: facade + VT/NV backend 実装
+  - `crates/video-hw`: facade + backend adapter 統合
 - backend は `video-hw` crate の feature + target で有効化
   - `backend-vt`: macOS
   - `backend-nvidia`: Linux / Windows
+  - `backend-intel`: Linux / Windows
+  - `backend-vulkan`: Linux / Windows
 
 ## 2. 実装済み（確認済み）
 
@@ -17,7 +19,7 @@
 - `reap_timeout` は timeout 上限まで待機する契約で実装済み
 - decode 入力は `BitstreamInput`（Annex-B chunk / raw NAL AU / length-prefixed sample）
 - encode 入力は `EncodeFrame`
-- backend 切替は `Backend`（`Auto` / `VideoToolbox` / `Nvidia`）
+- backend 切替は `Backend`（`Auto` / `VideoToolbox` / `Nvidia` / `Intel` / `Vulkan`）
 - VT/NV とも session switch API を公開（`request_session_switch`）
 - `PipelineScheduler` と generation 制御を VT/NV encode 経路に接続
 
@@ -30,8 +32,10 @@
 - `Rgb24`: backend ARGB payload がある場合の変換経路を実装
 - `Nv12`: backend ARGB payload がある場合の変換経路を実装
 - backend が ARGB payload を返さない条件では `UnsupportedConfig`
-- `RawFrameBuffer` の `Nv12/Rgb24` は `unstable-raw-inputs` feature 有効時のみ公開
-- `EncodeSession::submit` は現状 ARGB 系のみ受理（`Nv12/Rgb24` は `InvalidInput`）
+- `RawFrameBuffer` は `Argb8888/Argb8888Shared/Nv12` を公開
+- `EncoderConfig.input_format` と投入 frame の形式一致を検証
+- NVIDIA / VideoToolbox は ARGB のみ、Intel / Vulkan は ARGB/NV12 を契約入力として扱う
+- 非対応または payload 欠落時は synthetic 画像へ置き換えず `InvalidInput` / `UnsupportedConfig`
 
 2. transform 実装差
 - `VtTransformAdapter` は Metal compute 優先 + CPU worker fallback の NV12->RGB 経路を持つ

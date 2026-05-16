@@ -6,13 +6,6 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-unstable-raw-inputs = [
-  "video-hw-core/unstable-raw-inputs",
-  "video-hw-backend-nvidia?/unstable-raw-inputs",
-  "video-hw-backend-intel?/unstable-raw-inputs",
-  "video-hw-backend-vulkan?/unstable-raw-inputs",
-  "video-hw-backend-vt?/unstable-raw-inputs",
-]
 backend-vt = [
   "video-hw-core/backend-vt",
   "dep:video-hw-backend-vt",

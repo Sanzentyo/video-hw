@@ -14,10 +14,10 @@
 
 - decode/encode は `submit` / `try_reap` / `reap_timeout` / `flush` で統一
 - `reap_timeout` は timeout 上限まで待機する実装（内部キュー + backend poll、空なら `None`）
-- decode 出力は `DecoderConfig.output_mode` でモード指定（現行は `Metadata` のみ実装）
+- decode 出力は `DecoderConfig.output_mode` でモード指定（`Metadata` / `Nv12` / `Rgb24`、backend capability に依存）
 - backend は feature + target で有効化
   - macOS: `backend-vt`
-  - Linux/Windows: `backend-nvidia` または `backend-intel`
+  - Linux/Windows: `backend-nvidia` / `backend-intel` / `backend-vulkan`
 
 ### 2.1 NVIDIA 依存の境界条件
 
@@ -51,11 +51,10 @@
 
 - `BIN-RF-01`: ARGB8888 packed
   - `len == width * height * 4`
-  - 現行 encode で受理される唯一の実入力系列
+  - 全 encode backend の基本入力
 - `BIN-RF-02`: NV12
-  - 型としては存在するが、現行 encode では `InvalidInput`
-- `BIN-RF-03`: RGB24
-  - 型としては存在するが、現行 encode では `InvalidInput`
+  - `pitch >= width`
+  - Intel / Vulkan encode backend の契約入力
 
 ### 3.3 Encode 出力
 
@@ -63,6 +62,7 @@
 - `BIN-EP-01A`: Annex-B（Intel）
 - `BIN-EP-02`: AVCC（VT + H264）
 - `BIN-EP-03`: HVCC（VT + HEVC）
+- `BIN-EP-04`: AV1 OBU payload（NV / Intel + AV1）
 
 ## 4. Type Contract（実装準拠）
 
@@ -94,10 +94,20 @@ pub enum BitstreamInput {
 pub enum RawFrameBuffer {
     Argb8888(Vec<u8>),
     Argb8888Shared(std::sync::Arc<[u8]>),
-    #[cfg(feature = "unstable-raw-inputs")]
     Nv12 { pitch: usize, data: Vec<u8> },
-    #[cfg(feature = "unstable-raw-inputs")]
-    Rgb24(Vec<u8>),
+}
+
+pub enum EncodeInputFormat {
+    Argb8888,
+    Nv12,
+}
+
+pub struct EncoderConfig {
+    pub codec: Codec,
+    pub fps: i32,
+    pub require_hardware: bool,
+    pub input_format: EncodeInputFormat,
+    pub backend_options: BackendEncoderOptions,
 }
 
 pub struct EncodeFrame {
@@ -111,6 +121,7 @@ pub enum EncodedLayout {
     AnnexB,
     Avcc,
     Hvcc,
+    Av1,
     Opaque,
 }
 
@@ -153,9 +164,12 @@ pub enum DecodedFrame {
 - backend が ARGB payload を提供しない場合は `BackendError::UnsupportedConfig`
 
 2. encode 入力
-- `RawFrameBuffer::Argb8888` / `Argb8888Shared` のみ受理
-- `RawFrameBuffer::Nv12` / `Rgb24` は `unstable-raw-inputs` 有効時のみ型として公開される
-- 上記 variant は現行 encode 経路では `BackendError::InvalidInput`
+- `EncoderConfig.input_format` と `EncodeFrame.buffer.input_format()` は一致必須
+- `RawFrameBuffer::Argb8888` / `Argb8888Shared` は全 encode backend の基本入力
+- `RawFrameBuffer::Nv12` は Intel / Vulkan encode backend の契約入力
+- NVIDIA / VideoToolbox は NV12 encode 入力を受理しない
+- 入力 payload が無い場合、または backend 非対応形式の場合、synthetic 画像へ置き換えず `BackendError::InvalidInput` または `UnsupportedConfig`
+- backend ごとの対応形式は `CapabilityReport::contract.encode.input_formats` と `preflight_encode()` で確認する
 
 3. timeout 契約
 - `reap_timeout` は内部キューと backend poll を用いて timeout 上限まで待機し、回収できない場合は `None` を返す
@@ -171,8 +185,7 @@ pub enum DecodedFrame {
 
 ## 7. 今後の拡張対象
 
-- decode 出力モードの正式契約化（Metadata/NV12/RGB）
-- encode での NV12 直接入力契約
+- VideoToolbox の ARGB 必須化と missing-ARGB synthetic fallback 削除
 - `reap_timeout` の backend 直接 poll 連携（将来最適化）
 
 ## 8. 参照

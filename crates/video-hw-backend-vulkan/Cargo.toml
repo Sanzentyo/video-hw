@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 default = ["backend-vulkan"]
 backend-vulkan = ["video-hw-core/backend-vulkan"]
-unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", default-features = false }

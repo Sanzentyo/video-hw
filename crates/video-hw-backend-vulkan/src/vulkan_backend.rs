@@ -10,10 +10,12 @@ use vk_video::{
 };
 
 use crate::{
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, Nv12Frame,
-    Nv12FramePayload, VideoDecoder, VideoEncoder, VulkanDecoderOptions, VulkanEncoderOptions,
-    argb_to_nv12, nv12_to_rgb24,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityContract,
+    CapabilityReport, Codec, DecodeCapability, DecodeOutputCapability, DecodeOutputMode,
+    DecodeOutputOrigin, DecodeSummary, DecoderConfig, DimensionConstraints, EncodeCapability,
+    EncodeInputFormat, EncodedLayout, EncodedPacket, FallbackPolicy, Frame, Nv12Frame,
+    Nv12FramePayload, RuntimeCapability, RuntimeStatus, StreamingMode, VideoDecoder, VideoEncoder,
+    VulkanDecoderOptions, VulkanEncoderOptions, argb_to_nv12, nv12_to_rgb24,
     vulkan_av1_decode::{
         Av1DecodeCommandVisit, Av1DecodePictureViews, Av1DecodePrerequisiteProbe,
         av1_display_readback_indices, build_av1_aligned_key_frame_decode_command_skeleton,
@@ -1304,19 +1306,64 @@ fn vulkan_capability_report(codec: Codec) -> CapabilityReport {
     let (decode_h264_supported, encode_h264_supported) = probe_vulkan_support();
     let decode_supported = supports_h264 && decode_h264_supported;
     let encode_supported = supports_h264 && encode_h264_supported;
+    let runtime_available = decode_supported || encode_supported;
     CapabilityReport {
         codec,
-        decode_supported,
-        encode_supported,
-        hardware_acceleration: decode_supported || encode_supported,
-        decode_output_modes: if decode_supported {
-            vec![
-                DecodeOutputMode::Metadata,
-                DecodeOutputMode::Nv12,
-                DecodeOutputMode::Rgb24,
-            ]
-        } else {
-            Vec::new()
+        contract: CapabilityContract {
+            decode: DecodeCapability {
+                supported: supports_h264,
+                output_modes: if supports_h264 {
+                    vec![
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Metadata,
+                            origin: DecodeOutputOrigin::MetadataOnly,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Nv12,
+                            origin: DecodeOutputOrigin::ConvertedFromArgb,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Rgb24,
+                            origin: DecodeOutputOrigin::ConvertedFromArgb,
+                        },
+                    ]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::NoFallback,
+                requires_side_data: false,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+            encode: EncodeCapability {
+                supported: supports_h264,
+                input_formats: if supports_h264 {
+                    vec![EncodeInputFormat::Argb8888, EncodeInputFormat::Nv12]
+                } else {
+                    Vec::new()
+                },
+                encoded_layouts: if supports_h264 {
+                    vec![EncodedLayout::AnnexB]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::NoFallback,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+        },
+        runtime: RuntimeCapability {
+            status: if runtime_available {
+                RuntimeStatus::Available
+            } else {
+                RuntimeStatus::Unavailable
+            },
+            hardware_acceleration: runtime_available,
+            reason: if runtime_available {
+                None
+            } else {
+                Some("no Vulkan video decode or encode adapter was reported".to_string())
+            },
         },
     }
 }
@@ -1538,7 +1585,6 @@ fn frame_to_nv12_payload(
     width: usize,
     height: usize,
 ) -> Result<RawFrameData, BackendError> {
-    #[cfg(feature = "unstable-raw-inputs")]
     if let Some(nv12) = frame.nv12.as_ref() {
         if nv12.pitch < width {
             return Err(BackendError::InvalidInput(
@@ -1851,17 +1897,17 @@ mod tests {
     #[test]
     fn hevc_capability_report_never_claims_hardware_acceleration() {
         let report = vulkan_capability_report(Codec::Hevc);
-        assert!(!report.decode_supported);
-        assert!(!report.encode_supported);
-        assert!(!report.hardware_acceleration);
+        assert!(!report.contract.decode.supported);
+        assert!(!report.contract.encode.supported);
+        assert!(!report.runtime.hardware_acceleration);
     }
 
     #[test]
     fn av1_capability_report_never_claims_hardware_acceleration() {
         let report = vulkan_capability_report(Codec::Av1);
-        assert!(!report.decode_supported);
-        assert!(!report.encode_supported);
-        assert!(!report.hardware_acceleration);
+        assert!(!report.contract.decode.supported);
+        assert!(!report.contract.encode.supported);
+        assert!(!report.runtime.hardware_acceleration);
     }
 
     #[test]

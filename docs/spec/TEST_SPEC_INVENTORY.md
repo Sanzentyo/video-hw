@@ -88,7 +88,9 @@
 - `backend_default_is_auto`（backend が1つ以上有効な構成）
 - `unpack_length_prefixed_sample_to_annexb_converts_nals`
 - `encoded_layout_is_inferred_from_backend_and_codec`
-- `encode_frame_into_backend_frame_rejects_unsupported_buffer_types`（`unstable-raw-inputs` 有効時）
+- `encode_frame_into_backend_frame_rejects_invalid_nv12_payload`
+- `preflight_encode_rejects_nvidia_nv12_by_contract`
+- `auto_encode_skips_nvidia_for_nv12_input`
 
 ## 4. integration tests（`crates/video-hw/tests/e2e_video_hw.rs`）
 
@@ -121,11 +123,13 @@
 - `e2e_nv_backend_decode_and_encode_work`
 - `e2e_nv_backend_hevc_decode_sample`
 - `e2e_nv_backend_encode_accepts_backend_specific_options`
+- `e2e_nv_backend_rejects_nv12_encode_input_without_synthetic_fallback`
 - `e2e_nv_backend_accepts_explicit_session_switch_request`
 
 注記:
 - NVIDIA E2E は環境依存のため、`UnsupportedConfig("CUDA context ...")` などで早期 return（skip相当）を含む
 - invalid ARGB 検証は NV 実装上 `flush` タイミングで確定する
+- NV12 input 検証は `submit` 時点で拒否し、synthetic fallback に進まないことを確認する
 
 ### 4.3 backend 無効時（compile-only）
 

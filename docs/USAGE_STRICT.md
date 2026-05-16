@@ -52,7 +52,7 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 
 - `backend-intel` は `onevpl-rs`（`intel-onevpl-sys` 経由）で Intel oneVPL を利用する
 - 依存宣言は `https://github.com/Sanzentyo/onevpl-rs` を `rev` 固定で参照する（fork 更新時は README の「onevpl fork 更新時の手順」に従う）
-- 現行 Intel backend は H.264 / HEVC の encode/decode 実装を持つ（実際に使える codec は oneVPL runtime / ドライバの公開機能に依存）
+- 現行 Intel backend は H.264 / HEVC / AV1 の encode/decode 実装を持つ（実際に使える codec は oneVPL runtime / ドライバの公開機能に依存）
 - `require_hardware=false` は HW優先で初期化し、失敗時に software 実装フォールバックを試行する
 - software 実装を明示的に選びたい場合は `IntelDecoderOptions::force_software=true` / `IntelEncoderOptions::force_software=true`（CLI は `--intel-force-software`）を使う。HEVC encode で VPP 経路を明示したい場合は `IntelEncoderOptions::hevc_use_vpp=Some(true)` を指定できる
 - oneVPL 本体（runtime/headers）は同梱しない前提で、利用者が Intel oneAPI から別途取得して配置する
@@ -67,7 +67,7 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - software 比較は `--require-hardware false --intel-force-software` を付ける（video-hw Intel SW と ffmpeg SW を比較）
 - `--equal-raw-input` を使う場合、`--raw-input-pix-fmt argb|nv12` で video-hw/ffmpeg 双方の raw 入力 pix_fmt を揃えられる
 - decode 側の計測窓を広げる場合は `--decode-loops <N>` を指定する（入力 Annex-B を N 回連結したファイルを使って decode 比較）
-- NV12 raw encode を使う場合は `backend-intel` に加えて `unstable-raw-inputs` feature を有効化する
+- NV12 raw encode は Intel / Vulkan backend の契約入力。NVIDIA / VideoToolbox では拒否される
 - runtime 依存で一部ケースが失敗する環境では `--allow-case-failures` を付けると失敗ケースを記録してレポート生成を継続できる
 - decode チューニングが必要な場合は `VIDEO_HW_INTEL_DECODE_ASYNC_DEPTH`（1..=16, default=10）で oneVPL decode async depth を調整できる
 - benchmark script からは `--intel-decode-async-depth <N>`（1..=16）で同設定を video-hw decode ケースに注入できる
@@ -86,7 +86,7 @@ video-hw-backend-vt = { git = "https://github.com/Sanzentyo/video-hw", rev = "b8
 - NVIDIA decode は NVDEC mapped surface を CPU NV12 payload として readback するため、分析用途ではまず `DecodeOutputMode::Nv12` を指定する。`Rgb24` は NV12 から共通変換される
 - 非 metadata 出力は現状 `G8_B8R8_2PLANE_420_UNORM` readback と偶数の coded extent を前提にし、stream が probe で覆える access unit 数を超えると `UnsupportedConfig` になる
 - Vulkan HEVC の pixel 出力（`Nv12` / `Rgb24`）は DPB 参照付きの submit path を既定で使う。品質確認では FFmpeg software decode 参照に対して PSNR を確認する
-- Vulkan HEVC encode は未実装で、`UnsupportedConfig` を返す
+- Vulkan capability / Auto selection 上の公称 encode 対応は H.264 のみ。直接 backend 指定時は HEVC の実験的 IDR-only encode path があり、失敗時は `UnsupportedConfig` を返す
 - 同一 bitstream の bootstrap 結果は `submit_probe_access_unit_limit` と合わせてキャッシュされ、Metadata / Nv12 / Rgb24 の連続実行で毎回 device/session を作り直さない
 - 対外的に扱ってよい HEVC decode-side knob は `VIDEO_HW_VULKAN_HEVC_EXPERIMENTAL_DPB=off|auto|on` だけ。既定は `on`。`off` は診断用で、B/P frame の参照品質が大きく落ちる。`auto` は `%TEMP%\\video-hw-vulkan-hevc-dpb-inflight.flag` を使って再入を抑止する
 - decode 失敗時の blocker message には `session bootstrap probe` / `decode_submit_skeleton` / `decode_submit_execution` が出る。`experimental_dpb_mode` / `experimental_dpb_status`、readback 統計、`submitted_access_units` もここにまとまる
@@ -158,14 +158,15 @@ cargo +nightly -Zscript scripts/quality_check.rs
 
 `DecodeOutputMode::Metadata` は常用サポートです。  
 `DecodeOutputMode::Nv12` / `Rgb24` は backend が NV12 または ARGB payload を返す場合のみ変換出力できます。
-pixel payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。backend ごとの可否は `CapabilityReport::decode_output_modes` / `supports_decode_output_mode()` を確認してください。
+pixel payload が未提供の場合は `BackendError::UnsupportedConfig` を返します。backend ごとの可否と native/converted の違いは `CapabilityReport::contract.decode.output_modes` / `supports_decode_output_mode()` を確認してください。
 
 `video-hw-fmp4` の `FrameDecoder::decode_window()` は、`sample_at_pts_with_delta()` で得た sample を中心に、PTS/表示順で `before` / `after` の window を組みます。内部の復号入力は必要なDTS順segmentへ広げますが、返却される `DecodedSampleFrame` は表示順に並びます。欠落がある場合は `DecodeDiagnostics::missing_sample_ids` と `requested_sample_count` / `returned_sample_count` を確認してください。
 
 ## 4. Encode API
 
 - `EncodeSession::<ConcreteEncoder>::new(EncoderConfig)`
-- `EncodeSession::from_encoder(BackendKind, concrete_encoder)`
+- `EncodeSession::from_encoder(BackendKind, EncodeInputFormat, concrete_encoder)`
+- `preflight_encode(EncodePreflightRequest)`
 - `submit(EncodeFrame)`
 - `try_reap()`
 - `reap_timeout(Duration)`
@@ -180,20 +181,27 @@ pixel payload が未提供の場合は `BackendError::UnsupportedConfig` を返�
 
 - `Argb8888(Vec<u8>)`
 - `Argb8888Shared(Arc<[u8]>)`
-- `Nv12 { .. }`（`unstable-raw-inputs` feature 有効時のみ）
-- `Rgb24(Vec<u8>)`（`unstable-raw-inputs` feature 有効時のみ）
+- `Nv12 { pitch, data }`
 
-現行 encode が受理するのは `Argb8888` / `Argb8888Shared` のみです。
+`EncoderConfig.input_format` は投入する `RawFrameBuffer` と一致している必要があります。
 
-- `Nv12` / `Rgb24` は `BackendError::InvalidInput`
+- NVIDIA / VideoToolbox: `EncodeInputFormat::Argb8888` のみ
+- Intel / Vulkan: `EncodeInputFormat::Argb8888` と `EncodeInputFormat::Nv12`
 - ARGB 長さは厳密に `width * height * 4`
+- NV12 は `pitch >= width` かつ `pitch * height * 3 / 2` 以上の payload が必要
+- 非対応形式は synthetic 画像に置き換えず `BackendError::InvalidInput` または `UnsupportedConfig`
+
+`CapabilityReport::contract.encode.input_formats` と `preflight_encode()` で backend ごとの対応を確認できます。
 
 ### 4.2 Encode 出力 layout
 
 - VT + H264: `EncodedLayout::Avcc`
 - VT + HEVC: `EncodedLayout::Hvcc`
-- NV: `EncodedLayout::AnnexB`
-- Intel: `EncodedLayout::AnnexB`
+- VT + AV1: encode 未対応
+- NV + H264/HEVC: `EncodedLayout::AnnexB`
+- NV + AV1: `EncodedLayout::Av1`
+- Intel + H264/HEVC: `EncodedLayout::AnnexB`
+- Intel + AV1: `EncodedLayout::Av1`
 - Vulkan: `EncodedLayout::AnnexB`
 
 ## 5. submit / reap / flush の意味

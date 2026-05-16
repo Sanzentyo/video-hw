@@ -12,10 +12,12 @@ use crate::backend_transform_adapter::{DecodedUnit, VtTransformAdapter};
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::vt_bitstream::{AccessUnit, ParameterSetCache, StatefulBitstreamAssembler};
 use crate::{
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    ColorRequest, DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
-    SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder, VtDecoderOptions,
-    VtEncoderOptions, VtSessionConfig,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityContract,
+    CapabilityReport, Codec, ColorRequest, DecodeCapability, DecodeOutputCapability,
+    DecodeOutputMode, DecodeOutputOrigin, DecodeSummary, DecoderConfig, DimensionConstraints,
+    EncodeCapability, EncodeInputFormat, EncodedLayout, EncodedPacket, FallbackPolicy, Frame,
+    RuntimeCapability, RuntimeStatus, SessionSwitchMode, SessionSwitchRequest, StreamingMode,
+    VideoDecoder, VideoEncoder, VtDecoderOptions, VtEncoderOptions, VtSessionConfig,
 };
 use core_foundation::{
     base::{CFAllocator, CFType, TCFType, kCFAllocatorSystemDefault},
@@ -449,18 +451,7 @@ impl VtDecoderAdapter {
 
 impl VideoDecoder for VtDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let cm_codec = to_cm_codec_type(codec);
-        Ok(CapabilityReport {
-            codec,
-            decode_supported: true,
-            encode_supported: codec != Codec::Av1,
-            hardware_acceleration: VTDecompressionSession::is_hardware_decode_supported(cm_codec),
-            decode_output_modes: vec![
-                DecodeOutputMode::Metadata,
-                DecodeOutputMode::Nv12,
-                DecodeOutputMode::Rgb24,
-            ],
-        })
+        Ok(vt_capability_report(codec))
     }
 
     fn push_bitstream_chunk(
@@ -850,34 +841,69 @@ fn expect_metadata_only_decoded_unit(
     }
 }
 
+fn vt_capability_report(codec: Codec) -> CapabilityReport {
+    let encode_supported = codec != Codec::Av1;
+    let encoded_layout = match codec {
+        Codec::H264 => EncodedLayout::Avcc,
+        Codec::Hevc => EncodedLayout::Hvcc,
+        Codec::Av1 => EncodedLayout::Av1,
+    };
+    CapabilityReport {
+        codec,
+        contract: CapabilityContract {
+            decode: DecodeCapability {
+                supported: true,
+                output_modes: vec![
+                    DecodeOutputCapability {
+                        mode: DecodeOutputMode::Metadata,
+                        origin: DecodeOutputOrigin::MetadataOnly,
+                    },
+                    DecodeOutputCapability {
+                        mode: DecodeOutputMode::Nv12,
+                        origin: DecodeOutputOrigin::ConvertedFromBgra,
+                    },
+                    DecodeOutputCapability {
+                        mode: DecodeOutputMode::Rgb24,
+                        origin: DecodeOutputOrigin::ConvertedFromBgra,
+                    },
+                ],
+                streaming_mode: StreamingMode::PushReap,
+                fallback_policy: FallbackPolicy::OsManaged,
+                requires_side_data: codec == Codec::Av1,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+            encode: EncodeCapability {
+                supported: encode_supported,
+                input_formats: if encode_supported {
+                    vec![EncodeInputFormat::Argb8888]
+                } else {
+                    Vec::new()
+                },
+                encoded_layouts: if encode_supported {
+                    vec![encoded_layout]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::OsManaged,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+        },
+        runtime: RuntimeCapability {
+            status: RuntimeStatus::NotProbed,
+            hardware_acceleration: if codec == Codec::Av1 {
+                VTDecompressionSession::is_hardware_decode_supported(to_cm_codec_type(codec))
+            } else {
+                true
+            },
+            reason: None,
+        },
+    }
+}
+
 impl VideoEncoder for VtEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        if codec == Codec::Av1 {
-            return Ok(CapabilityReport {
-                codec,
-                decode_supported: true,
-                encode_supported: false,
-                hardware_acceleration: VTDecompressionSession::is_hardware_decode_supported(
-                    to_cm_codec_type(codec),
-                ),
-                decode_output_modes: vec![
-                    DecodeOutputMode::Metadata,
-                    DecodeOutputMode::Nv12,
-                    DecodeOutputMode::Rgb24,
-                ],
-            });
-        }
-        Ok(CapabilityReport {
-            codec,
-            decode_supported: true,
-            encode_supported: true,
-            hardware_acceleration: true,
-            decode_output_modes: vec![
-                DecodeOutputMode::Metadata,
-                DecodeOutputMode::Nv12,
-                DecodeOutputMode::Rgb24,
-            ],
-        })
+        Ok(vt_capability_report(codec))
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
@@ -917,14 +943,17 @@ impl VideoEncoder for VtEncoderAdapter {
             self.height = Some(frame.height);
         }
 
-        if let Some(argb) = frame.argb.as_ref() {
-            let expected = frame.width.saturating_mul(frame.height).saturating_mul(4);
-            if argb.len() != expected {
-                return Err(BackendError::InvalidInput(format!(
-                    "argb payload size mismatch: expected {expected}, got {}",
-                    argb.len()
-                )));
-            }
+        let Some(argb) = frame.argb.as_ref() else {
+            return Err(BackendError::InvalidInput(
+                "VideoToolbox encode requires ARGB input payload".to_string(),
+            ));
+        };
+        let expected = frame.width.saturating_mul(frame.height).saturating_mul(4);
+        if argb.len() != expected {
+            return Err(BackendError::InvalidInput(format!(
+                "argb payload size mismatch: expected {expected}, got {}",
+                argb.len()
+            )));
         }
 
         frame = self.preprocess_frame_via_pipeline(frame)?;
@@ -958,7 +987,12 @@ impl VideoEncoder for VtEncoderAdapter {
         let queue_depth_samples = Arc::new(Mutex::new(Vec::<f64>::new()));
         for (frame_index, frame) in pending_frames.iter().enumerate() {
             let frame_prep_start = Instant::now();
-            let pixel_buffer = make_bgra_frame(width, height, frame_index, frame.argb.as_deref())?;
+            let argb = frame.argb.as_deref().ok_or_else(|| {
+                BackendError::InvalidInput(
+                    "VideoToolbox encode requires ARGB input payload".to_string(),
+                )
+            })?;
+            let pixel_buffer = make_bgra_frame(width, height, argb)?;
             frame_prep_elapsed += frame_prep_start.elapsed();
             input_copy_bytes = input_copy_bytes
                 .saturating_add(width.saturating_mul(height).saturating_mul(4) as u64);
@@ -1255,8 +1289,7 @@ fn decode_destination_image_buffer_attributes(
 fn make_bgra_frame(
     width: usize,
     height: usize,
-    frame_index: usize,
-    argb: Option<&[u8]>,
+    argb: &[u8],
 ) -> Result<CVPixelBuffer, BackendError> {
     let pixel_buffer = CVPixelBuffer::new(kCVPixelFormatType_32BGRA, width, height, None)
         .map_err(|status| cv_error("CVPixelBuffer::new", status))?;
@@ -1273,39 +1306,24 @@ fn make_bgra_frame(
     let write_result: Result<(), BackendError> = if !base_ptr.is_null() && total > 0 {
         unsafe {
             let buffer = std::slice::from_raw_parts_mut(base_ptr, total);
-            if let Some(argb) = argb {
-                let expected = width.saturating_mul(height).saturating_mul(4);
-                if argb.len() != expected {
-                    return Err(BackendError::InvalidInput(format!(
-                        "argb payload size mismatch: expected {expected}, got {}",
-                        argb.len()
-                    )));
-                }
-                for y in 0..height {
-                    for x in 0..width {
-                        let dst = y * bytes_per_row + x * 4;
-                        let src = (y * width + x) * 4;
-                        if dst + 3 >= buffer.len() || src + 3 >= argb.len() {
-                            continue;
-                        }
-                        buffer[dst] = argb[src + 3];
-                        buffer[dst + 1] = argb[src + 2];
-                        buffer[dst + 2] = argb[src + 1];
-                        buffer[dst + 3] = argb[src];
+            let expected = width.saturating_mul(height).saturating_mul(4);
+            if argb.len() != expected {
+                return Err(BackendError::InvalidInput(format!(
+                    "argb payload size mismatch: expected {expected}, got {}",
+                    argb.len()
+                )));
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    let dst = y * bytes_per_row + x * 4;
+                    let src = (y * width + x) * 4;
+                    if dst + 3 >= buffer.len() || src + 3 >= argb.len() {
+                        continue;
                     }
-                }
-            } else {
-                for y in 0..height {
-                    for x in 0..width {
-                        let offset = y * bytes_per_row + x * 4;
-                        if offset + 3 >= buffer.len() {
-                            continue;
-                        }
-                        buffer[offset] = ((x + frame_index) % 256) as u8;
-                        buffer[offset + 1] = ((y + frame_index * 2) % 256) as u8;
-                        buffer[offset + 2] = ((frame_index * 5) % 256) as u8;
-                        buffer[offset + 3] = 255;
-                    }
+                    buffer[dst] = argb[src + 3];
+                    buffer[dst + 1] = argb[src + 2];
+                    buffer[dst + 2] = argb[src + 1];
+                    buffer[dst + 3] = argb[src];
                 }
             }
         }
@@ -1799,15 +1817,15 @@ mod tests {
             backend_options: BackendDecoderOptions::Default,
         });
         let decode_report = decoder.query_capability(Codec::Av1).unwrap();
-        assert!(decode_report.decode_supported);
-        assert!(!decode_report.encode_supported);
-        assert!(!decode_report.decode_output_modes.is_empty());
+        assert!(decode_report.contract.decode.supported);
+        assert!(!decode_report.contract.encode.supported);
+        assert!(!decode_report.contract.decode.output_modes.is_empty());
 
         let encoder = VtEncoderAdapter::with_config(Codec::Av1, 30, false);
         let encode_report = encoder.query_capability(Codec::Av1).unwrap();
-        assert!(encode_report.decode_supported);
-        assert!(!encode_report.encode_supported);
-        assert!(!encode_report.decode_output_modes.is_empty());
+        assert!(encode_report.contract.decode.supported);
+        assert!(!encode_report.contract.encode.supported);
+        assert!(!encode_report.contract.decode.output_modes.is_empty());
     }
 
     #[test]

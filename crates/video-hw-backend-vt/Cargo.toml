@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 default = ["backend-vt"]
 backend-vt = ["video-hw-core/backend-vt"]
-unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", default-features = false }

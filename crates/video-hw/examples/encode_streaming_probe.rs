@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
-    EncodedChunk, EncoderConfig, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
-    VtEncoderOptions,
+    EncodeInputFormat, EncodedChunk, EncoderConfig, NvidiaEncoderOptions, RawFrameBuffer,
+    Timestamp90k, VtEncoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -177,7 +177,12 @@ fn reap_all(encoder: &mut AnyEncodeSession) -> Result<Vec<EncodedChunk>> {
 }
 
 fn build_encoder(args: &Args, backend: Backend, codec: Codec) -> Result<AnyEncodeSession> {
-    let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
+    let mut config = EncoderConfig::new(
+        codec,
+        args.fps,
+        args.require_hardware,
+        EncodeInputFormat::Argb8888,
+    );
     let resolved_backend = backend
         .resolve_encoder(&config)
         .context("failed to resolve encoder backend")?;

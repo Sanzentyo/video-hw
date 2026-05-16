@@ -34,7 +34,8 @@ use shiguredo_video_device::{
 };
 use video_hw::{
     AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
-    EncodedChunk, EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
+    EncodeInputFormat, EncodedChunk, EncodedLayout, EncoderConfig, IntelEncoderOptions,
+    RawFrameBuffer, Timestamp90k,
 };
 
 #[derive(Debug, Parser)]
@@ -354,7 +355,12 @@ fn resolve_recording_backend_and_config(
     settings: &RecordingSettings,
     fps: i32,
 ) -> Result<(BackendKind, EncoderConfig)> {
-    let mut config = EncoderConfig::new(settings.codec, fps, settings.require_hardware);
+    let mut config = EncoderConfig::new(
+        settings.codec,
+        fps,
+        settings.require_hardware,
+        EncodeInputFormat::Argb8888,
+    );
     let resolved_backend = settings.backend.resolve_encoder(&config).with_context(|| {
         format!(
             "failed to resolve encoder backend (backend={}, codec={}, require_hardware={})",

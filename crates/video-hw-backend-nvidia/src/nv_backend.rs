@@ -14,9 +14,12 @@ use crate::nv_bitstream::{AccessUnit, StatefulBitstreamAssembler};
 use crate::nv_meta_decoder::NvMetaDecoder;
 use crate::pipeline_scheduler::PipelineScheduler;
 use crate::{
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    ColorRequest, DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame,
-    NvidiaSessionConfig, SessionSwitchMode, SessionSwitchRequest, VideoDecoder, VideoEncoder,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityContract,
+    CapabilityReport, Codec, ColorRequest, DecodeCapability, DecodeOutputCapability,
+    DecodeOutputMode, DecodeOutputOrigin, DecodeSummary, DecoderConfig, DimensionConstraints,
+    EncodeCapability, EncodeInputFormat, EncodedLayout, EncodedPacket, FallbackPolicy, Frame,
+    NvidiaSessionConfig, RuntimeCapability, RuntimeStatus, SessionSwitchMode, SessionSwitchRequest,
+    StreamingMode, VideoDecoder, VideoEncoder,
 };
 
 #[derive(Debug, Default)]
@@ -58,7 +61,7 @@ struct StageTiming {
     pack: Duration,
     sdk: Duration,
     upload: Duration,
-    synth: Duration,
+    input_prep: Duration,
     output_lock: Duration,
     reap: Duration,
 }
@@ -69,6 +72,66 @@ struct DecodeReapSummary {
     map_samples: SampleStats,
     queue_depth_samples: SampleStats,
     jitter_samples: SampleStats,
+}
+
+fn nvidia_capability_report(codec: Codec) -> CapabilityReport {
+    let supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
+    let encoded_layout = if codec == Codec::Av1 {
+        EncodedLayout::Av1
+    } else {
+        EncodedLayout::AnnexB
+    };
+    CapabilityReport {
+        codec,
+        contract: CapabilityContract {
+            decode: DecodeCapability {
+                supported,
+                output_modes: if supported {
+                    vec![
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Metadata,
+                            origin: DecodeOutputOrigin::MetadataOnly,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Nv12,
+                            origin: DecodeOutputOrigin::Native,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Rgb24,
+                            origin: DecodeOutputOrigin::ConvertedFromNv12,
+                        },
+                    ]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::PushReap,
+                fallback_policy: FallbackPolicy::NoFallback,
+                requires_side_data: false,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+            encode: EncodeCapability {
+                supported,
+                input_formats: if supported {
+                    vec![EncodeInputFormat::Argb8888]
+                } else {
+                    Vec::new()
+                },
+                encoded_layouts: if supported {
+                    vec![encoded_layout]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::NoFallback,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+        },
+        runtime: RuntimeCapability {
+            status: RuntimeStatus::NotProbed,
+            hardware_acceleration: true,
+            reason: None,
+        },
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -323,22 +386,7 @@ impl NvDecoderAdapter {
 
 impl VideoDecoder for NvDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-        Ok(CapabilityReport {
-            codec,
-            decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
-            hardware_acceleration: true,
-            decode_output_modes: if decode_supported {
-                vec![
-                    DecodeOutputMode::Metadata,
-                    DecodeOutputMode::Nv12,
-                    DecodeOutputMode::Rgb24,
-                ]
-            } else {
-                Vec::new()
-            },
-        })
+        Ok(nvidia_capability_report(codec))
     }
 
     fn push_bitstream_chunk(
@@ -659,22 +707,7 @@ impl NvEncoderAdapter {
 
 impl VideoEncoder for NvEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-        Ok(CapabilityReport {
-            codec,
-            decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
-            hardware_acceleration: true,
-            decode_output_modes: if decode_supported {
-                vec![
-                    DecodeOutputMode::Metadata,
-                    DecodeOutputMode::Nv12,
-                    DecodeOutputMode::Rgb24,
-                ]
-            } else {
-                Vec::new()
-            },
-        })
+        Ok(nvidia_capability_report(codec))
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
@@ -690,6 +723,11 @@ impl VideoEncoder for NvEncoderAdapter {
         if frame.width == 0 || frame.height == 0 {
             return Err(BackendError::InvalidInput(
                 "frame dimensions must be positive".to_string(),
+            ));
+        }
+        if frame.argb.is_none() {
+            return Err(BackendError::InvalidInput(
+                "NVIDIA encode requires ARGB input payload".to_string(),
             ));
         }
 
@@ -812,12 +850,12 @@ impl VideoEncoder for NvEncoderAdapter {
                     queue_depth_samples.push_value(pending_outputs.len() as f64);
                 }
                 let mut pair = session.checkout_pair()?;
-                let synth_start = Instant::now();
                 let _ = input_layout;
-                let argb = frame
-                    .argb
-                    .clone()
-                    .unwrap_or_else(|| make_synthetic_argb(width, height, index));
+                let argb = frame.argb.clone().ok_or_else(|| {
+                    BackendError::InvalidInput(
+                        "NVIDIA encode requires ARGB input payload".to_string(),
+                    )
+                })?;
                 if argb.len() != width.saturating_mul(height).saturating_mul(4) {
                     return Err(BackendError::InvalidInput(format!(
                         "argb payload size mismatch: expected {}, got {}",
@@ -825,7 +863,6 @@ impl VideoEncoder for NvEncoderAdapter {
                         argb.len()
                     )));
                 }
-                timing.synth += synth_start.elapsed();
                 copy_stats.input_upload_bytes = copy_stats
                     .input_upload_bytes
                     .saturating_add(argb.len() as u64);
@@ -949,12 +986,12 @@ impl VideoEncoder for NvEncoderAdapter {
 
         if report_metrics {
             eprintln!(
-                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
+                "[nv.encode] frames={}, packets={}, queue_peak={}, max_in_flight={}, input_prep_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, encode_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),
                 packets.len(),
                 output_depth_peak,
                 max_in_flight,
-                timing.synth.as_secs_f64() * 1_000.0,
+                timing.input_prep.as_secs_f64() * 1_000.0,
                 timing.upload.as_secs_f64() * 1_000.0,
                 timing.sdk.as_secs_f64() * 1_000.0,
                 timing.reap.as_secs_f64() * 1_000.0,
@@ -1071,11 +1108,9 @@ impl NvEncoderAdapter {
                 BackendError::Backend("safe lifetime buffer pair is missing".to_string())
             })?;
 
-            let synth_start = Instant::now();
-            let argb = frame
-                .argb
-                .clone()
-                .unwrap_or_else(|| make_synthetic_argb(width, height, index));
+            let argb = frame.argb.clone().ok_or_else(|| {
+                BackendError::InvalidInput("NVIDIA encode requires ARGB input payload".to_string())
+            })?;
             if argb.len() != width.saturating_mul(height).saturating_mul(4) {
                 return Err(BackendError::InvalidInput(format!(
                     "argb payload size mismatch: expected {}, got {}",
@@ -1083,7 +1118,6 @@ impl NvEncoderAdapter {
                     argb.len()
                 )));
             }
-            timing.synth += synth_start.elapsed();
             copy_stats.input_upload_bytes = copy_stats
                 .input_upload_bytes
                 .saturating_add(argb.len() as u64);
@@ -1156,10 +1190,10 @@ impl NvEncoderAdapter {
 
         if report_metrics {
             eprintln!(
-                "[nv.encode.safe] frames={}, packets={}, synth_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
+                "[nv.encode.safe] frames={}, packets={}, input_prep_ms={:.3}, upload_ms={:.3}, submit_ms={:.3}, reap_ms={:.3}, lock_ms={:.3}, queue_p95={:.3}, queue_p99={:.3}, jitter_ms_mean={:.3}, jitter_ms_p95={:.3}, jitter_ms_p99={:.3}, input_copy_bytes={}, input_copy_frames={}, output_copy_bytes={}, output_copy_packets={}",
                 pending_frames.len(),
                 packets.len(),
-                timing.synth.as_secs_f64() * 1_000.0,
+                timing.input_prep.as_secs_f64() * 1_000.0,
                 timing.upload.as_secs_f64() * 1_000.0,
                 timing.sdk.as_secs_f64() * 1_000.0,
                 timing.reap.as_secs_f64() * 1_000.0,
@@ -1545,20 +1579,6 @@ fn update_jitter_samples(
     *last_pts_90k = Some(current);
 }
 
-fn make_synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
-    let mut buffer = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-    for y in 0..height {
-        for x in 0..width {
-            let offset = (y * width + x) * 4;
-            buffer[offset] = ((x + frame_index) % 256) as u8;
-            buffer[offset + 1] = ((y + frame_index * 2) % 256) as u8;
-            buffer[offset + 2] = ((frame_index * 5) % 256) as u8;
-            buffer[offset + 3] = 255;
-        }
-    }
-    buffer
-}
-
 /// Convert internal TRUE-ARGB bytes `[A, R, G, B]` (as stored in [`RawFrameBuffer::Argb8888`])
 /// to the byte layout required by `NV_ENC_BUFFER_FORMAT_ARGB`.
 ///
@@ -1667,7 +1687,7 @@ mod tests {
                 color_primaries: None,
                 transfer_function: None,
                 ycbcr_matrix: None,
-                argb: None,
+                argb: Some(vec![0; 640 * 360 * 4]),
                 nv12: None,
                 force_keyframe: false,
             })
@@ -1681,5 +1701,30 @@ mod tests {
                 .map(PipelineScheduler::generation),
             Some(adapter.configured_generation())
         );
+    }
+
+    #[test]
+    fn push_frame_rejects_missing_argb_payload() {
+        let mut adapter =
+            NvEncoderAdapter::with_config(Codec::H264, 30, true, BackendEncoderOptions::Default);
+        let err = adapter
+            .push_frame(Frame {
+                width: 640,
+                height: 360,
+                pixel_format: None,
+                pts_90k: Some(0),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
+                argb: None,
+                nv12: Some(crate::Nv12FramePayload {
+                    pitch: 640,
+                    data: vec![0; 640 * 360 * 3 / 2],
+                }),
+                force_keyframe: false,
+            })
+            .expect_err("NVIDIA encode must not synthesize missing ARGB input");
+        assert!(matches!(err, BackendError::InvalidInput(_)));
     }
 }

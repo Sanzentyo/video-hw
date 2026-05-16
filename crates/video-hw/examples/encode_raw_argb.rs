@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
-    EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
-    VtEncoderOptions, VulkanEncoderOptions,
+    EncodeInputFormat, EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer,
+    Timestamp90k, VtEncoderOptions, VulkanEncoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -97,7 +97,12 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to open raw input: {}", args.input_raw.display()))?;
     let mut input_reader = BufReader::new(input_file);
 
-    let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
+    let encode_input_format = match input_pix_fmt {
+        InputPixelFormat::Argb => EncodeInputFormat::Argb8888,
+        InputPixelFormat::Nv12 => EncodeInputFormat::Nv12,
+    };
+    let mut config =
+        EncoderConfig::new(codec, args.fps, args.require_hardware, encode_input_format);
     let resolved_backend = backend
         .resolve_encoder(&config)
         .context("failed to resolve encoder backend")?;
@@ -239,7 +244,6 @@ fn make_raw_frame_buffer(
     }
 }
 
-#[cfg(feature = "unstable-raw-inputs")]
 fn make_nv12_buffer(frame_bytes: Vec<u8>, width: usize, height: usize) -> Result<RawFrameBuffer> {
     let y_size = width
         .checked_mul(height)
@@ -255,15 +259,6 @@ fn make_nv12_buffer(frame_bytes: Vec<u8>, width: usize, height: usize) -> Result
         pitch: width,
         data: frame_bytes,
     })
-}
-
-#[cfg(not(feature = "unstable-raw-inputs"))]
-fn make_nv12_buffer(
-    _frame_bytes: Vec<u8>,
-    _width: usize,
-    _height: usize,
-) -> Result<RawFrameBuffer> {
-    anyhow::bail!("nv12 input requires building with --features unstable-raw-inputs");
 }
 
 fn parse_codec(raw: &str) -> Result<Codec> {

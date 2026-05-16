@@ -97,7 +97,7 @@ use video_hw::{
         any(target_os = "linux", target_os = "windows")
     )
 ))]
-use video_hw::{Dimensions, EncodeFrame, EncodeSession, RawFrameBuffer};
+use video_hw::{Dimensions, EncodeFrame, EncodeInputFormat, EncodeSession, RawFrameBuffer};
 #[cfg(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
@@ -168,6 +168,32 @@ fn make_argb_frame(index: i64) -> EncodeFrame {
         dims,
         pts_90k: Some(video_hw::Timestamp90k(index * 3000)),
         buffer: RawFrameBuffer::Argb8888(argb),
+        force_keyframe: index == 0,
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn make_nv12_frame(index: i64) -> EncodeFrame {
+    let dims = dims_640_360();
+    let width = dims.width.get() as usize;
+    let height = dims.height.get() as usize;
+    EncodeFrame {
+        dims,
+        pts_90k: Some(video_hw::Timestamp90k(index * 3000)),
+        buffer: RawFrameBuffer::Nv12 {
+            pitch: width,
+            data: vec![128; width * height * 3 / 2],
+        },
         force_keyframe: index == 0,
     }
 }
@@ -769,8 +795,12 @@ fn e2e_nv_decode_flush_without_input_is_empty() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_generates_packets() {
-    let mut encoder =
-        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Argb8888,
+    ));
 
     for i in 0..30 {
         encoder
@@ -791,8 +821,12 @@ fn e2e_encode_h264_generates_packets() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_rejects_invalid_argb_payload() {
-    let mut encoder =
-        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Argb8888,
+    ));
     let bad_frame = EncodeFrame {
         dims: dims_640_360(),
         pts_90k: Some(Timestamp90k(0)),
@@ -810,8 +844,12 @@ fn e2e_encode_h264_rejects_invalid_argb_payload() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_encode_h264_packets_are_pts_monotonic() {
-    let mut encoder =
-        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Argb8888,
+    ));
 
     for i in 0..30 {
         let mut frame = make_argb_frame(i as i64);
@@ -839,8 +877,12 @@ fn e2e_encode_h264_packets_are_pts_monotonic() {
 ))]
 #[test]
 fn e2e_nv_encode_h264_packets_are_pts_monotonic() {
-    let mut encoder =
-        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
 
     for i in 0..30 {
         let mut frame = make_argb_frame(i as i64);
@@ -880,8 +922,12 @@ fn e2e_nv_encode_h264_packets_are_pts_monotonic() {
 ))]
 #[test]
 fn e2e_vulkan_encode_h264_smoke() {
-    let mut encoder =
-        EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
 
     for i in 0..30 {
         if let Err(err) = encoder.submit(make_argb_frame(i as i64)) {
@@ -908,8 +954,12 @@ fn e2e_vulkan_encode_h264_smoke() {
 ))]
 #[test]
 fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
-    let mut encoder =
-        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
     let bad_frame = EncodeFrame {
         dims: dims_640_360(),
         pts_90k: Some(Timestamp90k(0)),
@@ -936,8 +986,12 @@ fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
 #[test]
 fn e2e_intel_encode_h264_packets_are_pts_monotonic() {
     let _guard = intel_test_guard();
-    let mut encoder =
-        EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
 
     for i in 0..30 {
         let mut frame = make_argb_frame(i as i64);
@@ -978,8 +1032,12 @@ fn e2e_intel_encode_h264_packets_are_pts_monotonic() {
 #[test]
 fn e2e_intel_encode_h264_rejects_invalid_argb_payload() {
     let _guard = intel_test_guard();
-    let mut encoder =
-        EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
     let bad_frame = EncodeFrame {
         dims: dims_640_360(),
         pts_90k: None,
@@ -1064,7 +1122,7 @@ fn e2e_intel_decode_force_software_h264() {
 #[test]
 fn e2e_intel_encode_force_software_h264() {
     let _guard = intel_test_guard();
-    let mut config = EncoderConfig::new(Codec::H264, 30, false);
+    let mut config = EncoderConfig::new(Codec::H264, 30, false, EncodeInputFormat::Argb8888);
     config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
         force_software: true,
         hevc_use_vpp: None,
@@ -1118,7 +1176,7 @@ fn e2e_intel_force_software_conflicts_with_require_hardware() {
         .expect_err("decoder should reject conflicting hardware/software settings");
     assert!(matches!(err, BackendError::UnsupportedConfig(_)));
 
-    let mut config = EncoderConfig::new(Codec::H264, 30, true);
+    let mut config = EncoderConfig::new(Codec::H264, 30, true, EncodeInputFormat::Argb8888);
     config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {
         force_software: true,
         hevc_use_vpp: None,
@@ -1137,8 +1195,12 @@ fn e2e_intel_force_software_conflicts_with_require_hardware() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_backend_accepts_explicit_session_switch_request() {
-    let mut encoder =
-        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Argb8888,
+    ));
     let result = encoder.request_session_switch(SessionSwitchRequest::VideoToolbox {
         config: VtSessionConfig {
             force_keyframe_on_activate: true,
@@ -1162,8 +1224,8 @@ fn e2e_vt_backend_decode_and_encode_work() {
     let capability = decoder
         .query_capability(Codec::H264)
         .expect("capability query should not fail");
-    assert!(capability.decode_supported);
-    assert!(capability.encode_supported);
+    assert!(capability.contract.decode.supported);
+    assert!(capability.contract.encode.supported);
 
     let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
@@ -1186,8 +1248,12 @@ fn e2e_vt_backend_decode_and_encode_work() {
     assert!(decoded_frames > 0);
     assert_eq!(decoder.summary().decoded_frames, decoded_frames);
 
-    let mut encoder =
-        EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Argb8888,
+    ));
     for i in 0..30 {
         encoder
             .submit(make_argb_frame(i as i64))
@@ -1293,7 +1359,7 @@ fn e2e_vt_backend_decode_returns_pixel_payloads() {
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 #[test]
 fn e2e_vt_backend_encode_accepts_backend_specific_options() {
-    let mut config = EncoderConfig::new(Codec::H264, 30, false);
+    let mut config = EncoderConfig::new(Codec::H264, 30, false, EncodeInputFormat::Argb8888);
     config.backend_options = BackendEncoderOptions::VideoToolbox(VtEncoderOptions {
         report_metrics: Some(false),
         enable_pipeline_scheduler: Some(false),
@@ -1328,9 +1394,9 @@ fn e2e_nv_backend_decode_and_encode_work() {
     let capability = decoder
         .query_capability(Codec::H264)
         .expect("capability query should not fail");
-    assert!(capability.decode_supported);
-    assert!(capability.encode_supported);
-    assert!(capability.hardware_acceleration);
+    assert!(capability.contract.decode.supported);
+    assert!(capability.contract.encode.supported);
+    assert!(capability.runtime.hardware_acceleration);
 
     let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;
@@ -1359,8 +1425,12 @@ fn e2e_nv_backend_decode_and_encode_work() {
     assert!(decoded_frames > 0);
     assert_eq!(decoder.summary().decoded_frames, decoded_frames);
 
-    let mut encoder =
-        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
     for i in 0..30 {
         encoder
             .submit(make_argb_frame(i as i64))
@@ -1508,7 +1578,7 @@ fn e2e_nv_backend_decode_returns_pixel_payloads() {
 ))]
 #[test]
 fn e2e_nv_backend_encode_accepts_backend_specific_options() {
-    let mut config = EncoderConfig::new(Codec::H264, 30, true);
+    let mut config = EncoderConfig::new(Codec::H264, 30, true, EncodeInputFormat::Argb8888);
     config.backend_options = BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
         max_in_flight_outputs: 4,
         gop_length: None,
@@ -1542,9 +1612,38 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
     any(target_os = "linux", target_os = "windows")
 ))]
 #[test]
+fn e2e_nv_backend_rejects_nv12_encode_input_without_synthetic_fallback() {
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Nv12,
+    ));
+    let err = encoder
+        .submit(make_nv12_frame(0))
+        .expect_err("NVIDIA encode must reject NV12 input instead of synthesizing pixels");
+    assert!(matches!(err, BackendError::InvalidInput(_)));
+    assert!(
+        encoder
+            .try_reap()
+            .expect("try_reap should succeed")
+            .is_none()
+    );
+    assert!(encoder.flush().expect("flush should be empty").is_empty());
+}
+
+#[cfg(all(
+    feature = "backend-nvidia",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[test]
 fn e2e_nv_backend_accepts_explicit_session_switch_request() {
-    let mut encoder =
-        EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, true));
+    let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        true,
+        EncodeInputFormat::Argb8888,
+    ));
     let result = encoder.request_session_switch(SessionSwitchRequest::Nvidia {
         config: NvidiaSessionConfig {
             gop_length: Some(60),

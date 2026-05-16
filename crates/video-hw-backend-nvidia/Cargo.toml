@@ -8,7 +8,6 @@ license.workspace = true
 default = ["backend-nvidia"]
 backend-nvidia = ["video-hw-core/backend-nvidia"]
 backend-vt = []
-unstable-raw-inputs = ["video-hw-core/unstable-raw-inputs"]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", default-features = false }

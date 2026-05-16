@@ -35,8 +35,8 @@ use video_hw::VtEncoderAdapter;
 ))]
 use video_hw::VulkanEncoderAdapter;
 use video_hw::{
-    Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodedChunk,
-    EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
+    Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame, EncodeInputFormat,
+    EncodedChunk, EncodedLayout, EncoderConfig, IntelEncoderOptions, RawFrameBuffer, Timestamp90k,
     bitstream::ParameterSets,
 };
 
@@ -430,8 +430,7 @@ impl RecorderState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         let fps = config.frame_rate.get().get().max(1);
-        let default_duration = u32::try_from((90_000 / fps).max(1))
-            .context("failed to compute default frame duration")?;
+        let default_duration = (90_000 / fps).max(1);
         let mut state = Self {
             encoder: None,
             muxer: Fmp4SegmentMuxer::with_options(SegmentMuxerOptions { creation_timestamp })
@@ -874,7 +873,12 @@ fn resolve_recording_backend_and_config(
     settings: &RecordingSettings,
     fps: i32,
 ) -> Result<(BackendKind, EncoderConfig)> {
-    let mut config = EncoderConfig::new(settings.codec, fps, settings.require_hardware);
+    let mut config = EncoderConfig::new(
+        settings.codec,
+        fps,
+        settings.require_hardware,
+        EncodeInputFormat::Argb8888,
+    );
     let resolved_backend = settings.backend.resolve_encoder(&config).with_context(|| {
         format!(
             "failed to resolve encoder backend (backend={}, codec={}, require_hardware={})",

@@ -13,13 +13,75 @@ use onevpl::vpp::VppVideoParams;
 use rayon::prelude::*;
 use tokio::runtime::Builder as RuntimeBuilder;
 
-#[cfg(feature = "unstable-raw-inputs")]
 use crate::Nv12FramePayload;
 use crate::{
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityReport, Codec,
-    DecodeOutputMode, DecodeSummary, DecoderConfig, EncodedPacket, Frame, IntelDecoderOptions,
-    IntelEncoderOptions, SessionSwitchRequest, VideoDecoder, VideoEncoder,
+    BackendDecoderOptions, BackendEncoderOptions, BackendError, CapabilityContract,
+    CapabilityReport, Codec, DecodeCapability, DecodeOutputCapability, DecodeOutputMode,
+    DecodeOutputOrigin, DecodeSummary, DecoderConfig, DimensionConstraints, EncodeCapability,
+    EncodeInputFormat, EncodedLayout, EncodedPacket, FallbackPolicy, Frame, IntelDecoderOptions,
+    IntelEncoderOptions, RuntimeCapability, RuntimeStatus, SessionSwitchRequest, StreamingMode,
+    VideoDecoder, VideoEncoder,
 };
+
+fn intel_capability_report(codec: Codec) -> CapabilityReport {
+    let supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
+    let encoded_layout = if codec == Codec::Av1 {
+        EncodedLayout::Av1
+    } else {
+        EncodedLayout::AnnexB
+    };
+    CapabilityReport {
+        codec,
+        contract: CapabilityContract {
+            decode: DecodeCapability {
+                supported,
+                output_modes: if supported {
+                    vec![
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Metadata,
+                            origin: DecodeOutputOrigin::MetadataOnly,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Nv12,
+                            origin: DecodeOutputOrigin::ConvertedFromArgb,
+                        },
+                        DecodeOutputCapability {
+                            mode: DecodeOutputMode::Rgb24,
+                            origin: DecodeOutputOrigin::ConvertedFromArgb,
+                        },
+                    ]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::HardwareThenSoftware,
+                requires_side_data: false,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+            encode: EncodeCapability {
+                supported,
+                input_formats: if supported {
+                    vec![EncodeInputFormat::Argb8888, EncodeInputFormat::Nv12]
+                } else {
+                    Vec::new()
+                },
+                encoded_layouts: if supported {
+                    vec![encoded_layout]
+                } else {
+                    Vec::new()
+                },
+                streaming_mode: StreamingMode::FlushOnly,
+                fallback_policy: FallbackPolicy::HardwareThenSoftware,
+                dimension_constraints: DimensionConstraints::default(),
+            },
+        },
+        runtime: RuntimeCapability {
+            status: RuntimeStatus::NotProbed,
+            hardware_acceleration: true,
+            reason: None,
+        },
+    }
+}
 
 pub struct IntelDecoderAdapter {
     config: DecoderConfig,
@@ -118,22 +180,7 @@ impl IntelDecoderAdapter {
 
 impl VideoDecoder for IntelDecoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-        Ok(CapabilityReport {
-            codec,
-            decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
-            hardware_acceleration: true,
-            decode_output_modes: if decode_supported {
-                vec![
-                    DecodeOutputMode::Metadata,
-                    DecodeOutputMode::Nv12,
-                    DecodeOutputMode::Rgb24,
-                ]
-            } else {
-                Vec::new()
-            },
-        })
+        Ok(intel_capability_report(codec))
     }
 
     fn push_bitstream_chunk(
@@ -267,22 +314,7 @@ impl IntelEncoderAdapter {
 
 impl VideoEncoder for IntelEncoderAdapter {
     fn query_capability(&self, codec: Codec) -> Result<CapabilityReport, BackendError> {
-        let decode_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-        Ok(CapabilityReport {
-            codec,
-            decode_supported,
-            encode_supported: matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1),
-            hardware_acceleration: true,
-            decode_output_modes: if decode_supported {
-                vec![
-                    DecodeOutputMode::Metadata,
-                    DecodeOutputMode::Nv12,
-                    DecodeOutputMode::Rgb24,
-                ]
-            } else {
-                Vec::new()
-            },
-        })
+        Ok(intel_capability_report(codec))
     }
 
     fn push_frame(&mut self, frame: Frame) -> Result<Vec<EncodedPacket>, BackendError> {
@@ -291,10 +323,7 @@ impl VideoEncoder for IntelEncoderAdapter {
                 "frame dimensions must be positive".to_string(),
             ));
         }
-        #[cfg(feature = "unstable-raw-inputs")]
         let has_supported_payload = frame.argb.is_some() || frame.nv12.is_some();
-        #[cfg(not(feature = "unstable-raw-inputs"))]
-        let has_supported_payload = frame.argb.is_some();
         if !has_supported_payload {
             return Err(BackendError::InvalidInput(
                 "Intel backend requires ARGB or NV12 frame payload".to_string(),
@@ -936,7 +965,6 @@ async fn encode_with_onevpl(
             "Intel backend currently requires even frame dimensions".to_string(),
         ));
     }
-    #[cfg(feature = "unstable-raw-inputs")]
     let use_nv12_input = {
         let has_argb = pending_frames.iter().any(|frame| frame.argb.is_some());
         let has_nv12 = pending_frames.iter().any(|frame| frame.nv12.is_some());
@@ -953,8 +981,6 @@ async fn encode_with_onevpl(
         }
         has_nv12
     };
-    #[cfg(not(feature = "unstable-raw-inputs"))]
-    let use_nv12_input = false;
 
     let mut loader =
         onevpl::Loader::new().map_err(|status| map_onevpl_status(status, "Loader::new"))?;
@@ -1159,37 +1185,24 @@ async fn encode_with_onevpl(
 
         pending_pts.push_back(frame.pts_90k);
         if use_nv12_input {
-            #[cfg(feature = "unstable-raw-inputs")]
+            let nv12 = frame.nv12.as_ref().ok_or_else(|| {
+                BackendError::InvalidInput("Intel backend requires NV12 frame payload".to_string())
+            })?;
+            let mut input_surface = encoder
+                .get_surface()
+                .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
+            write_nv12_to_surface(&mut input_surface, nv12, width, height)?;
+            match encoder
+                .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
+                .await
             {
-                let nv12 = frame.nv12.as_ref().ok_or_else(|| {
-                    BackendError::InvalidInput(
-                        "Intel backend requires NV12 frame payload".to_string(),
-                    )
-                })?;
-                let mut input_surface = encoder
-                    .get_surface()
-                    .map_err(|status| map_onevpl_status(status, "Encoder::get_surface"))?;
-                write_nv12_to_surface(&mut input_surface, nv12, width, height)?;
-                match encoder
-                    .encode(&mut ctrl, Some(input_surface), &mut bitstream, None)
-                    .await
-                {
-                    Ok(_) => {
-                        collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?
-                    }
-                    Err(MfxStatus::MoreData) => {}
-                    Err(status) => {
-                        return Err(map_onevpl_status(status, "Encoder::encode (nv12-input)"));
-                    }
+                Ok(_) => collect_packets(&mut bitstream, codec, &mut pending_pts, &mut packets)?,
+                Err(MfxStatus::MoreData) => {}
+                Err(status) => {
+                    return Err(map_onevpl_status(status, "Encoder::encode (nv12-input)"));
                 }
-                continue;
             }
-            #[cfg(not(feature = "unstable-raw-inputs"))]
-            {
-                return Err(BackendError::UnsupportedConfig(
-                    "NV12 input payloads require unstable-raw-inputs feature".to_string(),
-                ));
-            }
+            continue;
         }
         if hevc_cpu_nv12 {
             let argb = frame.argb.as_deref().ok_or_else(|| {
@@ -1373,7 +1386,6 @@ fn collect_packets(
     Ok(())
 }
 
-#[cfg(feature = "unstable-raw-inputs")]
 fn write_nv12_to_surface(
     surface: &mut onevpl::FrameSurface<'_>,
     nv12: &Nv12FramePayload,
@@ -1436,7 +1448,6 @@ unsafe fn nv12_uv_plane_full_mut<'a>(
     unsafe { std::slice::from_raw_parts_mut(u_plane.as_mut_ptr(), full_len) }
 }
 
-#[cfg(feature = "unstable-raw-inputs")]
 fn copy_nv12_to_surface(
     surface: &mut onevpl::FrameSurface<'_>,
     nv12: &[u8],

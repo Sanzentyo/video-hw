@@ -10,13 +10,15 @@ mod transform;
 pub use contract::Nv12FramePayload;
 pub use contract::{
     BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
-    CapabilityReport, Codec, ColorConvertOptions, ColorMatrix, ColorMetadata, ColorRange,
-    DecodeOutputMode, DecodeSummary, DecodedFrame, DecoderConfig, Dimensions, EncodeFrame,
-    EncodedChunk, EncodedLayout, EncoderConfig, IntelDecoderOptions, IntelEncoderOptions,
-    Nv12FrameRef, NvidiaDecoderOptions, NvidiaEncoderOptions, NvidiaSessionConfig, PitchBytes,
-    PixelBufferOwned, PixelHeight, PixelOutputLayout, PixelWidth, RawFrameBuffer, Rgb24FrameRef,
-    SessionSwitchMode, SessionSwitchRequest, Timestamp90k, VtDecoderOptions, VtEncoderOptions,
-    VtSessionConfig, VulkanDecoderOptions, VulkanEncoderOptions,
+    CapabilityContract, CapabilityReport, Codec, ColorConvertOptions, ColorMatrix, ColorMetadata,
+    ColorRange, DecodeCapability, DecodeOutputCapability, DecodeOutputMode, DecodeOutputOrigin,
+    DecodeSummary, DecodedFrame, DecoderConfig, DimensionConstraints, Dimensions, EncodeCapability,
+    EncodeFrame, EncodeInputFormat, EncodedChunk, EncodedLayout, EncoderConfig, FallbackPolicy,
+    IntelDecoderOptions, IntelEncoderOptions, Nv12FrameRef, NvidiaDecoderOptions,
+    NvidiaEncoderOptions, NvidiaSessionConfig, PitchBytes, PixelBufferOwned, PixelHeight,
+    PixelOutputLayout, PixelWidth, RawFrameBuffer, Rgb24FrameRef, RuntimeCapability, RuntimeStatus,
+    SessionSwitchMode, SessionSwitchRequest, StreamingMode, Timestamp90k, VtDecoderOptions,
+    VtEncoderOptions, VtSessionConfig, VulkanDecoderOptions, VulkanEncoderOptions,
 };
 pub(crate) use contract::{EncodedPacket, Frame, VideoDecoder, VideoEncoder};
 pub use pipeline::{
@@ -517,16 +519,16 @@ pub fn select_decoder_backend(config: &DecoderConfig) -> Result<BackendKind, Bac
     for candidate in preferred_backend_order() {
         match probe_decoder_capability(candidate, config) {
             Ok(capability) => {
-                if capability.decode_supported
-                    && (!config.require_hardware || capability.hardware_acceleration)
+                if capability.contract.decode.supported
+                    && (!config.require_hardware || capability.runtime.hardware_acceleration)
                     && capability.supports_decode_output_mode(config.output_mode)
                 {
                     return Ok(candidate);
                 }
                 diagnostics.push(format!(
                     "{candidate:?}: decode_supported={}, hw_accel={}, output_mode_supported={}",
-                    capability.decode_supported,
-                    capability.hardware_acceleration,
+                    capability.contract.decode.supported,
+                    capability.runtime.hardware_acceleration,
                     capability.supports_decode_output_mode(config.output_mode)
                 ));
             }
@@ -577,14 +579,17 @@ pub fn select_encoder_backend(config: &EncoderConfig) -> Result<BackendKind, Bac
     for candidate in preferred_backend_order() {
         match probe_encoder_capability(candidate, config) {
             Ok(capability) => {
-                if capability.encode_supported
-                    && (!config.require_hardware || capability.hardware_acceleration)
+                if capability.contract.encode.supported
+                    && (!config.require_hardware || capability.runtime.hardware_acceleration)
+                    && capability.supports_encode_input_format(config.input_format)
                 {
                     return Ok(candidate);
                 }
                 diagnostics.push(format!(
-                    "{candidate:?}: encode_supported={}, hw_accel={}",
-                    capability.encode_supported, capability.hardware_acceleration
+                    "{candidate:?}: encode_supported={}, hw_accel={}, input_format_supported={}",
+                    capability.contract.encode.supported,
+                    capability.runtime.hardware_acceleration,
+                    capability.supports_encode_input_format(config.input_format)
                 ));
             }
             Err(err) => diagnostics.push(format!("{candidate:?}: {err}")),
@@ -692,6 +697,44 @@ fn preflight_decoder_capability(
     ))
 }
 
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+))]
+fn preflight_encoder_capability(
+    kind: BackendKind,
+    config: &EncoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    probe_encoder_capability(kind, config)
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", feature = "backend-vt"),
+    all(
+        any(
+            feature = "backend-nvidia",
+            feature = "backend-intel",
+            feature = "backend-vulkan"
+        ),
+        any(target_os = "linux", target_os = "windows")
+    )
+)))]
+fn preflight_encoder_capability(
+    _kind: BackendKind,
+    _config: &EncoderConfig,
+) -> Result<CapabilityReport, BackendError> {
+    Err(BackendError::UnsupportedConfig(
+        "no backend feature enabled".to_string(),
+    ))
+}
+
 pub trait EncoderBackend: VideoEncoder {
     const BACKEND_KIND: BackendKind;
 
@@ -745,6 +788,28 @@ pub struct DecodePreflightReport {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EncodePreflightRequest {
+    pub backend: Backend,
+    pub codec: Codec,
+    pub input_format: EncodeInputFormat,
+    pub require_hardware: bool,
+    pub expected_layout: Option<EncodedLayout>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncodePreflightReport {
+    pub requested_backend: Backend,
+    pub resolved_backend: Option<BackendKind>,
+    pub input_format: EncodeInputFormat,
+    pub expected_layout: Option<EncodedLayout>,
+    pub supported_by_contract: bool,
+    pub usable_in_current_runtime: bool,
+    pub accepted_input_formats: Vec<EncodeInputFormat>,
+    pub encoded_layouts: Vec<EncodedLayout>,
+    pub reason: Option<String>,
+}
+
 pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightReport {
     let mut config = DecoderConfig::new(request.codec, 30, request.require_hardware);
     config.output_mode = request.output_mode;
@@ -783,8 +848,8 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
     match runtime {
         Ok(capability) => {
             let output_mode_supported = capability.supports_decode_output_mode(request.output_mode);
-            let usable = capability.decode_supported
-                && (!request.require_hardware || capability.hardware_acceleration)
+            let usable = capability.contract.decode.supported
+                && (!request.require_hardware || capability.runtime.hardware_acceleration)
                 && output_mode_supported;
             DecodePreflightReport {
                 requested_backend: request.backend,
@@ -792,16 +857,16 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
                 output_mode: request.output_mode,
                 supported_by_contract,
                 usable_in_current_runtime: usable,
-                decode_supported: Some(capability.decode_supported),
-                hardware_acceleration: Some(capability.hardware_acceleration),
+                decode_supported: Some(capability.contract.decode.supported),
+                hardware_acceleration: Some(capability.runtime.hardware_acceleration),
                 output_mode_supported: Some(output_mode_supported),
                 reason: if usable {
                     None
                 } else {
                     Some(format!(
                         "decode_supported={}, hardware_acceleration={}, output_mode_supported={}",
-                        capability.decode_supported,
-                        capability.hardware_acceleration,
+                        capability.contract.decode.supported,
+                        capability.runtime.hardware_acceleration,
                         capability.supports_decode_output_mode(request.output_mode)
                     ))
                 },
@@ -816,6 +881,74 @@ pub fn preflight_decode(request: DecodePreflightRequest) -> DecodePreflightRepor
             decode_supported: None,
             hardware_acceleration: None,
             output_mode_supported: None,
+            reason: Some(err.to_string()),
+        },
+    }
+}
+
+pub fn preflight_encode(request: EncodePreflightRequest) -> EncodePreflightReport {
+    let config = EncoderConfig::new(
+        request.codec,
+        30,
+        request.require_hardware,
+        request.input_format,
+    );
+    let resolved = request.backend.resolve_encoder(&config);
+    let Ok(kind) = resolved else {
+        return EncodePreflightReport {
+            requested_backend: request.backend,
+            resolved_backend: None,
+            input_format: request.input_format,
+            expected_layout: request.expected_layout,
+            supported_by_contract: false,
+            usable_in_current_runtime: false,
+            accepted_input_formats: Vec::new(),
+            encoded_layouts: Vec::new(),
+            reason: Some(resolved.unwrap_err().to_string()),
+        };
+    };
+    match preflight_encoder_capability(kind, &config) {
+        Ok(capability) => {
+            let input_supported = capability.supports_encode_input_format(request.input_format);
+            let layout_supported = request
+                .expected_layout
+                .is_none_or(|layout| capability.supports_encoded_layout(layout));
+            let supported_by_contract =
+                capability.contract.encode.supported && input_supported && layout_supported;
+            let runtime_usable =
+                !request.require_hardware || capability.runtime.hardware_acceleration;
+            let usable = supported_by_contract && runtime_usable;
+            EncodePreflightReport {
+                requested_backend: request.backend,
+                resolved_backend: Some(kind),
+                input_format: request.input_format,
+                expected_layout: request.expected_layout,
+                supported_by_contract,
+                usable_in_current_runtime: usable,
+                accepted_input_formats: capability.contract.encode.input_formats,
+                encoded_layouts: capability.contract.encode.encoded_layouts,
+                reason: if usable {
+                    None
+                } else {
+                    Some(format!(
+                        "encode_supported={}, hardware_acceleration={}, input_format_supported={}, expected_layout_supported={}",
+                        capability.contract.encode.supported,
+                        capability.runtime.hardware_acceleration,
+                        input_supported,
+                        layout_supported
+                    ))
+                },
+            }
+        }
+        Err(err) => EncodePreflightReport {
+            requested_backend: request.backend,
+            resolved_backend: Some(kind),
+            input_format: request.input_format,
+            expected_layout: request.expected_layout,
+            supported_by_contract: false,
+            usable_in_current_runtime: false,
+            accepted_input_formats: Vec::new(),
+            encoded_layouts: Vec::new(),
             reason: Some(err.to_string()),
         },
     }
@@ -906,7 +1039,14 @@ impl AnyEncodeSession {
         kind: BackendKind,
         config: EncoderConfig,
     ) -> Result<Self, BackendError> {
-        let _ = &config;
+        if let Ok(capability) = preflight_encoder_capability(kind, &config)
+            && !capability.supports_encode_input_format(config.input_format)
+        {
+            return Err(BackendError::UnsupportedConfig(format!(
+                "{kind:?} encoder does not support {} input",
+                config.input_format
+            )));
+        }
         match kind {
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             BackendKind::VideoToolbox => Ok(Self {
@@ -1109,15 +1249,21 @@ where
 
 pub struct EncodeSession<E: VideoEncoder> {
     backend_kind: BackendKind,
+    input_format: EncodeInputFormat,
     encoder_inner: E,
     ready: VecDeque<EncodedChunk>,
 }
 
 impl<E: VideoEncoder> EncodeSession<E> {
     #[must_use]
-    pub fn from_encoder(backend_kind: BackendKind, encoder: E) -> Self {
+    pub fn from_encoder(
+        backend_kind: BackendKind,
+        input_format: EncodeInputFormat,
+        encoder: E,
+    ) -> Self {
         Self {
             backend_kind,
+            input_format,
             encoder_inner: encoder,
             ready: VecDeque::new(),
         }
@@ -1129,6 +1275,13 @@ impl<E: VideoEncoder> EncodeSession<E> {
     }
 
     pub fn submit(&mut self, frame: EncodeFrame) -> Result<(), BackendError> {
+        let actual_format = frame.buffer.input_format();
+        if actual_format != self.input_format {
+            return Err(BackendError::InvalidInput(format!(
+                "encoder configured for {} input, got {}",
+                self.input_format, actual_format
+            )));
+        }
         let backend_frame = encode_frame_into_backend_frame(frame)?;
         let outputs = self
             .encoder_inner
@@ -1212,8 +1365,9 @@ where
     E: EncoderBackend,
 {
     pub fn new(config: EncoderConfig) -> Self {
+        let input_format = config.input_format;
         let encoder = E::from_encoder_config(config);
-        Self::from_encoder(E::BACKEND_KIND, encoder)
+        Self::from_encoder(E::BACKEND_KIND, input_format, encoder)
     }
 
     #[must_use]
@@ -1701,65 +1855,28 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     let width = dims.width.get() as usize;
     let height = dims.height.get() as usize;
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    #[cfg(feature = "unstable-raw-inputs")]
     let (argb, nv12) = match buffer {
         RawFrameBuffer::Argb8888(data) => (Some(data), None),
         RawFrameBuffer::Argb8888Shared(data) => (Some(data.to_vec()), None),
-        RawFrameBuffer::Nv12 { pitch, data } => (None, Some(Nv12FramePayload { pitch, data })),
-        RawFrameBuffer::Rgb24(_) => {
-            return Err(BackendError::InvalidInput(
-                "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
-                    .to_string(),
-            ));
+        RawFrameBuffer::Nv12 { pitch, data } => {
+            let payload = Nv12FramePayload { pitch, data };
+            validate_nv12_payload(&payload, width, height)?;
+            (None, Some(payload))
         }
     };
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    #[cfg(not(feature = "unstable-raw-inputs"))]
-    let (argb, nv12) = (
-        match buffer {
-            RawFrameBuffer::Argb8888(data) => Some(data),
-            RawFrameBuffer::Argb8888Shared(data) => Some(data.to_vec()),
-            #[cfg(feature = "unstable-raw-inputs")]
-            RawFrameBuffer::Nv12 { .. } => {
-                return Err(BackendError::InvalidInput(
-                    "RawFrameBuffer::Nv12 is not supported by Encoder::push_encode_frame yet"
-                        .to_string(),
-                ));
-            }
-            #[cfg(feature = "unstable-raw-inputs")]
-            RawFrameBuffer::Rgb24(_) => {
-                return Err(BackendError::InvalidInput(
-                    "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
-                        .to_string(),
-                ));
-            }
-        },
-        None,
-    );
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    #[cfg(feature = "unstable-raw-inputs")]
     match buffer {
+        RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
         RawFrameBuffer::Nv12 { .. } => {
             return Err(BackendError::InvalidInput(
-                "RawFrameBuffer::Nv12 is not supported by Encoder::push_encode_frame yet"
-                    .to_string(),
+                "RawFrameBuffer::Nv12 is not supported on this target".to_string(),
             ));
         }
-        RawFrameBuffer::Rgb24(_) => {
-            return Err(BackendError::InvalidInput(
-                "RawFrameBuffer::Rgb24 is not supported by Encoder::push_encode_frame yet"
-                    .to_string(),
-            ));
-        }
-        RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    #[cfg(not(feature = "unstable-raw-inputs"))]
-    match buffer {
-        RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = force_keyframe;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let nv12 = None;
     Ok(Frame {
         width,
         height,
@@ -1888,7 +2005,12 @@ mod tests {
         assert_eq!(decode, BackendKind::Nvidia);
 
         let encode = Backend::Nvidia
-            .resolve_encoder(&EncoderConfig::new(Codec::H264, 30, false))
+            .resolve_encoder(&EncoderConfig::new(
+                Codec::H264,
+                30,
+                false,
+                EncodeInputFormat::Argb8888,
+            ))
             .expect("nvidia explicit backend resolution should succeed");
         assert_eq!(encode, BackendKind::Nvidia);
     }
@@ -1913,12 +2035,16 @@ mod tests {
         assert!(
             decode_session
                 .query_capability(Codec::H264)
-                .map(|cap| cap.decode_supported)
+                .map(|cap| cap.contract.decode.supported)
                 .unwrap_or(false)
         );
 
-        let encode_session =
-            EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let encode_session = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         assert_eq!(encode_session.backend_kind(), BackendKind::Nvidia);
     }
 
@@ -1928,8 +2054,12 @@ mod tests {
     ))]
     #[test]
     fn strict_session_switch_api_is_available_for_nvidia_static_session() {
-        let mut session =
-            EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let mut session = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         let _ = session.request_session_switch_strict(SessionSwitchRequest::Nvidia {
             config: NvidiaSessionConfig {
                 gop_length: Some(60),
@@ -1960,12 +2090,16 @@ mod tests {
         assert!(
             decode_session
                 .query_capability(Codec::Hevc)
-                .map(|cap| cap.decode_supported)
+                .map(|cap| cap.contract.decode.supported)
                 .unwrap_or(false)
         );
 
-        let encode_session =
-            EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::Hevc, 30, false));
+        let encode_session = EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(
+            Codec::Hevc,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         assert_eq!(encode_session.backend_kind(), BackendKind::Intel);
     }
 
@@ -1989,12 +2123,16 @@ mod tests {
         assert!(
             decode_session
                 .query_capability(Codec::H264)
-                .map(|cap| cap.decode_supported)
+                .map(|cap| cap.contract.decode.supported)
                 .unwrap_or(false)
         );
 
-        let encode_session =
-            EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let encode_session = EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         assert_eq!(encode_session.backend_kind(), BackendKind::Vulkan);
     }
 
@@ -2343,9 +2481,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "unstable-raw-inputs")]
     #[test]
-    fn encode_frame_into_backend_frame_rejects_unsupported_buffer_types() {
+    fn encode_frame_into_backend_frame_rejects_invalid_nv12_payload() {
         let dims = Dimensions {
             width: std::num::NonZeroU32::new(640).unwrap(),
             height: std::num::NonZeroU32::new(360).unwrap(),
@@ -2353,10 +2490,65 @@ mod tests {
         let result = encode_frame_into_backend_frame(EncodeFrame {
             dims,
             pts_90k: Some(Timestamp90k(0)),
-            buffer: RawFrameBuffer::Rgb24(vec![0; 640 * 360 * 3]),
+            buffer: RawFrameBuffer::Nv12 {
+                pitch: 320,
+                data: vec![0; 16],
+            },
             force_keyframe: false,
         });
         assert!(matches!(result, Err(BackendError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn raw_frame_buffer_reports_input_format() {
+        assert_eq!(
+            RawFrameBuffer::Argb8888(vec![0; 4]).input_format(),
+            EncodeInputFormat::Argb8888
+        );
+        assert_eq!(
+            RawFrameBuffer::Nv12 {
+                pitch: 2,
+                data: vec![0; 6]
+            }
+            .input_format(),
+            EncodeInputFormat::Nv12
+        );
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    #[test]
+    fn preflight_encode_rejects_nvidia_nv12_by_contract() {
+        let report = preflight_encode(EncodePreflightRequest {
+            backend: Backend::Nvidia,
+            codec: Codec::H264,
+            input_format: EncodeInputFormat::Nv12,
+            require_hardware: true,
+            expected_layout: Some(EncodedLayout::AnnexB),
+        });
+        assert_eq!(report.resolved_backend, Some(BackendKind::Nvidia));
+        assert!(!report.supported_by_contract);
+        assert!(!report.usable_in_current_runtime);
+        assert_eq!(
+            report.accepted_input_formats,
+            vec![EncodeInputFormat::Argb8888]
+        );
+    }
+
+    #[cfg(all(
+        feature = "backend-nvidia",
+        feature = "backend-intel",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    #[test]
+    fn auto_encode_skips_nvidia_for_nv12_input() {
+        let config = EncoderConfig::new(Codec::H264, 30, true, EncodeInputFormat::Nv12);
+        assert_eq!(
+            Backend::Auto.resolve_encoder(&config).unwrap(),
+            BackendKind::Intel
+        );
     }
 
     #[cfg(any(
@@ -2422,23 +2614,35 @@ mod tests {
     #[test]
     fn encode_reap_timeout_waits_until_deadline_when_empty() {
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-        let mut session =
-            EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let mut session = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         #[cfg(all(
             not(all(target_os = "macos", feature = "backend-vt")),
             feature = "backend-nvidia",
             any(target_os = "linux", target_os = "windows")
         ))]
-        let mut session =
-            EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let mut session = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         #[cfg(all(
             not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
             feature = "backend-intel",
             any(target_os = "linux", target_os = "windows")
         ))]
-        let mut session =
-            EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let mut session = EncodeSession::<IntelEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         #[cfg(all(
             not(all(target_os = "macos", feature = "backend-vt")),
             not(feature = "backend-nvidia"),
@@ -2446,8 +2650,12 @@ mod tests {
             feature = "backend-vulkan",
             any(target_os = "linux", target_os = "windows")
         ))]
-        let mut session =
-            EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(Codec::H264, 30, false));
+        let mut session = EncodeSession::<VulkanEncoderAdapter>::new(EncoderConfig::new(
+            Codec::H264,
+            30,
+            false,
+            EncodeInputFormat::Argb8888,
+        ));
         let timeout = Duration::from_millis(8);
         let start = std::time::Instant::now();
         let out = session.reap_timeout(timeout).unwrap();

@@ -1941,6 +1941,7 @@ mod tests {
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use video_hw::Dimensions;
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};

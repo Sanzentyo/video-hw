@@ -64,13 +64,32 @@ pub enum BitstreamInput {
 pub enum RawFrameBuffer {
     Argb8888(Vec<u8>),
     Argb8888Shared(Arc<[u8]>),
-    #[cfg(feature = "unstable-raw-inputs")]
-    Nv12 {
-        pitch: usize,
-        data: Vec<u8>,
-    },
-    #[cfg(feature = "unstable-raw-inputs")]
-    Rgb24(Vec<u8>),
+    Nv12 { pitch: usize, data: Vec<u8> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeInputFormat {
+    Argb8888,
+    Nv12,
+}
+
+impl Display for EncodeInputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Argb8888 => f.write_str("argb8888"),
+            Self::Nv12 => f.write_str("nv12"),
+        }
+    }
+}
+
+impl RawFrameBuffer {
+    #[must_use]
+    pub fn input_format(&self) -> EncodeInputFormat {
+        match self {
+            Self::Argb8888(_) | Self::Argb8888Shared(_) => EncodeInputFormat::Argb8888,
+            Self::Nv12 { .. } => EncodeInputFormat::Nv12,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -487,16 +506,23 @@ pub struct EncoderConfig {
     pub codec: Codec,
     pub fps: i32,
     pub require_hardware: bool,
+    pub input_format: EncodeInputFormat,
     pub backend_options: BackendEncoderOptions,
 }
 
 impl EncoderConfig {
     #[must_use]
-    pub fn new(codec: Codec, fps: i32, require_hardware: bool) -> Self {
+    pub fn new(
+        codec: Codec,
+        fps: i32,
+        require_hardware: bool,
+        input_format: EncodeInputFormat,
+    ) -> Self {
         Self {
             codec,
             fps,
             require_hardware,
+            input_format,
             backend_options: BackendEncoderOptions::default(),
         }
     }
@@ -506,8 +532,8 @@ impl Display for EncoderConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "EncoderConfig(codec={}, fps={}, require_hardware={})",
-            self.codec, self.fps, self.require_hardware
+            "EncoderConfig(codec={}, fps={}, require_hardware={}, input_format={})",
+            self.codec, self.fps, self.require_hardware, self.input_format
         )
     }
 }
@@ -734,19 +760,118 @@ pub struct EncodedPacket {
 )))]
 pub struct EncodedPacket;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeOutputOrigin {
+    MetadataOnly,
+    Native,
+    ConvertedFromArgb,
+    ConvertedFromNv12,
+    ConvertedFromBgra,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeOutputCapability {
+    pub mode: DecodeOutputMode,
+    pub origin: DecodeOutputOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingMode {
+    PushReap,
+    FlushOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackPolicy {
+    NoFallback,
+    HardwareThenSoftware,
+    OsManaged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DimensionConstraints {
+    pub min_width: u32,
+    pub min_height: u32,
+    pub width_alignment: u32,
+    pub height_alignment: u32,
+}
+
+impl Default for DimensionConstraints {
+    fn default() -> Self {
+        Self {
+            min_width: 1,
+            min_height: 1,
+            width_alignment: 1,
+            height_alignment: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeCapability {
+    pub supported: bool,
+    pub output_modes: Vec<DecodeOutputCapability>,
+    pub streaming_mode: StreamingMode,
+    pub fallback_policy: FallbackPolicy,
+    pub requires_side_data: bool,
+    pub dimension_constraints: DimensionConstraints,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeCapability {
+    pub supported: bool,
+    pub input_formats: Vec<EncodeInputFormat>,
+    pub encoded_layouts: Vec<EncodedLayout>,
+    pub streaming_mode: StreamingMode,
+    pub fallback_policy: FallbackPolicy,
+    pub dimension_constraints: DimensionConstraints,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityContract {
+    pub decode: DecodeCapability,
+    pub encode: EncodeCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    Available,
+    Unavailable,
+    NotProbed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCapability {
+    pub status: RuntimeStatus,
+    pub hardware_acceleration: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityReport {
     pub codec: Codec,
-    pub decode_supported: bool,
-    pub encode_supported: bool,
-    pub hardware_acceleration: bool,
-    pub decode_output_modes: Vec<DecodeOutputMode>,
+    pub contract: CapabilityContract,
+    pub runtime: RuntimeCapability,
 }
 
 impl CapabilityReport {
     #[must_use]
     pub fn supports_decode_output_mode(&self, mode: DecodeOutputMode) -> bool {
-        self.decode_output_modes.contains(&mode)
+        self.contract
+            .decode
+            .output_modes
+            .iter()
+            .any(|capability| capability.mode == mode)
+    }
+
+    #[must_use]
+    pub fn supports_encode_input_format(&self, format: EncodeInputFormat) -> bool {
+        self.contract.encode.input_formats.contains(&format)
+    }
+
+    #[must_use]
+    pub fn supports_encoded_layout(&self, layout: EncodedLayout) -> bool {
+        self.contract.encode.encoded_layouts.contains(&layout)
     }
 }
 
@@ -754,12 +879,15 @@ impl Display for CapabilityReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "CapabilityReport(codec={}, decode_supported={}, encode_supported={}, hardware_acceleration={}, decode_output_modes={:?})",
+            "CapabilityReport(codec={}, decode_supported={}, encode_supported={}, hw_accel={}, runtime={:?}, decode_outputs={:?}, encode_inputs={:?}, encoded_layouts={:?})",
             self.codec,
-            self.decode_supported,
-            self.encode_supported,
-            self.hardware_acceleration,
-            self.decode_output_modes
+            self.contract.decode.supported,
+            self.contract.encode.supported,
+            self.runtime.hardware_acceleration,
+            self.runtime.status,
+            self.contract.decode.output_modes,
+            self.contract.encode.input_formats,
+            self.contract.encode.encoded_layouts
         )
     }
 }

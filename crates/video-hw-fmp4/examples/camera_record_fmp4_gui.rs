@@ -1151,6 +1151,7 @@ fn probe_recording_backend_path(
             config.codec,
             i32::try_from(config.frame_rate.get().get()).context("fps must fit in i32")?,
             config.require_hardware,
+            video_hw::EncodeInputFormat::Argb8888,
         ))
         .context("failed to resolve encoder backend")
 }

@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw::{
     AnyEncodeSession, Backend, BackendEncoderOptions, BackendKind, Codec, Dimensions, EncodeFrame,
-    EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer, Timestamp90k,
-    VtEncoderOptions, VulkanEncoderOptions,
+    EncodeInputFormat, EncoderConfig, IntelEncoderOptions, NvidiaEncoderOptions, RawFrameBuffer,
+    Timestamp90k, VtEncoderOptions, VulkanEncoderOptions,
 };
 
 #[derive(Parser, Debug)]
@@ -65,7 +65,12 @@ fn main() -> Result<()> {
     let codec = parse_codec(&args.codec)?;
     let backend: Backend = args.backend.parse()?;
 
-    let mut config = EncoderConfig::new(codec, args.fps, args.require_hardware);
+    let mut config = EncoderConfig::new(
+        codec,
+        args.fps,
+        args.require_hardware,
+        EncodeInputFormat::Argb8888,
+    );
     let resolved_backend = backend
         .resolve_encoder(&config)
         .context("failed to resolve encoder backend")?;
