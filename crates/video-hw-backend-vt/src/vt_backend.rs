@@ -1769,6 +1769,7 @@ fn copy_attachment_cfstring(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Nv12FramePayload;
 
     #[test]
     fn detect_h264_keyframe_from_length_prefixed_payload() {
@@ -1825,7 +1826,56 @@ mod tests {
         let encode_report = encoder.query_capability(Codec::Av1).unwrap();
         assert!(encode_report.contract.decode.supported);
         assert!(!encode_report.contract.encode.supported);
+        assert!(encode_report.contract.encode.input_formats.is_empty());
+        assert!(encode_report.contract.encode.encoded_layouts.is_empty());
         assert!(!encode_report.contract.decode.output_modes.is_empty());
+    }
+
+    #[test]
+    fn vt_h264_hevc_capability_reports_argb_only_encode_contract() {
+        for (codec, encoded_layout) in [
+            (Codec::H264, EncodedLayout::Avcc),
+            (Codec::Hevc, EncodedLayout::Hvcc),
+        ] {
+            let encoder = VtEncoderAdapter::with_config(codec, 30, false);
+            let report = encoder.query_capability(codec).unwrap();
+            assert!(report.contract.encode.supported);
+            assert_eq!(
+                report.contract.encode.input_formats,
+                vec![EncodeInputFormat::Argb8888]
+            );
+            assert_eq!(report.contract.encode.encoded_layouts, vec![encoded_layout]);
+        }
+    }
+
+    #[test]
+    fn vt_encode_rejects_missing_argb_without_synthetic_output() {
+        for nv12 in [
+            None,
+            Some(Nv12FramePayload {
+                pitch: 16,
+                data: vec![128; 16 * 16 * 3 / 2],
+            }),
+        ] {
+            let mut encoder = VtEncoderAdapter::with_config(Codec::H264, 30, false);
+            let result = encoder.push_frame(Frame {
+                width: 16,
+                height: 16,
+                pixel_format: None,
+                pts_90k: Some(0),
+                decode_info_flags: None,
+                color_primaries: None,
+                transfer_function: None,
+                ycbcr_matrix: None,
+                argb: None,
+                nv12,
+                force_keyframe: true,
+            });
+            assert!(matches!(result, Err(BackendError::InvalidInput(_))));
+            assert!(encoder.pending_frames.is_empty());
+            assert!(encoder.try_reap().unwrap().is_empty());
+            assert!(encoder.flush().unwrap().is_empty());
+        }
     }
 
     #[test]

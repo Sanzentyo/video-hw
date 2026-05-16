@@ -104,12 +104,14 @@
   - decode metadata に `pts/decode_info_flags` が設定されること
 - `e2e_decode_flush_without_input_is_empty`
   - 入力なし flush が空結果、summary=0
-- `e2e_encode_h264_generates_packets`
-  - 30 frame submit + flush で packet 非空
+- `e2e_vt_encode_argb_generates_expected_layout`
+  - H.264/HEVC の ARGB encode が成功し、出力 layout が `Avcc` / `Hvcc`
 - `e2e_encode_h264_rejects_invalid_argb_payload`
   - ARGB サイズ不正で `InvalidInput` を返すこと
 - `e2e_encode_h264_packets_are_pts_monotonic`
   - flush 後 packet PTS が non-decreasing
+- `e2e_vt_backend_rejects_nv12_encode_input_without_synthetic_fallback`
+  - NV12 input を `submit` 時点で拒否し、packet を生成しないこと
 - `e2e_vt_backend_accepts_explicit_session_switch_request`
   - VT session switch API 呼び出しが `Ok`
 

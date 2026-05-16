@@ -84,7 +84,7 @@ use video_hw::Timestamp90k;
 ))]
 use video_hw::{
     Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput, Codec,
-    DecodeOutputMode, DecodeSession, DecoderConfig,
+    DecodeOutputMode, DecodeSession, DecoderConfig, EncodedLayout,
 };
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -793,10 +793,15 @@ fn e2e_nv_decode_flush_without_input_is_empty() {
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
-#[test]
-fn e2e_encode_h264_generates_packets() {
+#[rstest]
+#[case(Codec::H264, EncodedLayout::Avcc)]
+#[case(Codec::Hevc, EncodedLayout::Hvcc)]
+fn e2e_vt_encode_argb_generates_expected_layout(
+    #[case] codec: Codec,
+    #[case] expected_layout: EncodedLayout,
+) {
     let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
-        Codec::H264,
+        codec,
         30,
         false,
         EncodeInputFormat::Argb8888,
@@ -816,6 +821,11 @@ fn e2e_encode_h264_generates_packets() {
 
     let packets = encoder.flush().expect("flush should succeed");
     assert!(!packets.is_empty());
+    assert!(
+        packets
+            .iter()
+            .all(|packet| packet.layout == expected_layout)
+    );
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -1375,6 +1385,28 @@ fn e2e_vt_backend_encode_accepts_backend_specific_options() {
 
     let packets = encoder.flush().expect("flush should succeed");
     assert!(!packets.is_empty());
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+#[test]
+fn e2e_vt_backend_rejects_nv12_encode_input_without_synthetic_fallback() {
+    let mut encoder = EncodeSession::<VtEncoderAdapter>::new(EncoderConfig::new(
+        Codec::H264,
+        30,
+        false,
+        EncodeInputFormat::Nv12,
+    ));
+    let err = encoder
+        .submit(make_nv12_frame(0))
+        .expect_err("VideoToolbox encode must reject NV12 input instead of synthesizing pixels");
+    assert!(matches!(err, BackendError::InvalidInput(_)));
+    assert!(
+        encoder
+            .try_reap()
+            .expect("try_reap should succeed")
+            .is_none()
+    );
+    assert!(encoder.flush().expect("flush should be empty").is_empty());
 }
 
 #[cfg(all(

@@ -2537,6 +2537,26 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "macos", feature = "backend-vt"))]
+    #[test]
+    fn preflight_encode_rejects_vt_nv12_by_contract() {
+        let report = preflight_encode(EncodePreflightRequest {
+            backend: Backend::VideoToolbox,
+            codec: Codec::H264,
+            input_format: EncodeInputFormat::Nv12,
+            require_hardware: false,
+            expected_layout: Some(EncodedLayout::Avcc),
+        });
+        assert_eq!(report.resolved_backend, Some(BackendKind::VideoToolbox));
+        assert!(!report.supported_by_contract);
+        assert!(!report.usable_in_current_runtime);
+        assert_eq!(
+            report.accepted_input_formats,
+            vec![EncodeInputFormat::Argb8888]
+        );
+        assert_eq!(report.encoded_layouts, vec![EncodedLayout::Avcc]);
+    }
+
     #[cfg(all(
         feature = "backend-nvidia",
         feature = "backend-intel",

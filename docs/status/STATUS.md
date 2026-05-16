@@ -1,6 +1,6 @@
 # video-hw Status
 
-更新日: 2026-05-05
+更新日: 2026-05-16
 
 ## 1. 現在の構成（実装実態）
 
@@ -68,8 +68,9 @@
   - HEVC hw_required chunk_1048576: 223.12-232.26 ms
 - `cargo deny check licenses advisories bans sources`: pass
 - `cargo check --workspace --all-targets --all-features`: pass（2026-05-05, macOS）
-- `cargo test -p video-hw-backend-vt --features backend-vt -- --nocapture`: pass（22 passed, 2026-05-05）
-- `cargo test -p video-hw --features backend-vt e2e_vt_backend -- --nocapture`: pass（5 passed, 2026-05-05）
+- `cargo test -p video-hw-backend-vt --features backend-vt -- --nocapture`: pass（26 passed, 2026-05-16）
+- `cargo test -p video-hw --features backend-vt e2e_vt -- --nocapture --test-threads=1`: pass（9 passed, 2026-05-16）
+- `cargo test -p video-hw --features backend-vt preflight_encode_rejects_vt_nv12_by_contract -- --nocapture`: pass（1 passed, 2026-05-16）
 
 注記:
 - `backend-vt` は target 条件上、非 macOS 環境では VT 本体テストは有効化されない
