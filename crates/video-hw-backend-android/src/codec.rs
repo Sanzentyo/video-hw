@@ -324,7 +324,7 @@ impl AndroidDecoderAdapter {
             };
             match event {
                 OutputEvent::Buffer { index, info } => {
-                    let frame = {
+                    let frame = if info.size > 0 {
                         let codec = self.codec.as_mut().unwrap();
                         let buffer = codec.output_buffer(index)?;
                         let frame = decoder_output_to_frame(
@@ -334,9 +334,13 @@ impl AndroidDecoderAdapter {
                             self.config.output_mode,
                         )?;
                         codec.release_output(index);
-                        frame
+                        Some(frame)
+                    } else {
+                        let codec = self.codec.as_mut().unwrap();
+                        codec.release_output(index);
+                        None
                     };
-                    if info.size > 0 {
+                    if let Some(frame) = frame {
                         self.summary.decoded_frames += 1;
                         out.push(frame);
                     }
@@ -402,7 +406,7 @@ impl AndroidEncoderAdapter {
         }
         let mime = mime_for_codec(self.config.codec);
         let bitrate = self.options.bitrate.or(Some(1_000_000));
-        let format = MediaFormat::video(
+        let mut format = MediaFormat::video(
             mime,
             frame.width,
             frame.height,
@@ -411,6 +415,7 @@ impl AndroidEncoderAdapter {
             self.options.i_frame_interval_sec,
             true,
         )?;
+        format.set_i32("prepend-sps-pps-to-idr-frames", 1);
         let mut codec = match &self.options.codec_name {
             Some(name) => MediaCodec::codec_by_name(name)?,
             None => MediaCodec::encoder_by_type(mime)?,
@@ -478,12 +483,16 @@ impl AndroidEncoderAdapter {
             };
             match event {
                 OutputEvent::Buffer { index, info } => {
-                    let packet = {
+                    let packet = if info.size > 0 {
                         let codec = self.codec.as_mut().unwrap();
                         let buffer = codec.output_buffer(index)?;
                         let packet = encoder_output_to_packet(self.config.codec, buffer, &info)?;
                         codec.release_output(index);
                         packet
+                    } else {
+                        let codec = self.codec.as_mut().unwrap();
+                        codec.release_output(index);
+                        None
                     };
                     if let Some(packet) = packet {
                         out.push(packet);
@@ -492,7 +501,16 @@ impl AndroidEncoderAdapter {
                         break;
                     }
                 }
-                OutputEvent::FormatChanged => {}
+                OutputEvent::FormatChanged => {
+                    let Some(mut format) = self.codec.as_mut().and_then(MediaCodec::output_format)
+                    else {
+                        continue;
+                    };
+                    out.extend(encoder_format_config_packets(
+                        self.config.codec,
+                        &mut format,
+                    ));
+                }
                 OutputEvent::TryAgainLater => {
                     if !wait_for_eos || spins > 10_000 {
                         break;
@@ -599,6 +617,49 @@ fn encoder_output_to_packet(
         is_keyframe: (info.flags & BUFFER_FLAG_KEY_FRAME) != 0
             || (info.flags & BUFFER_FLAG_CODEC_CONFIG) != 0,
     }))
+}
+
+#[cfg(target_os = "android")]
+fn encoder_format_config_packets(codec: Codec, format: &mut MediaFormat) -> Vec<EncodedPacket> {
+    let keys: &[&str] = match codec {
+        Codec::H264 => &["csd-0", "csd-1"],
+        Codec::Hevc | Codec::Av1 => &["csd-0", "csd-1", "csd-2"],
+    };
+    let data = keys
+        .iter()
+        .filter_map(|key| format.get_buffer(key))
+        .flat_map(|buffer| encoder_config_buffer_payload(codec, buffer).into_iter())
+        .collect::<Vec<_>>();
+    if data.is_empty() {
+        Vec::new()
+    } else {
+        vec![EncodedPacket {
+            codec,
+            data,
+            pts_90k: None,
+            is_keyframe: true,
+        }]
+    }
+}
+
+#[cfg(target_os = "android")]
+fn encoder_config_buffer_payload(codec: Codec, buffer: Vec<u8>) -> Vec<u8> {
+    match codec {
+        Codec::H264 | Codec::Hevc => annexb_prefixed(buffer),
+        Codec::Av1 => buffer,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn annexb_prefixed(buffer: Vec<u8>) -> Vec<u8> {
+    if buffer.starts_with(&[0, 0, 1]) || buffer.starts_with(&[0, 0, 0, 1]) {
+        buffer
+    } else {
+        let mut out = Vec::with_capacity(buffer.len() + 4);
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&buffer);
+        out
+    }
 }
 
 #[cfg(target_os = "android")]

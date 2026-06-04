@@ -93,6 +93,12 @@ pub(crate) mod codec {
             name: *const c_char,
             out: *mut i32,
         ) -> bool;
+        fn AMediaFormat_getBuffer(
+            format: *mut AMediaFormat,
+            name: *const c_char,
+            out: *mut *mut c_void,
+            size: *mut usize,
+        ) -> bool;
     }
 
     #[derive(Debug)]
@@ -300,6 +306,19 @@ pub(crate) mod codec {
             let mut out = 0_i32;
             unsafe { AMediaFormat_getInt32(self.ptr.as_ptr(), key.as_ptr().cast(), &mut out) }
                 .then_some(out)
+        }
+
+        pub(crate) fn get_buffer(&mut self, key: &str) -> Option<Vec<u8>> {
+            let key = nul_terminated(key).ok()?;
+            let mut data = std::ptr::null_mut::<c_void>();
+            let mut size = 0_usize;
+            let ok = unsafe {
+                AMediaFormat_getBuffer(self.ptr.as_ptr(), key.as_ptr().cast(), &mut data, &mut size)
+            };
+            if !ok || data.is_null() || size == 0 {
+                return None;
+            }
+            Some(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size).to_vec() })
         }
     }
 

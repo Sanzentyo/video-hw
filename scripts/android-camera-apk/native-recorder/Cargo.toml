@@ -1,0 +1,16 @@
+[package]
+name = "video-hw-android-camera-jni"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0.102"
+jni = "0.21.1"
+video-hw = { path = "../../../crates/video-hw", default-features = false, features = ["backend-android"] }
+video-hw-fmp4 = { path = "../../../crates/video-hw-fmp4", default-features = false }
+
+[workspace]

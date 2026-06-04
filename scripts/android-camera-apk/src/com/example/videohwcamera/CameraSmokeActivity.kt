@@ -13,13 +13,13 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.StreamConfigurationMap
-import android.media.MediaCodec
-import android.media.MediaExtractor
-import android.media.MediaFormat
-import android.media.MediaRecorder
+import android.graphics.ImageFormat
+import android.media.Image
+import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -32,6 +32,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
+import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 import kotlin.math.max
 
@@ -44,13 +45,17 @@ class CameraSmokeActivity : Activity() {
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var recorder: MediaRecorder? = null
+    private var imageReader: ImageReader? = null
     private var outputFile: File? = null
     private var autoStarted = false
     private var recording = false
     private var selectedCameraId: String? = null
     private var profileCandidates: List<RecordingProfile> = emptyList()
     private var activeRecordingProfile: RecordingProfile? = null
+    private var nativeRecorderHandle = 0L
+    private var framesSubmitted = 0
+    private var recordingStartedAtMs = 0L
+    private var stopRequested = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -254,13 +259,13 @@ class CameraSmokeActivity : Activity() {
     private fun recordingProfiles(manager: CameraManager, cameraId: String): List<RecordingProfile> {
         val characteristics = manager.getCameraCharacteristics(cameraId)
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val sizes = streamMap?.recorderSizes().orEmpty()
+        val sizes = streamMap?.yuv420Sizes().orEmpty()
         val ranges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.toList()
             .orEmpty()
             .ifEmpty { listOf(Range(30, 30)) }
 
-        Log.i(TAG, "RECORDER_SIZES ${sizes.joinToString { "${it.width}x${it.height}" }}")
+        Log.i(TAG, "YUV420_SIZES ${sizes.joinToString { "${it.width}x${it.height}" }}")
         Log.i(TAG, "FPS_RANGES ${ranges.joinToString { "${it.lower}-${it.upper}" }}")
 
         return sizes
@@ -329,14 +334,24 @@ class CameraSmokeActivity : Activity() {
             activeRecordingProfile = profile
             val file = File(
                 getExternalFilesDir(null),
-                "video_hw_camera_smoke_${profile.size.width}x${profile.size.height}_${profile.fpsRange.upper}fps.mp4",
+                "video_hw_camera_rust_${profile.size.width}x${profile.size.height}_${profile.fpsRange.upper}fps.mp4",
             )
             outputFile = file
-            setupRecorder(file, profile)
+            nativeRecorderHandle = RustRecorder.nativeStart(
+                file.absolutePath,
+                profile.size.width,
+                profile.size.height,
+                profile.fpsRange.upper,
+                profile.bitrate,
+            )
+            check(nativeRecorderHandle != 0L) { "Rust recorder failed to start" }
+            framesSubmitted = 0
+            stopRequested = false
+            setupImageReader(profile)
 
             val camera = checkNotNull(cameraDevice)
-            val activeRecorder = checkNotNull(recorder)
-            val recordSurface = activeRecorder.surface
+            val reader = checkNotNull(imageReader)
+            val recordSurface = reader.surface
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(recordSurface)
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, profile.fpsRange)
@@ -349,11 +364,10 @@ class CameraSmokeActivity : Activity() {
                 onConfigured = { session ->
                     captureSession = session
                     session.setRepeatingRequest(request.build(), null, cameraHandler)
-                    activeRecorder.start()
                     recording = true
+                    recordingStartedAtMs = SystemClock.elapsedRealtime()
                     setStatus("Recording ${file.name}")
-                    Log.i(TAG, "RECORD_START profile=${profile.describe()} path=${file.absolutePath}")
-                    cameraHandler.postDelayed({ runOnUiThread { stopRecordingAndDecode() } }, 3_000)
+                    Log.i(TAG, "RUST_RECORD_START profile=${profile.describe()} path=${file.absolutePath}")
                 },
                 onFailed = {
                     Log.e(TAG, "RECORD_CONFIG_FAIL profile=${profile.describe()}")
@@ -367,8 +381,12 @@ class CameraSmokeActivity : Activity() {
     }
 
     private fun retryRecordingProfile(currentIndex: Int, reason: String) {
-        recorder?.release()
-        recorder = null
+        imageReader?.close()
+        imageReader = null
+        if (nativeRecorderHandle != 0L) {
+            RustRecorder.nativeFinish(nativeRecorderHandle)
+            nativeRecorderHandle = 0L
+        }
         activeRecordingProfile = null
         val nextIndex = currentIndex + 1
         if (nextIndex < profileCandidates.size) {
@@ -382,18 +400,58 @@ class CameraSmokeActivity : Activity() {
         }
     }
 
-    private fun setupRecorder(file: File, profile: RecordingProfile) {
-        recorder?.release()
-        recorder = MediaRecorder(this).apply {
-            setVideoSource(MediaRecorder.VideoSource.SURFACE)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setOutputFile(file.absolutePath)
-            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            setVideoSize(profile.size.width, profile.size.height)
-            setVideoFrameRate(profile.fpsRange.upper)
-            setVideoEncodingBitRate(profile.bitrate)
-            prepare()
+    private fun setupImageReader(profile: RecordingProfile) {
+        imageReader?.close()
+        imageReader = ImageReader.newInstance(
+            profile.size.width,
+            profile.size.height,
+            ImageFormat.YUV_420_888,
+            IMAGE_READER_IMAGES,
+        ).apply {
+            setOnImageAvailableListener(
+                { reader ->
+                    val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    try {
+                        if (recording && nativeRecorderHandle != 0L) {
+                            if (shouldStopRustRecording()) {
+                                requestStopRecording("time limit")
+                                return@setOnImageAvailableListener
+                            }
+                            val submitted = RustRecorder.pushImage(nativeRecorderHandle, image, framesSubmitted == 0)
+                            if (submitted >= 0) {
+                                framesSubmitted = submitted
+                                if (submitted == 1 || submitted % 30 == 0) {
+                                    Log.i(TAG, "RUST_FRAME_SUBMITTED frames=$submitted")
+                                }
+                                if (submitted >= TARGET_RUST_FRAMES) {
+                                    requestStopRecording("target frames")
+                                }
+                            } else {
+                                Log.e(TAG, "RUST_FRAME_SUBMIT_FAIL")
+                            }
+                        }
+                    } finally {
+                        image.close()
+                    }
+                },
+                cameraHandler,
+            )
         }
+    }
+
+    private fun shouldStopRustRecording(): Boolean {
+        return framesSubmitted >= TARGET_RUST_FRAMES ||
+            (recordingStartedAtMs > 0L &&
+                SystemClock.elapsedRealtime() - recordingStartedAtMs >= MAX_RECORDING_MS)
+    }
+
+    private fun requestStopRecording(reason: String) {
+        if (stopRequested) {
+            return
+        }
+        stopRequested = true
+        Log.i(TAG, "RUST_RECORD_STOP_REQUEST reason=$reason frames=$framesSubmitted")
+        runOnUiThread { stopRecordingAndDecode() }
     }
 
     private fun stopRecordingAndDecode() {
@@ -404,116 +462,27 @@ class CameraSmokeActivity : Activity() {
         val file = outputFile ?: return
         try {
             closeCaptureSession()
-            recorder?.stop()
-            recorder?.release()
-            recorder = null
             recording = false
+            imageReader?.close()
+            imageReader = null
 
+            val result = if (nativeRecorderHandle != 0L) {
+                RustRecorder.nativeFinish(nativeRecorderHandle)
+            } else {
+                "{\"status\":\"FAIL\",\"error\":\"missing native recorder handle\"}"
+            }
+            nativeRecorderHandle = 0L
             val bytes = file.length()
-            Log.i(
-                TAG,
-                "RECORD_DONE profile=${activeRecordingProfile?.describe()} path=${file.absolutePath} bytes=$bytes",
-            )
-            setStatus("Recorded $bytes bytes. Decoding...")
-            cameraHandler.post { decodeRecordedFile(file) }
+            Log.i(TAG, "RUST_RECORD_DONE profile=${activeRecordingProfile?.describe()} path=${file.absolutePath} bytes=$bytes")
+            Log.i(TAG, "RUST_RECORD_RESULT $result")
+            setStatus("Rust result $result")
             if (textureView.isAvailable) {
                 startPreview()
             }
         } catch (error: Exception) {
-            Log.e(TAG, "STOP_RECORDING_FAIL", error)
-            setStatus("Stop failed: ${error.message}")
+            Log.e(TAG, "STOP_RUST_RECORDING_FAIL", error)
+            setStatus("Rust stop failed: ${error.message}")
         }
-    }
-
-    private fun decodeRecordedFile(file: File) {
-        val extractor = MediaExtractor()
-        var decoder: MediaCodec? = null
-        var decodedFrames = 0
-
-        try {
-            extractor.setDataSource(file.absolutePath)
-            val trackIndex = selectVideoTrack(extractor)
-            check(trackIndex >= 0) { "no video track" }
-            extractor.selectTrack(trackIndex)
-
-            val format = extractor.getTrackFormat(trackIndex)
-            val mime = checkNotNull(format.getString(MediaFormat.KEY_MIME))
-            val width = format.getInteger(MediaFormat.KEY_WIDTH)
-            val height = format.getInteger(MediaFormat.KEY_HEIGHT)
-            val frameRate = if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
-                format.getInteger(MediaFormat.KEY_FRAME_RATE)
-            } else {
-                -1
-            }
-            Log.i(TAG, "DECODE_FORMAT mime=$mime width=$width height=$height frameRate=$frameRate")
-            decoder = MediaCodec.createDecoderByType(mime).also {
-                it.configure(format, null, null, 0)
-                it.start()
-            }
-
-            val info = MediaCodec.BufferInfo()
-            var inputDone = false
-            var outputDone = false
-            while (!outputDone) {
-                if (!inputDone) {
-                    val inputIndex = decoder.dequeueInputBuffer(10_000)
-                    if (inputIndex >= 0) {
-                        val input = checkNotNull(decoder.getInputBuffer(inputIndex))
-                        val sampleSize = extractor.readSampleData(input, 0)
-                        if (sampleSize < 0) {
-                            decoder.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                0,
-                                0,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-                            )
-                            inputDone = true
-                        } else {
-                            decoder.queueInputBuffer(
-                                inputIndex,
-                                0,
-                                sampleSize,
-                                extractor.sampleTime,
-                                extractor.sampleFlags,
-                            )
-                            extractor.advance()
-                        }
-                    }
-                }
-
-                val outputIndex = decoder.dequeueOutputBuffer(info, 10_000)
-                if (outputIndex >= 0) {
-                    if (info.size > 0) {
-                        decodedFrames += 1
-                    }
-                    outputDone = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                    decoder.releaseOutputBuffer(outputIndex, false)
-                }
-            }
-
-            val result = "DECODE_PASS width=$width height=$height frameRate=$frameRate frames=$decodedFrames bytes=${file.length()}"
-            Log.i(TAG, result)
-            setStatus(result)
-        } catch (error: Exception) {
-            Log.e(TAG, "DECODE_FAIL", error)
-            setStatus("Decode failed: ${error.message}")
-        } finally {
-            extractor.release()
-            decoder?.stop()
-            decoder?.release()
-        }
-    }
-
-    private fun selectVideoTrack(extractor: MediaExtractor): Int {
-        for (index in 0 until extractor.trackCount) {
-            val format = extractor.getTrackFormat(index)
-            val mime = format.getString(MediaFormat.KEY_MIME)
-            if (mime?.startsWith("video/") == true) {
-                return index
-            }
-        }
-        return -1
     }
 
     private fun createPreviewSurface(): Surface {
@@ -559,8 +528,12 @@ class CameraSmokeActivity : Activity() {
         closeCaptureSession()
         cameraDevice?.close()
         cameraDevice = null
-        recorder?.release()
-        recorder = null
+        imageReader?.close()
+        imageReader = null
+        if (nativeRecorderHandle != 0L) {
+            RustRecorder.nativeFinish(nativeRecorderHandle)
+            nativeRecorderHandle = 0L
+        }
     }
 
     private fun closeCaptureSession() {
@@ -576,8 +549,68 @@ class CameraSmokeActivity : Activity() {
     companion object {
         private const val TAG = "VideoHwCameraSmoke"
         private const val REQ_CAMERA = 100
+        private const val IMAGE_READER_IMAGES = 4
+        private const val TARGET_RUST_FRAMES = 30
+        private const val MAX_RECORDING_MS = 60_000L
         private val PREVIEW_SIZE = Size(1280, 720)
         private val FALLBACK_RECORD_SIZE = Size(640, 360)
+    }
+}
+
+private object RustRecorder {
+    init {
+        System.loadLibrary("video_hw_android_camera_jni")
+    }
+
+    external fun nativeStart(
+        outputPath: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrate: Int,
+    ): Long
+
+    external fun nativePushYuv(
+        handle: Long,
+        yBuffer: ByteBuffer,
+        yLength: Int,
+        yRowStride: Int,
+        uBuffer: ByteBuffer,
+        uLength: Int,
+        uRowStride: Int,
+        uPixelStride: Int,
+        vBuffer: ByteBuffer,
+        vLength: Int,
+        vRowStride: Int,
+        vPixelStride: Int,
+        ptsNs: Long,
+        forceKeyframe: Boolean,
+    ): Int
+
+    external fun nativeFinish(handle: Long): String
+
+    fun pushImage(handle: Long, image: Image, forceKeyframe: Boolean): Int {
+        val planes = image.planes
+        check(planes.size >= 3) { "YUV image has ${planes.size} planes" }
+        val y = planes[0].buffer.slice()
+        val u = planes[1].buffer.slice()
+        val v = planes[2].buffer.slice()
+        return nativePushYuv(
+            handle,
+            y,
+            y.remaining(),
+            planes[0].rowStride,
+            u,
+            u.remaining(),
+            planes[1].rowStride,
+            planes[1].pixelStride,
+            v,
+            v.remaining(),
+            planes[2].rowStride,
+            planes[2].pixelStride,
+            image.timestamp,
+            forceKeyframe,
+        )
     }
 }
 
@@ -594,5 +627,5 @@ private data class RecordingProfile(
         "${size.width}x${size.height}@${fpsRange.lower}-${fpsRange.upper}fps/${bitrate}bps"
 }
 
-private fun StreamConfigurationMap.recorderSizes(): List<Size> =
-    getOutputSizes(MediaRecorder::class.java)?.toList().orEmpty()
+private fun StreamConfigurationMap.yuv420Sizes(): List<Size> =
+    getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
