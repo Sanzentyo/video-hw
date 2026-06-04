@@ -243,7 +243,6 @@ struct AndroidOutputFormat {
 }
 
 #[cfg(target_os = "android")]
-#[cfg(target_os = "android")]
 impl AndroidDecoderAdapter {
     fn ensure_decoder_started(&mut self) -> Result<(), BackendError> {
         if self.codec.is_some() {
@@ -262,7 +261,7 @@ impl AndroidDecoderAdapter {
         let mime = mime_for_codec(self.config.codec);
         let format = MediaFormat::video(mime, width, height, self.config.fps, None, None, false)?;
         let mut codec = match &self.options.codec_name {
-            Some(_name) => MediaCodec::decoder_by_type(mime)?,
+            Some(name) => MediaCodec::codec_by_name(name)?,
             None => MediaCodec::decoder_by_type(mime)?,
         };
         codec.configure(&format, false)?;
@@ -413,7 +412,7 @@ impl AndroidEncoderAdapter {
             true,
         )?;
         let mut codec = match &self.options.codec_name {
-            Some(_name) => MediaCodec::encoder_by_type(mime)?,
+            Some(name) => MediaCodec::codec_by_name(name)?,
             None => MediaCodec::encoder_by_type(mime)?,
         };
         codec.configure(&format, true)?;

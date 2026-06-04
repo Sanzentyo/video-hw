@@ -9,8 +9,9 @@ use video_hw_core::{
 pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> CapabilityReport {
     let runtime = runtime_capability(codec, encode);
     let codec_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-    let decode_supported = codec_supported && !encode;
-    let encode_supported = codec_supported && encode;
+    let runtime_available = !matches!(runtime.status, RuntimeStatus::Unavailable);
+    let decode_supported = codec_supported && !encode && runtime_available;
+    let encode_supported = codec_supported && encode && runtime_available;
     let encoded_layouts = match codec {
         Codec::H264 | Codec::Hevc => vec![EncodedLayout::AnnexB],
         Codec::Av1 => vec![EncodedLayout::Av1],

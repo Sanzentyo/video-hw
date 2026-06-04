@@ -38,6 +38,7 @@ pub(crate) mod codec {
     unsafe extern "C" {
         fn AMediaCodec_createDecoderByType(mime_type: *const c_char) -> *mut AMediaCodec;
         fn AMediaCodec_createEncoderByType(mime_type: *const c_char) -> *mut AMediaCodec;
+        fn AMediaCodec_createCodecByName(name: *const c_char) -> *mut AMediaCodec;
         fn AMediaCodec_delete(codec: *mut AMediaCodec) -> i32;
         fn AMediaCodec_configure(
             codec: *mut AMediaCodec,
@@ -110,6 +111,12 @@ pub(crate) mod codec {
             let mime = nul_terminated(mime)?;
             let ptr = unsafe { AMediaCodec_createEncoderByType(mime.as_ptr().cast()) };
             Self::from_raw(ptr, "AMediaCodec_createEncoderByType")
+        }
+
+        pub(crate) fn codec_by_name(name: &str) -> Result<Self, BackendError> {
+            let name = nul_terminated(name)?;
+            let ptr = unsafe { AMediaCodec_createCodecByName(name.as_ptr().cast()) };
+            Self::from_raw(ptr, "AMediaCodec_createCodecByName")
         }
 
         fn from_raw(ptr: *mut AMediaCodec, api: &str) -> Result<Self, BackendError> {
