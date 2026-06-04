@@ -2,10 +2,12 @@
 members = [
   "crates/video-hw-core",
   "crates/video-hw",
+  "crates/video-hw-backend-android",
   "crates/video-hw-backend-nvidia",
   "crates/video-hw-backend-intel",
   "crates/video-hw-backend-vulkan",
-  "crates/video-hw-backend-vt", "crates/video-hw-fmp4",
+  "crates/video-hw-backend-vt",
+  "crates/video-hw-fmp4",
 ]
 default-members = ["crates/video-hw"]
 resolver = "2"

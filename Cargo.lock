@@ -4509,10 +4509,18 @@ dependencies = [
  "shiguredo_mp4",
  "shiguredo_video_device",
  "thiserror 2.0.18",
+ "video-hw-backend-android",
  "video-hw-backend-intel",
  "video-hw-backend-nvidia",
  "video-hw-backend-vt",
  "video-hw-backend-vulkan",
+ "video-hw-core",
+]
+
+[[package]]
+name = "video-hw-backend-android"
+version = "0.1.0"
+dependencies = [
  "video-hw-core",
 ]
 

@@ -462,10 +462,20 @@ pub struct Frame {
     pub color_primaries: Option<i32>,
     pub transfer_function: Option<i32>,
     pub ycbcr_matrix: Option<i32>,
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    ))]
     pub argb: Option<Vec<u8>>,
     pub nv12: Option<Nv12FramePayload>,
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    ))]
     pub force_keyframe: bool,
 }
 
@@ -546,6 +556,7 @@ pub enum BackendDecoderOptions {
     Nvidia(NvidiaDecoderOptions),
     Intel(IntelDecoderOptions),
     Vulkan(VulkanDecoderOptions),
+    Android(AndroidDecoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -556,6 +567,7 @@ pub enum BackendEncoderOptions {
     Nvidia(NvidiaEncoderOptions),
     Intel(IntelEncoderOptions),
     Vulkan(VulkanEncoderOptions),
+    Android(AndroidEncoderOptions),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -593,6 +605,25 @@ pub struct VulkanDecoderOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct AndroidDecoderOptions {
+    pub codec_name: Option<String>,
+    pub video_width: Option<u16>,
+    pub video_height: Option<u16>,
+    pub timeout_us: i64,
+}
+
+impl Default for AndroidDecoderOptions {
+    fn default() -> Self {
+        Self {
+            codec_name: None,
+            video_width: None,
+            video_height: None,
+            timeout_us: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NvidiaEncoderOptions {
     pub max_in_flight_outputs: usize,
     pub gop_length: Option<u32>,
@@ -615,6 +646,25 @@ pub struct IntelEncoderOptions {
 pub struct VulkanEncoderOptions {
     pub allow_software_fallback: Option<bool>,
     pub adapter_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AndroidEncoderOptions {
+    pub codec_name: Option<String>,
+    pub bitrate: Option<u32>,
+    pub i_frame_interval_sec: Option<i32>,
+    pub timeout_us: i64,
+}
+
+impl Default for AndroidEncoderOptions {
+    fn default() -> Self {
+        Self {
+            codec_name: None,
+            bitrate: None,
+            i_frame_interval_sec: Some(1),
+            timeout_us: 10_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -729,6 +779,7 @@ impl Display for DecodeSummary {
 
 #[derive(Debug, Clone)]
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -748,6 +799,7 @@ pub struct EncodedPacket {
 
 #[derive(Debug, Clone)]
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -998,6 +1050,7 @@ pub trait VideoEncoder {
         ))
     }
     #[cfg(any(
+        all(target_os = "android", feature = "backend-android"),
         all(target_os = "macos", feature = "backend-vt"),
         all(
             any(

@@ -9,11 +9,12 @@ mod transform;
 
 pub use contract::Nv12FramePayload;
 pub use contract::{
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, BackendErrorKind, BitstreamInput,
-    CapabilityContract, CapabilityReport, Codec, ColorConvertOptions, ColorMatrix, ColorMetadata,
-    ColorRange, DecodeCapability, DecodeOutputCapability, DecodeOutputMode, DecodeOutputOrigin,
-    DecodeSummary, DecodedFrame, DecoderConfig, DimensionConstraints, Dimensions, EncodeCapability,
-    EncodeFrame, EncodeInputFormat, EncodedChunk, EncodedLayout, EncoderConfig, FallbackPolicy,
+    AndroidDecoderOptions, AndroidEncoderOptions, BackendDecoderOptions, BackendEncoderOptions,
+    BackendError, BackendErrorKind, BitstreamInput, CapabilityContract, CapabilityReport, Codec,
+    ColorConvertOptions, ColorMatrix, ColorMetadata, ColorRange, DecodeCapability,
+    DecodeOutputCapability, DecodeOutputMode, DecodeOutputOrigin, DecodeSummary, DecodedFrame,
+    DecoderConfig, DimensionConstraints, Dimensions, EncodeCapability, EncodeFrame,
+    EncodeInputFormat, EncodedChunk, EncodedLayout, EncoderConfig, FallbackPolicy,
     IntelDecoderOptions, IntelEncoderOptions, Nv12FrameRef, NvidiaDecoderOptions,
     NvidiaEncoderOptions, NvidiaSessionConfig, PitchBytes, PixelBufferOwned, PixelHeight,
     PixelOutputLayout, PixelWidth, RawFrameBuffer, Rgb24FrameRef, RuntimeCapability, RuntimeStatus,
@@ -29,6 +30,8 @@ pub use transform::{
     ColorRequest, Nv12Frame, RgbFrame, TransformDispatcher, TransformJob, TransformResult,
     make_argb_to_nv12_dummy, nv12_to_rgb24, should_enqueue_transform,
 };
+#[cfg(all(target_os = "android", feature = "backend-android"))]
+pub use video_hw_backend_android::{AndroidDecoderAdapter, AndroidEncoderAdapter};
 #[cfg(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")
@@ -57,6 +60,8 @@ pub use video_hw_core::bitstream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
+    #[cfg(all(target_os = "android", feature = "backend-android"))]
+    Android,
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     VideoToolbox,
     #[cfg(all(
@@ -80,6 +85,8 @@ pub enum BackendKind {
 pub enum Backend {
     #[default]
     Auto,
+    #[cfg(all(target_os = "android", feature = "backend-android"))]
+    Android,
     #[cfg(all(target_os = "macos", feature = "backend-vt"))]
     VideoToolbox,
     #[cfg(all(
@@ -121,6 +128,7 @@ impl fmt::Display for BackendParseError {
 impl std::error::Error for BackendParseError {}
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -134,6 +142,8 @@ impl std::error::Error for BackendParseError {}
 impl fmt::Display for BackendKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            Self::Android => f.write_str("android"),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Self::VideoToolbox => f.write_str("videotoolbox"),
             #[cfg(all(
@@ -156,6 +166,7 @@ impl fmt::Display for BackendKind {
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -176,6 +187,8 @@ impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Backend::Auto => f.write_str("auto"),
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            Backend::Android => f.write_str("android"),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Backend::VideoToolbox => f.write_str("videotoolbox"),
             #[cfg(all(
@@ -202,6 +215,8 @@ impl Backend {
     pub fn supported() -> Vec<Self> {
         [
             Some(Self::Auto),
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            Some(Self::Android),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Some(Self::VideoToolbox),
             #[cfg(all(
@@ -232,6 +247,8 @@ impl FromStr for Backend {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.to_ascii_lowercase().as_str() {
             "auto" => Ok(Self::Auto),
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            "android" | "mediacodec" | "mc" => Ok(Self::Android),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             "vt" | "videotoolbox" => Ok(Self::VideoToolbox),
             #[cfg(all(
@@ -255,6 +272,7 @@ impl FromStr for Backend {
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -268,6 +286,10 @@ impl FromStr for Backend {
 impl BackendKind {
     #[must_use]
     pub fn os_default() -> Self {
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        {
+            BackendKind::Android
+        }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         {
             BackendKind::VideoToolbox
@@ -302,6 +324,7 @@ impl BackendKind {
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -322,6 +345,8 @@ impl Backend {
     pub fn resolve_decoder(self, config: &DecoderConfig) -> Result<BackendKind, BackendError> {
         match self {
             Backend::Auto => select_decoder_backend(config),
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            Backend::Android => Ok(BackendKind::Android),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Backend::VideoToolbox => Ok(BackendKind::VideoToolbox),
             #[cfg(all(
@@ -345,6 +370,8 @@ impl Backend {
     pub fn resolve_encoder(self, config: &EncoderConfig) -> Result<BackendKind, BackendError> {
         match self {
             Backend::Auto => select_encoder_backend(config),
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            Backend::Android => Ok(BackendKind::Android),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             Backend::VideoToolbox => Ok(BackendKind::VideoToolbox),
             #[cfg(all(
@@ -364,6 +391,11 @@ impl Backend {
             Backend::Vulkan => Ok(BackendKind::Vulkan),
         }
     }
+}
+
+#[cfg(all(target_os = "android", feature = "backend-android"))]
+fn preferred_backend_order() -> Vec<BackendKind> {
+    vec![BackendKind::Android]
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -400,6 +432,7 @@ fn preferred_backend_order() -> Vec<BackendKind> {
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -415,6 +448,12 @@ fn probe_decoder_capability(
     config: &DecoderConfig,
 ) -> Result<CapabilityReport, BackendError> {
     match kind {
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        BackendKind::Android => {
+            let probe =
+                <AndroidDecoderAdapter as DecoderBackend>::from_decoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         BackendKind::VideoToolbox => {
             let probe = <vt_backend::VtDecoderAdapter as DecoderBackend>::from_decoder_config(
@@ -452,6 +491,7 @@ fn probe_decoder_capability(
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -467,6 +507,12 @@ fn probe_encoder_capability(
     config: &EncoderConfig,
 ) -> Result<CapabilityReport, BackendError> {
     match kind {
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        BackendKind::Android => {
+            let probe =
+                <AndroidEncoderAdapter as EncoderBackend>::from_encoder_config(config.clone());
+            probe.query_capability(config.codec)
+        }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         BackendKind::VideoToolbox => {
             let probe = <vt_backend::VtEncoderAdapter as EncoderBackend>::from_encoder_config(
@@ -504,6 +550,7 @@ fn probe_encoder_capability(
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -547,6 +594,7 @@ pub fn select_decoder_backend(config: &DecoderConfig) -> Result<BackendKind, Bac
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -564,6 +612,7 @@ pub fn select_decoder_backend(_config: &DecoderConfig) -> Result<BackendKind, Ba
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -607,6 +656,7 @@ pub fn select_encoder_backend(config: &EncoderConfig) -> Result<BackendKind, Bac
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -637,6 +687,10 @@ pub trait DecoderBackend: VideoDecoder {
 fn backend_supports_output_mode(kind: BackendKind, mode: DecodeOutputMode) -> bool {
     let _ = mode;
     match kind {
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        BackendKind::Android => {
+            <AndroidDecoderAdapter as DecoderBackend>::supports_output_mode(mode)
+        }
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         BackendKind::VideoToolbox => {
             <vt_backend::VtDecoderAdapter as DecoderBackend>::supports_output_mode(mode)
@@ -660,6 +714,7 @@ fn backend_supports_output_mode(kind: BackendKind, mode: DecodeOutputMode) -> bo
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -678,6 +733,7 @@ fn preflight_decoder_capability(
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -698,6 +754,7 @@ fn preflight_decoder_capability(
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -716,6 +773,7 @@ fn preflight_encoder_capability(
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -971,6 +1029,10 @@ impl AnyDecodeSession {
             )));
         }
         match kind {
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            BackendKind::Android => Ok(Self {
+                inner: Box::new(DecodeSession::<AndroidDecoderAdapter>::new(config)),
+            }),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             BackendKind::VideoToolbox => Ok(Self {
                 inner: Box::new(DecodeSession::<VtDecoderAdapter>::new(config)),
@@ -1048,6 +1110,10 @@ impl AnyEncodeSession {
             )));
         }
         match kind {
+            #[cfg(all(target_os = "android", feature = "backend-android"))]
+            BackendKind::Android => Ok(Self {
+                inner: Box::new(EncodeSession::<AndroidEncoderAdapter>::new(config)),
+            }),
             #[cfg(all(target_os = "macos", feature = "backend-vt"))]
             BackendKind::VideoToolbox => Ok(Self {
                 inner: Box::new(EncodeSession::<VtEncoderAdapter>::new(config)),
@@ -1424,6 +1490,31 @@ where
     }
 }
 
+#[cfg(all(target_os = "android", feature = "backend-android"))]
+impl DecoderBackend for AndroidDecoderAdapter {
+    const BACKEND_KIND: BackendKind = BackendKind::Android;
+
+    fn from_decoder_config(config: DecoderConfig) -> Self {
+        Self::new(config)
+    }
+
+    fn supports_output_mode(mode: DecodeOutputMode) -> bool {
+        matches!(
+            mode,
+            DecodeOutputMode::Metadata | DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
+        )
+    }
+}
+
+#[cfg(all(target_os = "android", feature = "backend-android"))]
+impl EncoderBackend for AndroidEncoderAdapter {
+    const BACKEND_KIND: BackendKind = BackendKind::Android;
+
+    fn from_encoder_config(config: EncoderConfig) -> Self {
+        Self::with_config(config)
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
 impl DecoderBackend for vt_backend::VtDecoderAdapter {
     const BACKEND_KIND: BackendKind = BackendKind::VideoToolbox;
@@ -1691,6 +1782,7 @@ fn backend_frame_to_decoded_frame(
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -1706,6 +1798,7 @@ fn frame_argb_payload(frame: &Frame) -> Option<&[u8]> {
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -1854,7 +1947,12 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
     } = frame;
     let width = dims.width.get() as usize;
     let height = dims.height.get() as usize;
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    ))]
     let (argb, nv12) = match buffer {
         RawFrameBuffer::Argb8888(data) => (Some(data), None),
         RawFrameBuffer::Argb8888Shared(data) => (Some(data.to_vec()), None),
@@ -1864,7 +1962,12 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             (None, Some(payload))
         }
     };
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     match buffer {
         RawFrameBuffer::Argb8888(_) | RawFrameBuffer::Argb8888Shared(_) => {}
         RawFrameBuffer::Nv12 { .. } => {
@@ -1873,9 +1976,19 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
             ));
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     let _ = force_keyframe;
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     let nv12 = None;
     Ok(Frame {
         width,
@@ -1886,15 +1999,26 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
         color_primaries: None,
         transfer_function: None,
         ycbcr_matrix: None,
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "android",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        ))]
         argb,
         nv12,
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "android",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        ))]
         force_keyframe,
     })
 }
 
 #[cfg(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(
@@ -1907,6 +2031,10 @@ fn encode_frame_into_backend_frame(frame: EncodeFrame) -> Result<Frame, BackendE
 ))]
 fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> EncodedChunk {
     let layout = match (kind, packet.codec) {
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        (BackendKind::Android, Codec::Av1) => EncodedLayout::Av1,
+        #[cfg(all(target_os = "android", feature = "backend-android"))]
+        (BackendKind::Android, _) => EncodedLayout::AnnexB,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
         (BackendKind::VideoToolbox, Codec::H264) => EncodedLayout::Avcc,
         #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -1949,6 +2077,7 @@ fn backend_packet_to_encoded_chunk(kind: BackendKind, packet: EncodedPacket) -> 
 }
 
 #[cfg(not(any(
+    all(target_os = "android", feature = "backend-android"),
     all(target_os = "macos", feature = "backend-vt"),
     all(
         any(

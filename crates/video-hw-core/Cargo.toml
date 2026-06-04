@@ -10,6 +10,7 @@ backend-vt = []
 backend-nvidia = []
 backend-intel = []
 backend-vulkan = []
+backend-android = []
 
 [dependencies]
 thiserror = "2.0.18"

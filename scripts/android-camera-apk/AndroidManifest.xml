@@ -1,0 +1,21 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.videohwcamera">
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+
+    <application
+        android:theme="@style/AppTheme"
+        android:label="Video HW Camera Smoke"
+        android:resizeableActivity="true">
+        <activity
+            android:name=".CameraSmokeActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

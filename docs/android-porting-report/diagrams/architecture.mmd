@@ -1,0 +1,22 @@
+flowchart TD
+    A[User code] --> B[video-hw facade]
+    B --> C{BackendKind}
+    C -->|macOS| VT[video-hw-backend-vt]
+    C -->|Linux/Windows| NV[video-hw-backend-nvidia]
+    C -->|Linux/Windows| INTEL[video-hw-backend-intel]
+    C -->|Linux/Windows| VK[video-hw-backend-vulkan]
+    C -->|Android / new| AND[video-hw-backend-android]
+
+    AND --> D[AndroidDecoderAdapter]
+    AND --> E[AndroidEncoderAdapter]
+    D --> F[AMediaCodec decoder]
+    E --> G[AMediaCodec encoder]
+    G --> H[Input ByteBuffer MVP]
+    G --> I[Input Surface Phase 2]
+    D --> J[Output ByteBuffer / NV12 MVP]
+    D --> K[Surface or AHardwareBuffer Phase 2]
+
+    F --> L[media/NdkMediaCodec.h]
+    G --> L
+    I --> M[ANativeWindow]
+    K --> N[AHardwareBuffer]

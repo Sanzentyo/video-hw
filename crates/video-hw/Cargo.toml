@@ -6,6 +6,11 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
+backend-android = [
+  "video-hw-core/backend-android",
+  "dep:video-hw-backend-android",
+  "video-hw-backend-android/backend-android",
+]
 backend-vt = [
   "video-hw-core/backend-vt",
   "dep:video-hw-backend-vt",
@@ -29,6 +34,7 @@ backend-vulkan = [
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core" }
+video-hw-backend-android = { path = "../video-hw-backend-android", optional = true, default-features = false }
 video-hw-backend-nvidia = { path = "../video-hw-backend-nvidia", optional = true, default-features = false }
 video-hw-backend-intel = { path = "../video-hw-backend-intel", optional = true, default-features = false }
 video-hw-backend-vulkan = { path = "../video-hw-backend-vulkan", optional = true, default-features = false }

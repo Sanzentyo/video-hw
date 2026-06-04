@@ -1,0 +1,19 @@
+[package]
+name = "video-hw-backend-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["backend-android"]
+backend-android = ["video-hw-core/backend-android"]
+jni-capabilities = ["dep:jni"]
+
+[dependencies]
+video-hw-core = { path = "../video-hw-core", default-features = false }
+thiserror = "2.0.18"
+bitflags = "2"
+log = "0.4"
+jni = { version = "0.21", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
