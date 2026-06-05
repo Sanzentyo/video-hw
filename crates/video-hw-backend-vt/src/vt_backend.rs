@@ -1390,7 +1390,8 @@ fn vt_decoder_options(config: &DecoderConfig) -> VtDecoderOptions {
         BackendDecoderOptions::Default
         | BackendDecoderOptions::Nvidia(_)
         | BackendDecoderOptions::Intel(_)
-        | BackendDecoderOptions::Vulkan(_) => VtDecoderOptions::default(),
+        | BackendDecoderOptions::Vulkan(_)
+        | BackendDecoderOptions::Android(_) => VtDecoderOptions::default(),
     }
 }
 
@@ -1400,7 +1401,8 @@ fn vt_encoder_options(backend_options: BackendEncoderOptions) -> VtEncoderOption
         BackendEncoderOptions::Default
         | BackendEncoderOptions::Nvidia(_)
         | BackendEncoderOptions::Intel(_)
-        | BackendEncoderOptions::Vulkan(_) => VtEncoderOptions::default(),
+        | BackendEncoderOptions::Vulkan(_)
+        | BackendEncoderOptions::Android(_) => VtEncoderOptions::default(),
     }
 }
 

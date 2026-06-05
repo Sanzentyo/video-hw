@@ -229,7 +229,8 @@ impl NvDecoderAdapter {
             BackendDecoderOptions::Default
             | BackendDecoderOptions::VideoToolbox(_)
             | BackendDecoderOptions::Intel(_)
-            | BackendDecoderOptions::Vulkan(_) => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
+            | BackendDecoderOptions::Vulkan(_)
+            | BackendDecoderOptions::Android(_) => env_bool("VIDEO_HW_NV_METRICS").unwrap_or(false),
         };
         Self {
             assembler: StatefulBitstreamAssembler::with_codec(config.codec),
@@ -462,7 +463,8 @@ impl NvEncoderAdapter {
             BackendEncoderOptions::Default
             | BackendEncoderOptions::VideoToolbox(_)
             | BackendEncoderOptions::Intel(_)
-            | BackendEncoderOptions::Vulkan(_) => crate::NvidiaEncoderOptions::default(),
+            | BackendEncoderOptions::Vulkan(_)
+            | BackendEncoderOptions::Android(_) => crate::NvidiaEncoderOptions::default(),
         };
         let max_in_flight_outputs = options.max_in_flight_outputs.clamp(1, 64);
         let gop_length = options.gop_length;

@@ -90,7 +90,8 @@ impl VulkanDecoderAdapter {
             BackendDecoderOptions::Default
             | BackendDecoderOptions::VideoToolbox(_)
             | BackendDecoderOptions::Nvidia(_)
-            | BackendDecoderOptions::Intel(_) => VulkanDecoderOptions::default(),
+            | BackendDecoderOptions::Intel(_)
+            | BackendDecoderOptions::Android(_) => VulkanDecoderOptions::default(),
         };
         Self {
             config,
@@ -541,7 +542,8 @@ impl VulkanEncoderAdapter {
             BackendEncoderOptions::Default
             | BackendEncoderOptions::VideoToolbox(_)
             | BackendEncoderOptions::Nvidia(_)
-            | BackendEncoderOptions::Intel(_) => VulkanEncoderOptions::default(),
+            | BackendEncoderOptions::Intel(_)
+            | BackendEncoderOptions::Android(_) => VulkanEncoderOptions::default(),
         };
         Self {
             codec,
