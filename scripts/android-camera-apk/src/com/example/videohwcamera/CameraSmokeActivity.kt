@@ -13,9 +13,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.StreamConfigurationMap
-import android.graphics.ImageFormat
-import android.media.Image
-import android.media.ImageReader
+import android.media.MediaCodec
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -32,7 +30,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.File
-import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 import kotlin.math.max
 
@@ -45,7 +42,7 @@ class CameraSmokeActivity : Activity() {
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var imageReader: ImageReader? = null
+    private var encoderSurface: Surface? = null
     private var outputFile: File? = null
     private var autoStarted = false
     private var recording = false
@@ -53,7 +50,7 @@ class CameraSmokeActivity : Activity() {
     private var profileCandidates: List<RecordingProfile> = emptyList()
     private var activeRecordingProfile: RecordingProfile? = null
     private var nativeRecorderHandle = 0L
-    private var framesSubmitted = 0
+    private var packetsDrained = 0
     private var recordingStartedAtMs = 0L
     private var stopRequested = false
 
@@ -259,13 +256,13 @@ class CameraSmokeActivity : Activity() {
     private fun recordingProfiles(manager: CameraManager, cameraId: String): List<RecordingProfile> {
         val characteristics = manager.getCameraCharacteristics(cameraId)
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val sizes = streamMap?.yuv420Sizes().orEmpty()
+        val sizes = streamMap?.mediaCodecSizes().orEmpty()
         val ranges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.toList()
             .orEmpty()
             .ifEmpty { listOf(Range(30, 30)) }
 
-        Log.i(TAG, "YUV420_SIZES ${sizes.joinToString { "${it.width}x${it.height}" }}")
+        Log.i(TAG, "SURFACE_CODEC_SIZES ${sizes.joinToString { "${it.width}x${it.height}" }}")
         Log.i(TAG, "FPS_RANGES ${ranges.joinToString { "${it.lower}-${it.upper}" }}")
 
         return sizes
@@ -345,13 +342,13 @@ class CameraSmokeActivity : Activity() {
                 profile.bitrate,
             )
             check(nativeRecorderHandle != 0L) { "Rust recorder failed to start" }
-            framesSubmitted = 0
+            val recordSurface = RustRecorder.nativeInputSurface(nativeRecorderHandle)
+            check(recordSurface != null) { "Rust recorder did not return an input surface" }
+            encoderSurface = recordSurface
+            packetsDrained = 0
             stopRequested = false
-            setupImageReader(profile)
 
             val camera = checkNotNull(cameraDevice)
-            val reader = checkNotNull(imageReader)
-            val recordSurface = reader.surface
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(recordSurface)
                 set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, profile.fpsRange)
@@ -366,8 +363,10 @@ class CameraSmokeActivity : Activity() {
                     session.setRepeatingRequest(request.build(), null, cameraHandler)
                     recording = true
                     recordingStartedAtMs = SystemClock.elapsedRealtime()
+                    scheduleSurfaceDrain()
+                    cameraHandler.postDelayed({ requestStopRecording("time limit") }, SURFACE_RECORDING_MS)
                     setStatus("Recording ${file.name}")
-                    Log.i(TAG, "RUST_RECORD_START profile=${profile.describe()} path=${file.absolutePath}")
+                    Log.i(TAG, "RUST_SURFACE_RECORD_START profile=${profile.describe()} path=${file.absolutePath}")
                 },
                 onFailed = {
                     Log.e(TAG, "RECORD_CONFIG_FAIL profile=${profile.describe()}")
@@ -381,8 +380,8 @@ class CameraSmokeActivity : Activity() {
     }
 
     private fun retryRecordingProfile(currentIndex: Int, reason: String) {
-        imageReader?.close()
-        imageReader = null
+        encoderSurface?.release()
+        encoderSurface = null
         if (nativeRecorderHandle != 0L) {
             RustRecorder.nativeFinish(nativeRecorderHandle)
             nativeRecorderHandle = 0L
@@ -400,58 +399,33 @@ class CameraSmokeActivity : Activity() {
         }
     }
 
-    private fun setupImageReader(profile: RecordingProfile) {
-        imageReader?.close()
-        imageReader = ImageReader.newInstance(
-            profile.size.width,
-            profile.size.height,
-            ImageFormat.YUV_420_888,
-            IMAGE_READER_IMAGES,
-        ).apply {
-            setOnImageAvailableListener(
-                { reader ->
-                    val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                    try {
-                        if (recording && nativeRecorderHandle != 0L) {
-                            if (shouldStopRustRecording()) {
-                                requestStopRecording("time limit")
-                                return@setOnImageAvailableListener
-                            }
-                            val submitted = RustRecorder.pushImage(nativeRecorderHandle, image, framesSubmitted == 0)
-                            if (submitted >= 0) {
-                                framesSubmitted = submitted
-                                if (submitted == 1 || submitted % 30 == 0) {
-                                    Log.i(TAG, "RUST_FRAME_SUBMITTED frames=$submitted")
-                                }
-                                if (submitted >= TARGET_RUST_FRAMES) {
-                                    requestStopRecording("target frames")
-                                }
-                            } else {
-                                Log.e(TAG, "RUST_FRAME_SUBMIT_FAIL")
-                            }
-                        }
-                    } finally {
-                        image.close()
-                    }
-                },
-                cameraHandler,
-            )
-        }
-    }
-
-    private fun shouldStopRustRecording(): Boolean {
-        return framesSubmitted >= TARGET_RUST_FRAMES ||
-            (recordingStartedAtMs > 0L &&
-                SystemClock.elapsedRealtime() - recordingStartedAtMs >= MAX_RECORDING_MS)
-    }
-
     private fun requestStopRecording(reason: String) {
         if (stopRequested) {
             return
         }
         stopRequested = true
-        Log.i(TAG, "RUST_RECORD_STOP_REQUEST reason=$reason frames=$framesSubmitted")
+        Log.i(TAG, "RUST_SURFACE_RECORD_STOP_REQUEST reason=$reason packets=$packetsDrained")
         runOnUiThread { stopRecordingAndDecode() }
+    }
+
+    private fun scheduleSurfaceDrain() {
+        cameraHandler.postDelayed(
+            {
+                if (recording && nativeRecorderHandle != 0L) {
+                    val drained = RustRecorder.nativeDrain(nativeRecorderHandle)
+                    if (drained >= 0) {
+                        packetsDrained = drained
+                        if (drained == 1 || drained % 30 == 0) {
+                            Log.i(TAG, "RUST_SURFACE_DRAIN packets=$drained")
+                        }
+                    } else {
+                        Log.e(TAG, "RUST_SURFACE_DRAIN_FAIL")
+                    }
+                    scheduleSurfaceDrain()
+                }
+            },
+            SURFACE_DRAIN_INTERVAL_MS,
+        )
     }
 
     private fun stopRecordingAndDecode() {
@@ -463,8 +437,6 @@ class CameraSmokeActivity : Activity() {
         try {
             closeCaptureSession()
             recording = false
-            imageReader?.close()
-            imageReader = null
 
             val result = if (nativeRecorderHandle != 0L) {
                 RustRecorder.nativeFinish(nativeRecorderHandle)
@@ -472,9 +444,11 @@ class CameraSmokeActivity : Activity() {
                 "{\"status\":\"FAIL\",\"error\":\"missing native recorder handle\"}"
             }
             nativeRecorderHandle = 0L
+            encoderSurface?.release()
+            encoderSurface = null
             val bytes = file.length()
-            Log.i(TAG, "RUST_RECORD_DONE profile=${activeRecordingProfile?.describe()} path=${file.absolutePath} bytes=$bytes")
-            Log.i(TAG, "RUST_RECORD_RESULT $result")
+            Log.i(TAG, "RUST_SURFACE_RECORD_DONE profile=${activeRecordingProfile?.describe()} path=${file.absolutePath} bytes=$bytes")
+            Log.i(TAG, "RUST_SURFACE_RECORD_RESULT $result")
             setStatus("Rust result $result")
             if (textureView.isAvailable) {
                 startPreview()
@@ -528,8 +502,8 @@ class CameraSmokeActivity : Activity() {
         closeCaptureSession()
         cameraDevice?.close()
         cameraDevice = null
-        imageReader?.close()
-        imageReader = null
+        encoderSurface?.release()
+        encoderSurface = null
         if (nativeRecorderHandle != 0L) {
             RustRecorder.nativeFinish(nativeRecorderHandle)
             nativeRecorderHandle = 0L
@@ -549,9 +523,8 @@ class CameraSmokeActivity : Activity() {
     companion object {
         private const val TAG = "VideoHwCameraSmoke"
         private const val REQ_CAMERA = 100
-        private const val IMAGE_READER_IMAGES = 4
-        private const val TARGET_RUST_FRAMES = 30
-        private const val MAX_RECORDING_MS = 60_000L
+        private const val SURFACE_RECORDING_MS = 3_000L
+        private const val SURFACE_DRAIN_INTERVAL_MS = 50L
         private val PREVIEW_SIZE = Size(1280, 720)
         private val FALLBACK_RECORD_SIZE = Size(640, 360)
     }
@@ -570,48 +543,11 @@ private object RustRecorder {
         bitrate: Int,
     ): Long
 
-    external fun nativePushYuv(
-        handle: Long,
-        yBuffer: ByteBuffer,
-        yLength: Int,
-        yRowStride: Int,
-        uBuffer: ByteBuffer,
-        uLength: Int,
-        uRowStride: Int,
-        uPixelStride: Int,
-        vBuffer: ByteBuffer,
-        vLength: Int,
-        vRowStride: Int,
-        vPixelStride: Int,
-        ptsNs: Long,
-        forceKeyframe: Boolean,
-    ): Int
+    external fun nativeInputSurface(handle: Long): Surface?
+
+    external fun nativeDrain(handle: Long): Int
 
     external fun nativeFinish(handle: Long): String
-
-    fun pushImage(handle: Long, image: Image, forceKeyframe: Boolean): Int {
-        val planes = image.planes
-        check(planes.size >= 3) { "YUV image has ${planes.size} planes" }
-        val y = planes[0].buffer.slice()
-        val u = planes[1].buffer.slice()
-        val v = planes[2].buffer.slice()
-        return nativePushYuv(
-            handle,
-            y,
-            y.remaining(),
-            planes[0].rowStride,
-            u,
-            u.remaining(),
-            planes[1].rowStride,
-            planes[1].pixelStride,
-            v,
-            v.remaining(),
-            planes[2].rowStride,
-            planes[2].pixelStride,
-            image.timestamp,
-            forceKeyframe,
-        )
-    }
 }
 
 private data class RecordingProfile(
@@ -627,5 +563,5 @@ private data class RecordingProfile(
         "${size.width}x${size.height}@${fpsRange.lower}-${fpsRange.upper}fps/${bitrate}bps"
 }
 
-private fun StreamConfigurationMap.yuv420Sizes(): List<Size> =
-    getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
+private fun StreamConfigurationMap.mediaCodecSizes(): List<Size> =
+    getOutputSizes(MediaCodec::class.java)?.toList().orEmpty()

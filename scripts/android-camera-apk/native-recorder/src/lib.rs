@@ -2,37 +2,46 @@ use std::{
     fs::File,
     io::Write,
     num::{NonZeroU32, NonZeroUsize},
-    slice,
+    ptr,
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use jni::{
     JNIEnv,
-    objects::{JByteBuffer, JClass, JString},
-    sys::{jboolean, jint, jlong, jstring},
+    objects::{GlobalRef, JByteBuffer, JClass, JObject, JString, JValue},
+    sys::{JNI_FALSE, jint, jlong, jobject, jstring},
 };
 use video_hw::{
-    AndroidDecoderOptions, AndroidEncoderOptions, AnyDecodeSession, AnyEncodeSession, Backend,
-    BackendDecoderOptions, BackendEncoderOptions, BackendError, BitstreamInput, Codec,
-    DecodeOutputMode, DecodedFrame, DecoderConfig, Dimensions, EncodeFrame, EncodeInputFormat,
-    EncodedChunk, EncoderConfig, RawFrameBuffer, Timestamp90k,
+    AndroidDecoderOptions, Backend, BackendDecoderOptions, BackendError, BitstreamInput, Codec,
+    DecodeOutputMode, DecodedFrame, DecoderConfig, EncodedChunk, EncodedLayout, Timestamp90k,
 };
 use video_hw_fmp4::{
     EncodedTrackConfig, Fmp4Writer, FragmentFrames, FrameRate, FrameSize, Ready, SampleDuration90k,
     SyncEncodedRecording,
 };
 
+const MEDIACODEC_INFO_TRY_AGAIN_LATER: i32 = -1;
+const MEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED: i32 = -2;
+const MEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED: i32 = -3;
+const MEDIACODEC_BUFFER_FLAG_KEY_FRAME: i32 = 1;
+const MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG: i32 = 2;
+const MEDIACODEC_BUFFER_FLAG_END_OF_STREAM: i32 = 4;
+const MEDIACODEC_CONFIGURE_FLAG_ENCODE: i32 = 1;
+const COLOR_FORMAT_SURFACE: i32 = 0x7f00_0789;
+const OUTPUT_TIMEOUT_US: i64 = 10_000;
+
 struct RustCameraRecorder {
-    encoder: AnyEncodeSession,
+    encoder: SurfaceEncoder,
     writer: Fmp4Writer<SyncEncodedRecording>,
     raw_file: File,
     chunks: Vec<EncodedChunk>,
     width: usize,
     height: usize,
     fps: u32,
-    frame_index: u64,
     packets: u64,
+    encoded_frames: u64,
     bytes: u64,
     keyframes: u64,
     output_path: String,
@@ -40,20 +49,20 @@ struct RustCameraRecorder {
 }
 
 impl RustCameraRecorder {
-    fn new(output_path: String, width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Self> {
+    fn new(
+        env: &mut JNIEnv<'_>,
+        output_path: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Self> {
         let frame_size = FrameSize::new(
             NonZeroU32::new(width).context("width must be non-zero")?,
             NonZeroU32::new(height).context("height must be non-zero")?,
         );
         let fps = fps.max(1);
-        let mut config =
-            EncoderConfig::new(Codec::H264, fps as i32, false, EncodeInputFormat::Nv12);
-        config.backend_options = BackendEncoderOptions::Android(AndroidEncoderOptions {
-            bitrate: Some(bitrate),
-            i_frame_interval_sec: Some(1),
-            ..Default::default()
-        });
-        let encoder = AnyEncodeSession::new(Backend::Android, config)?;
+        let encoder = SurfaceEncoder::new(env, width as usize, height as usize, fps, bitrate)?;
         let raw_path = output_path.strip_suffix(".mp4").map_or_else(
             || format!("{output_path}.h264"),
             |base| format!("{base}.h264"),
@@ -85,8 +94,8 @@ impl RustCameraRecorder {
             width: width as usize,
             height: height as usize,
             fps,
-            frame_index: 0,
             packets: 0,
+            encoded_frames: 0,
             bytes: 0,
             keyframes: 0,
             output_path,
@@ -94,54 +103,25 @@ impl RustCameraRecorder {
         })
     }
 
-    fn push_yuv420(
-        &mut self,
-        y: Plane<'_>,
-        u: Plane<'_>,
-        v: Plane<'_>,
-        pts_ns: i64,
-        force_keyframe: bool,
-    ) -> Result<u64> {
-        let nv12 = yuv420_to_nv12(self.width, self.height, y, u, v)?;
-        let dims = Dimensions {
-            width: NonZeroU32::new(self.width as u32).unwrap(),
-            height: NonZeroU32::new(self.height as u32).unwrap(),
-        };
-        let pts_90k = if pts_ns > 0 {
-            Some(Timestamp90k(pts_ns.saturating_mul(90_000) / 1_000_000_000))
-        } else {
-            Some(Timestamp90k(
-                i64::try_from(self.frame_index.saturating_mul(90_000) / u64::from(self.fps))
-                    .unwrap_or(i64::MAX),
-            ))
-        };
-        while let Some(chunk) = self.encoder.try_reap()? {
-            self.write_chunk(chunk)?;
-        }
-        match self.encoder.submit(EncodeFrame {
-            dims,
-            pts_90k,
-            buffer: RawFrameBuffer::Nv12 {
-                pitch: self.width,
-                data: nv12,
-            },
-            force_keyframe: force_keyframe || self.frame_index == 0,
-        }) {
-            Ok(()) => {}
-            Err(BackendError::TemporaryBackpressure(_)) => return Ok(self.frame_index),
-            Err(err) => return Err(err.into()),
-        }
-        self.frame_index = self.frame_index.saturating_add(1);
-        while let Some(chunk) = self.encoder.try_reap()? {
-            self.write_chunk(chunk)?;
-        }
-        Ok(self.frame_index)
+    fn input_surface(&self, env: &mut JNIEnv<'_>) -> Result<jobject> {
+        self.encoder.input_surface(env)
     }
 
-    fn finish(mut self) -> Result<String> {
-        for chunk in self.encoder.flush()? {
+    fn drain(&mut self, env: &mut JNIEnv<'_>) -> Result<u64> {
+        for chunk in self.encoder.drain(env, false)? {
             self.write_chunk(chunk)?;
         }
+        Ok(self.packets)
+    }
+
+    fn finish(mut self, env: &mut JNIEnv<'_>) -> Result<String> {
+        self.encoder.signal_eos(env)?;
+        while !self.encoder.eos_seen {
+            for chunk in self.encoder.drain(env, true)? {
+                self.write_chunk(chunk)?;
+            }
+        }
+        self.encoder.stop_and_release(env)?;
         self.raw_file.flush()?;
         let (mp4_status, mp4_error, mp4_bytes, duration_90k) = match self.writer.finish() {
             Ok(finished) => {
@@ -167,7 +147,7 @@ impl RustCameraRecorder {
             "FAIL"
         };
         Ok(format!(
-            "{{\"status\":\"{}\",\"path\":\"{}\",\"raw_path\":\"{}\",\"mp4_status\":\"{}\",\"mp4_error\":\"{}\",\"decode_status\":\"{}\",\"decode_error\":\"{}\",\"width\":{},\"height\":{},\"fps\":{},\"frames_in\":{},\"packets\":{},\"bytes\":{},\"keyframes\":{},\"decoded_frames\":{},\"mp4_bytes\":{},\"duration_90k\":{}}}",
+            "{{\"status\":\"{}\",\"surface_input\":true,\"path\":\"{}\",\"raw_path\":\"{}\",\"mp4_status\":\"{}\",\"mp4_error\":\"{}\",\"decode_status\":\"{}\",\"decode_error\":\"{}\",\"width\":{},\"height\":{},\"fps\":{},\"encoded_frames\":{},\"packets\":{},\"bytes\":{},\"keyframes\":{},\"decoded_frames\":{},\"mp4_bytes\":{},\"duration_90k\":{}}}",
             status,
             escape_json(&self.output_path),
             escape_json(&self.raw_path),
@@ -178,7 +158,7 @@ impl RustCameraRecorder {
             self.width,
             self.height,
             self.fps,
-            self.frame_index,
+            self.encoded_frames,
             self.packets,
             self.bytes,
             self.keyframes,
@@ -191,6 +171,9 @@ impl RustCameraRecorder {
     fn write_chunk(&mut self, chunk: EncodedChunk) -> Result<()> {
         self.bytes = self.bytes.saturating_add(chunk.data.len() as u64);
         self.packets = self.packets.saturating_add(1);
+        if chunk.pts_90k.is_some() {
+            self.encoded_frames = self.encoded_frames.saturating_add(1);
+        }
         if chunk.is_keyframe {
             self.keyframes = self.keyframes.saturating_add(1);
         }
@@ -204,64 +187,253 @@ impl RustCameraRecorder {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Plane<'a> {
-    data: &'a [u8],
-    row_stride: usize,
-    pixel_stride: usize,
+struct SurfaceEncoder {
+    codec: Option<GlobalRef>,
+    input_surface: GlobalRef,
+    eos_signaled: bool,
+    eos_seen: bool,
 }
 
-fn yuv420_to_nv12(
-    width: usize,
-    height: usize,
-    y: Plane<'_>,
-    u: Plane<'_>,
-    v: Plane<'_>,
-) -> Result<Vec<u8>> {
-    if y.row_stride < width {
-        bail!(
-            "Y row stride {} is smaller than width {}",
-            y.row_stride,
-            width
-        );
+impl SurfaceEncoder {
+    fn new(
+        env: &mut JNIEnv<'_>,
+        width: usize,
+        height: usize,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Self> {
+        let mime = env.new_string("video/avc")?;
+        let format = env
+            .call_static_method(
+                "android/media/MediaFormat",
+                "createVideoFormat",
+                "(Ljava/lang/String;II)Landroid/media/MediaFormat;",
+                &[
+                    JValue::Object(&JObject::from(mime)),
+                    JValue::Int(checked_i32(width, "width")?),
+                    JValue::Int(checked_i32(height, "height")?),
+                ],
+            )?
+            .l()?;
+
+        set_media_format_i32(env, &format, "bitrate", checked_i32(bitrate, "bitrate")?)?;
+        set_media_format_i32(env, &format, "frame-rate", checked_i32(fps, "fps")?)?;
+        set_media_format_i32(env, &format, "i-frame-interval", 1)?;
+        set_media_format_i32(env, &format, "color-format", COLOR_FORMAT_SURFACE)?;
+        set_media_format_i32(env, &format, "prepend-sps-pps-to-idr-frames", 1)?;
+
+        let mime = env.new_string("video/avc")?;
+        let codec = env
+            .call_static_method(
+                "android/media/MediaCodec",
+                "createEncoderByType",
+                "(Ljava/lang/String;)Landroid/media/MediaCodec;",
+                &[JValue::Object(&JObject::from(mime))],
+            )?
+            .l()?;
+        let null = JObject::null();
+        env.call_method(
+            &codec,
+            "configure",
+            "(Landroid/media/MediaFormat;Landroid/view/Surface;Landroid/media/MediaCrypto;I)V",
+            &[
+                JValue::Object(&format),
+                JValue::Object(&null),
+                JValue::Object(&null),
+                JValue::Int(MEDIACODEC_CONFIGURE_FLAG_ENCODE),
+            ],
+        )?;
+        let input_surface = env
+            .call_method(
+                &codec,
+                "createInputSurface",
+                "()Landroid/view/Surface;",
+                &[],
+            )?
+            .l()?;
+        env.call_method(&codec, "start", "()V", &[])?;
+
+        let codec = env.new_global_ref(codec)?;
+        let input_surface = env.new_global_ref(input_surface)?;
+        Ok(Self {
+            codec: Some(codec),
+            input_surface,
+            eos_signaled: false,
+            eos_seen: false,
+        })
     }
-    let chroma_width = width.div_ceil(2);
-    let chroma_height = height.div_ceil(2);
-    let mut out = vec![0_u8; width * height + chroma_width * chroma_height * 2];
-    for row in 0..height {
-        let src = row
-            .checked_mul(y.row_stride)
-            .context("Y row offset overflow")?;
-        let dst = row * width;
-        out[dst..dst + width].copy_from_slice(
-            y.data
-                .get(src..src + width)
-                .context("Y plane is shorter than expected")?,
-        );
+
+    fn input_surface(&self, env: &mut JNIEnv<'_>) -> Result<jobject> {
+        Ok(env.new_local_ref(self.input_surface.as_obj())?.into_raw())
     }
-    let uv_base = width * height;
-    for row in 0..chroma_height {
-        for col in 0..chroma_width {
-            let u_index = row
-                .checked_mul(u.row_stride)
-                .and_then(|base| base.checked_add(col.saturating_mul(u.pixel_stride)))
-                .context("U plane offset overflow")?;
-            let v_index = row
-                .checked_mul(v.row_stride)
-                .and_then(|base| base.checked_add(col.saturating_mul(v.pixel_stride)))
-                .context("V plane offset overflow")?;
-            let dst = uv_base + (row * chroma_width + col) * 2;
-            out[dst] = *u
-                .data
-                .get(u_index)
-                .context("U plane is shorter than expected")?;
-            out[dst + 1] = *v
-                .data
-                .get(v_index)
-                .context("V plane is shorter than expected")?;
+
+    fn signal_eos(&mut self, env: &mut JNIEnv<'_>) -> Result<()> {
+        if self.eos_signaled {
+            return Ok(());
         }
+        let codec = self.codec()?;
+        env.call_method(codec, "signalEndOfInputStream", "()V", &[])?;
+        self.eos_signaled = true;
+        Ok(())
     }
-    Ok(out)
+
+    fn drain(&mut self, env: &mut JNIEnv<'_>, wait_for_eos: bool) -> Result<Vec<EncodedChunk>> {
+        let mut out = Vec::new();
+        let mut spins = 0_u32;
+        let buffer_info = env.new_object("android/media/MediaCodec$BufferInfo", "()V", &[])?;
+        loop {
+            spins = spins.saturating_add(1);
+            let timeout_us = if wait_for_eos { OUTPUT_TIMEOUT_US } else { 0 };
+            let codec = self.codec()?;
+            let event = env
+                .call_method(
+                    codec,
+                    "dequeueOutputBuffer",
+                    "(Landroid/media/MediaCodec$BufferInfo;J)I",
+                    &[JValue::Object(&buffer_info), JValue::Long(timeout_us)],
+                )?
+                .i()?;
+            match event {
+                index if index >= 0 => {
+                    let info = OutputBufferInfo::read(env, &buffer_info)?;
+                    if info.size > 0 {
+                        out.push(self.output_chunk(env, index, &info)?);
+                    }
+                    let codec = self.codec()?;
+                    env.call_method(
+                        codec,
+                        "releaseOutputBuffer",
+                        "(IZ)V",
+                        &[JValue::Int(index), JValue::Bool(JNI_FALSE)],
+                    )?;
+                    if (info.flags & MEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0 {
+                        self.eos_seen = true;
+                        break;
+                    }
+                }
+                MEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED => {
+                    out.extend(self.format_config_chunks(env)?);
+                }
+                MEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED => {}
+                MEDIACODEC_INFO_TRY_AGAIN_LATER => {
+                    if !wait_for_eos || spins > 10_000 {
+                        break;
+                    }
+                }
+                other => bail!("MediaCodec.dequeueOutputBuffer returned {other}"),
+            }
+        }
+        Ok(out)
+    }
+
+    fn output_chunk(
+        &mut self,
+        env: &mut JNIEnv<'_>,
+        index: i32,
+        info: &OutputBufferInfo,
+    ) -> Result<EncodedChunk> {
+        let codec = self.codec()?;
+        let buffer = env
+            .call_method(
+                codec,
+                "getOutputBuffer",
+                "(I)Ljava/nio/ByteBuffer;",
+                &[JValue::Int(index)],
+            )?
+            .l()?;
+        if buffer.is_null() {
+            bail!("MediaCodec.getOutputBuffer returned null");
+        }
+        let buffer = JByteBuffer::from(buffer);
+        let buffer_ptr = env.get_direct_buffer_address(&buffer)?;
+        let buffer_size = env.get_direct_buffer_capacity(&buffer)?;
+        let offset = usize::try_from(info.offset.max(0)).context("negative output offset")?;
+        let size = usize::try_from(info.size).context("negative output size")?;
+        let end = offset
+            .checked_add(size)
+            .context("encoder output range overflow")?;
+        if end > buffer_size {
+            bail!("encoder output range exceeds buffer: end={end}, len={buffer_size}");
+        }
+        let data = unsafe { std::slice::from_raw_parts(buffer_ptr.add(offset), size) }.to_vec();
+        Ok(EncodedChunk {
+            codec: Codec::H264,
+            layout: EncodedLayout::AnnexB,
+            data,
+            pts_90k: ((info.flags & MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) == 0)
+                .then_some(Timestamp90k(us_to_pts_90k(info.presentation_time_us))),
+            is_keyframe: (info.flags & MEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0
+                || (info.flags & MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) != 0,
+        })
+    }
+
+    fn format_config_chunks(&mut self, env: &mut JNIEnv<'_>) -> Result<Vec<EncodedChunk>> {
+        let codec = self.codec()?;
+        let format = env
+            .call_method(
+                codec,
+                "getOutputFormat",
+                "()Landroid/media/MediaFormat;",
+                &[],
+            )?
+            .l()?;
+        if format.is_null() {
+            return Ok(Vec::new());
+        }
+        ["csd-0", "csd-1"]
+            .into_iter()
+            .filter_map(|key| media_format_buffer(env, &format, key).transpose())
+            .map(|buffer| {
+                buffer.map(|data| EncodedChunk {
+                    codec: Codec::H264,
+                    layout: EncodedLayout::AnnexB,
+                    data: annexb_prefixed(data),
+                    pts_90k: None,
+                    is_keyframe: true,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    fn stop_and_release(&mut self, env: &mut JNIEnv<'_>) -> Result<()> {
+        if let Some(codec) = self.codec.take() {
+            let _ = env.call_method(codec.as_obj(), "stop", "()V", &[]);
+            env.call_method(codec.as_obj(), "release", "()V", &[])?;
+        }
+        Ok(())
+    }
+
+    fn codec(&self) -> Result<&JObject<'static>> {
+        self.codec
+            .as_ref()
+            .map(GlobalRef::as_obj)
+            .context("MediaCodec has already been released")
+    }
+}
+
+impl Drop for SurfaceEncoder {
+    fn drop(&mut self) {
+        // The Java MediaCodec is released explicitly from nativeFinish while a JNIEnv is available.
+    }
+}
+
+#[derive(Debug)]
+struct OutputBufferInfo {
+    offset: i32,
+    size: i32,
+    presentation_time_us: i64,
+    flags: i32,
+}
+
+impl OutputBufferInfo {
+    fn read(env: &mut JNIEnv<'_>, buffer_info: &JObject<'_>) -> Result<Self> {
+        Ok(Self {
+            offset: env.get_field(buffer_info, "offset", "I")?.i()?,
+            size: env.get_field(buffer_info, "size", "I")?.i()?,
+            presentation_time_us: env.get_field(buffer_info, "presentationTimeUs", "J")?.j()?,
+            flags: env.get_field(buffer_info, "flags", "I")?.i()?,
+        })
+    }
 }
 
 fn decode_chunks(chunks: &[EncodedChunk], width: usize, height: usize, fps: u32) -> Result<usize> {
@@ -272,7 +444,7 @@ fn decode_chunks(chunks: &[EncodedChunk], width: usize, height: usize, fps: u32)
         video_height: Some(height.try_into().unwrap_or(u16::MAX)),
         ..Default::default()
     });
-    let mut decoder = AnyDecodeSession::new(Backend::Android, config)?;
+    let mut decoder = video_hw::AnyDecodeSession::new(Backend::Android, config)?;
     let mut decoded_frames = 0_usize;
     for chunk in chunks {
         let mut backpressure_spins = 0_u32;
@@ -319,7 +491,10 @@ fn decode_chunks(chunks: &[EncodedChunk], width: usize, height: usize, fps: u32)
     Ok(decoded_frames)
 }
 
-fn drain_decoder(decoder: &mut AnyDecodeSession, decoded_frames: &mut usize) -> Result<()> {
+fn drain_decoder(
+    decoder: &mut video_hw::AnyDecodeSession,
+    decoded_frames: &mut usize,
+) -> Result<()> {
     while let Some(frame) = decoder.try_reap()? {
         if matches!(frame, DecodedFrame::Metadata { .. }) {
             *decoded_frames = decoded_frames.saturating_add(1);
@@ -328,32 +503,107 @@ fn drain_decoder(decoder: &mut AnyDecodeSession, decoded_frames: &mut usize) -> 
     Ok(())
 }
 
-fn direct_plane<'local>(
-    env: &JNIEnv<'local>,
-    buffer: &JByteBuffer<'local>,
-    length: jint,
-    row_stride: jint,
-    pixel_stride: jint,
-) -> Result<Plane<'local>> {
-    let ptr = env.get_direct_buffer_address(buffer)?;
-    let capacity = env.get_direct_buffer_capacity(buffer)?;
-    let length = usize::try_from(length).context("negative buffer length")?;
-    if length > capacity {
-        bail!("direct buffer length {length} exceeds capacity {capacity}");
-    }
-    let data = unsafe { slice::from_raw_parts(ptr.cast_const(), length) };
-    Ok(Plane {
-        data,
-        row_stride: usize::try_from(row_stride).context("negative row stride")?,
-        pixel_stride: usize::try_from(pixel_stride).context("negative pixel stride")?,
-    })
-}
-
-fn recorder_mut<'a>(handle: jlong) -> Result<&'a mut RustCameraRecorder> {
+fn recorder_lock<'a>(handle: jlong) -> Result<MutexGuard<'a, RustCameraRecorder>> {
     if handle == 0 {
         bail!("native recorder handle is null");
     }
-    Ok(unsafe { &mut *(handle as *mut RustCameraRecorder) })
+    let mutex = unsafe { &*(handle as *mut Mutex<RustCameraRecorder>) };
+    mutex
+        .lock()
+        .map_err(|error| anyhow::anyhow!("native recorder mutex poisoned: {error}"))
+}
+
+fn checked_i32<T>(value: T, name: &str) -> Result<i32>
+where
+    T: TryInto<i32> + Copy + std::fmt::Display,
+{
+    value
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{name} value out of i32 range: {value}"))
+}
+
+fn set_media_format_i32(
+    env: &mut JNIEnv<'_>,
+    format: &JObject<'_>,
+    key: &str,
+    value: i32,
+) -> Result<()> {
+    let key = env.new_string(key)?;
+    env.call_method(
+        format,
+        "setInteger",
+        "(Ljava/lang/String;I)V",
+        &[JValue::Object(&JObject::from(key)), JValue::Int(value)],
+    )?;
+    Ok(())
+}
+
+fn media_format_buffer(
+    env: &mut JNIEnv<'_>,
+    format: &JObject<'_>,
+    key: &str,
+) -> Result<Option<Vec<u8>>> {
+    let key_string = env.new_string(key)?;
+    let has_key = env
+        .call_method(
+            format,
+            "containsKey",
+            "(Ljava/lang/String;)Z",
+            &[JValue::Object(&JObject::from(key_string))],
+        )?
+        .z()?;
+    if !has_key {
+        return Ok(None);
+    }
+
+    let key_string = env.new_string(key)?;
+    let buffer = env
+        .call_method(
+            format,
+            "getByteBuffer",
+            "(Ljava/lang/String;)Ljava/nio/ByteBuffer;",
+            &[JValue::Object(&JObject::from(key_string))],
+        )?
+        .l()?;
+    if buffer.is_null() {
+        return Ok(None);
+    }
+    let data = byte_buffer_remaining(env, &buffer)?;
+    Ok((!data.is_empty()).then_some(data))
+}
+
+fn byte_buffer_remaining(env: &mut JNIEnv<'_>, buffer: &JObject<'_>) -> Result<Vec<u8>> {
+    let duplicate = env
+        .call_method(buffer, "duplicate", "()Ljava/nio/ByteBuffer;", &[])?
+        .l()?;
+    let len = env.call_method(&duplicate, "remaining", "()I", &[])?.i()?;
+    if len <= 0 {
+        return Ok(Vec::new());
+    }
+    let array = env.new_byte_array(len)?;
+    let array_object: &JObject<'_> = array.as_ref();
+    env.call_method(
+        &duplicate,
+        "get",
+        "([B)Ljava/nio/ByteBuffer;",
+        &[JValue::Object(array_object)],
+    )?;
+    Ok(env.convert_byte_array(&array)?)
+}
+
+fn annexb_prefixed(buffer: Vec<u8>) -> Vec<u8> {
+    if buffer.starts_with(&[0, 0, 1]) || buffer.starts_with(&[0, 0, 0, 1]) {
+        buffer
+    } else {
+        let mut out = Vec::with_capacity(buffer.len() + 4);
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&buffer);
+        out
+    }
+}
+
+fn us_to_pts_90k(value: i64) -> i64 {
+    value.saturating_mul(90_000) / 1_000_000
 }
 
 fn make_error_json(error: impl std::fmt::Display) -> String {
@@ -390,58 +640,54 @@ pub extern "system" fn Java_com_example_videohwcamera_RustRecorder_nativeStart(
     let result = (|| -> Result<jlong> {
         let output_path: String = env.get_string(&output_path)?.into();
         let recorder = RustCameraRecorder::new(
+            &mut env,
             output_path,
             u32::try_from(width).context("negative width")?,
             u32::try_from(height).context("negative height")?,
             u32::try_from(fps).context("negative fps")?,
             u32::try_from(bitrate).context("negative bitrate")?,
         )?;
-        Ok(Box::into_raw(Box::new(recorder)) as jlong)
+        Ok(Box::into_raw(Box::new(Mutex::new(recorder))) as jlong)
     })();
     result.unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_example_videohwcamera_RustRecorder_nativePushYuv(
-    env: JNIEnv<'_>,
+pub extern "system" fn Java_com_example_videohwcamera_RustRecorder_nativeInputSurface(
+    mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
-    y_buffer: JByteBuffer<'_>,
-    y_length: jint,
-    y_row_stride: jint,
-    u_buffer: JByteBuffer<'_>,
-    u_length: jint,
-    u_row_stride: jint,
-    u_pixel_stride: jint,
-    v_buffer: JByteBuffer<'_>,
-    v_length: jint,
-    v_row_stride: jint,
-    v_pixel_stride: jint,
-    pts_ns: jlong,
-    force_keyframe: jboolean,
+) -> jobject {
+    let result = (|| -> Result<jobject> { recorder_lock(handle)?.input_surface(&mut env) })();
+    result.unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_example_videohwcamera_RustRecorder_nativeDrain(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
 ) -> jint {
-    let result = (|| -> Result<u64> {
-        let y = direct_plane(&env, &y_buffer, y_length, y_row_stride, 1)?;
-        let u = direct_plane(&env, &u_buffer, u_length, u_row_stride, u_pixel_stride)?;
-        let v = direct_plane(&env, &v_buffer, v_length, v_row_stride, v_pixel_stride)?;
-        recorder_mut(handle)?.push_yuv420(y, u, v, pts_ns, force_keyframe != 0)
-    })();
-    result.map_or(-1, |frames| frames.min(i32::MAX as u64) as jint)
+    let result = (|| -> Result<u64> { recorder_lock(handle)?.drain(&mut env) })();
+    result.map_or(-1, |packets| packets.min(i32::MAX as u64) as jint)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_example_videohwcamera_RustRecorder_nativeFinish(
-    env: JNIEnv<'_>,
+    mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) -> jstring {
     let message = if handle == 0 {
         make_error_json("native recorder handle is null")
     } else {
-        let recorder = unsafe { Box::from_raw(handle as *mut RustCameraRecorder) };
-        recorder.finish().unwrap_or_else(make_error_json)
+        let recorder = unsafe { Box::from_raw(handle as *mut Mutex<RustCameraRecorder>) };
+        match recorder.into_inner() {
+            Ok(recorder) => recorder.finish(&mut env).unwrap_or_else(make_error_json),
+            Err(error) => make_error_json(format!("native recorder mutex poisoned: {error}")),
+        }
     };
     env.new_string(message)
         .map(|value| value.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+        .unwrap_or(ptr::null_mut())
 }
