@@ -435,6 +435,7 @@ pub struct NvEncoderAdapter {
     max_in_flight_outputs: usize,
     gop_length: Option<u32>,
     frame_interval_p: Option<i32>,
+    target_bitrate: Option<u32>,
     cuda_ctx: Option<Arc<CudaContext>>,
     active_session: Option<NvEncodeSession>,
     session_reconfigure_pending: bool,
@@ -469,6 +470,7 @@ impl NvEncoderAdapter {
         let max_in_flight_outputs = options.max_in_flight_outputs.clamp(1, 64);
         let gop_length = options.gop_length;
         let frame_interval_p = options.frame_interval_p;
+        let target_bitrate = options.target_bitrate;
         let report_metrics = options
             .report_metrics
             .or_else(|| env_bool("VIDEO_HW_NV_METRICS"))
@@ -493,6 +495,7 @@ impl NvEncoderAdapter {
             max_in_flight_outputs,
             gop_length,
             frame_interval_p,
+            target_bitrate,
             cuda_ctx: None,
             active_session: None,
             session_reconfigure_pending: false,
@@ -620,6 +623,7 @@ impl NvEncoderAdapter {
         if let Some(frame_interval_p) = self.frame_interval_p {
             preset_config.presetCfg.frameIntervalP = frame_interval_p;
         }
+        configure_rate_control(&mut preset_config.presetCfg, self.target_bitrate);
         configure_codec_preset(self.codec, &mut preset_config.presetCfg);
         let frame_interval_p = usize::try_from(preset_config.presetCfg.frameIntervalP).unwrap_or(1);
         let lookahead_depth = usize::from(preset_config.presetCfg.rcParams.lookaheadDepth);
@@ -668,6 +672,7 @@ impl NvEncoderAdapter {
             self.fps,
             self.gop_length,
             self.frame_interval_p,
+            self.target_bitrate,
             force_idr,
         )?;
         session.generation = target_generation;
@@ -754,13 +759,30 @@ impl VideoEncoder for NvEncoderAdapter {
         }
 
         frame = self.preprocess_frame_via_pipeline(frame)?;
-        self.pending_frames.push(frame);
-        Ok(Vec::new())
+        let codec = self.codec;
+        let max_in_flight = self.max_in_flight_outputs;
+        let session = self.ensure_session(frame.width, frame.height)?;
+        if session.buffer_lifetime_mode == NvBufferLifetimeMode::PerFrameSafe {
+            self.pending_frames.push(frame);
+            return Ok(Vec::new());
+        }
+        Self::submit_streaming_frame(session, &frame, codec, max_in_flight)
+    }
+
+    fn try_reap(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        let codec = self.codec;
+        let Some(session) = self.active_session.as_mut() else {
+            return Ok(Vec::new());
+        };
+        if session.buffer_lifetime_mode == NvBufferLifetimeMode::PerFrameSafe {
+            return Ok(Vec::new());
+        }
+        Self::reap_ready_streaming_outputs(session, codec)
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
         if self.pending_frames.is_empty() {
-            return Ok(Vec::new());
+            return self.flush_streaming_outputs();
         }
         self.apply_pending_switch_if_needed()?;
 
@@ -1041,6 +1063,136 @@ impl VideoEncoder for NvEncoderAdapter {
 }
 
 impl NvEncoderAdapter {
+    fn submit_streaming_frame(
+        session: &mut NvEncodeSession,
+        frame: &Frame,
+        codec: Codec,
+        max_in_flight: usize,
+    ) -> Result<Vec<EncodedPacket>, BackendError> {
+        let mut packets = Vec::new();
+        while session.available_pairs() == 0 {
+            packets.push(Self::reap_oldest_streaming_output(session, codec)?);
+            packets.extend(Self::reap_ready_streaming_outputs(session, codec)?);
+        }
+
+        let mut pair = session.checkout_pair()?;
+        let argb = frame.argb.as_ref().ok_or_else(|| {
+            BackendError::InvalidInput("NVIDIA encode requires ARGB input payload".to_string())
+        })?;
+        let expected_len = session
+            .width
+            .saturating_mul(session.height)
+            .saturating_mul(4);
+        if argb.len() != expected_len {
+            return Err(BackendError::InvalidInput(format!(
+                "argb payload size mismatch: expected {}, got {}",
+                expected_len,
+                argb.len()
+            )));
+        }
+
+        {
+            let nvenc_buf = argb_to_nvenc_format(argb);
+            let mut lock = pair.input.lock().map_err(map_encode_error)?;
+            unsafe {
+                lock.write_pitched(&nvenc_buf, session.width * 4, session.height);
+            }
+        }
+
+        let input_timestamp = frame
+            .pts_90k
+            .unwrap_or_else(|| {
+                session
+                    .submitted_frames
+                    .saturating_mul(90_000_u64 / 30)
+                    .min(i64::MAX as u64) as i64
+            })
+            .max(0) as u64;
+        let is_keyframe_hint = session.submitted_frames == 0 || frame.force_keyframe;
+        let encode_pic_flags = if frame.force_keyframe {
+            nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR
+                as u32
+        } else {
+            0
+        };
+        let produced_output = match session.session.encode_picture(
+            &mut pair.input,
+            &mut pair.output,
+            nvidia_video_codec_sdk::EncodePictureParams {
+                input_timestamp,
+                encode_pic_flags,
+                ..Default::default()
+            },
+        ) {
+            Ok(()) => true,
+            Err(err) if err.kind() == ErrorKind::NeedMoreInput => false,
+            Err(err) => return Err(map_encode_error(err)),
+        };
+
+        session.pending_outputs.push_back(PendingOutput {
+            pair,
+            pts_90k: frame.pts_90k,
+            is_keyframe: is_keyframe_hint,
+        });
+        session.submitted_frames = session.submitted_frames.saturating_add(1);
+        if produced_output {
+            session.ready_output_count = session.ready_output_count.saturating_add(1);
+        }
+
+        packets.extend(Self::reap_ready_streaming_outputs(session, codec)?);
+        while session.pending_outputs.len() >= max_in_flight && !session.pending_outputs.is_empty()
+        {
+            packets.push(Self::reap_oldest_streaming_output(session, codec)?);
+        }
+        Ok(packets)
+    }
+
+    fn reap_ready_streaming_outputs(
+        session: &mut NvEncodeSession,
+        codec: Codec,
+    ) -> Result<Vec<EncodedPacket>, BackendError> {
+        let mut packets = Vec::new();
+        while session.ready_output_count > 0 && !session.pending_outputs.is_empty() {
+            packets.push(Self::reap_oldest_streaming_output(session, codec)?);
+        }
+        Ok(packets)
+    }
+
+    fn reap_oldest_streaming_output(
+        session: &mut NvEncodeSession,
+        codec: Codec,
+    ) -> Result<EncodedPacket, BackendError> {
+        let pending = session.pending_outputs.pop_front().ok_or_else(|| {
+            BackendError::Backend("missing pending NVENC output to reap".to_string())
+        })?;
+        if session.ready_output_count > 0 {
+            session.ready_output_count -= 1;
+        }
+        let (packet, pair) = lock_output_packet(codec, pending)?;
+        session.checkin_pair(pair);
+        Ok(packet)
+    }
+
+    fn flush_streaming_outputs(&mut self) -> Result<Vec<EncodedPacket>, BackendError> {
+        let codec = self.codec;
+        let Some(mut session) = self.active_session.take() else {
+            self.width = None;
+            self.height = None;
+            return Ok(Vec::new());
+        };
+        if session.pending_outputs.is_empty() {
+            self.active_session = Some(session);
+            return Ok(Vec::new());
+        }
+
+        session.session.end_of_stream().map_err(map_encode_error)?;
+        session.ready_output_count = session.pending_outputs.len();
+        let packets = Self::reap_ready_streaming_outputs(&mut session, codec)?;
+        self.width = None;
+        self.height = None;
+        Ok(packets)
+    }
+
     fn flush_safe_per_frame(
         session: &mut NvEncodeSession,
         pending_frames: &[Frame],
@@ -1315,6 +1467,9 @@ struct NvEncodeSession {
     input_layout: NvInputLayout,
     reusable_inputs: VecDeque<nvidia_video_codec_sdk::Buffer<'static>>,
     reusable_outputs: VecDeque<nvidia_video_codec_sdk::Bitstream<'static>>,
+    pending_outputs: VecDeque<PendingOutput>,
+    ready_output_count: usize,
+    submitted_frames: u64,
 }
 
 impl NvEncodeSession {
@@ -1364,6 +1519,9 @@ impl NvEncodeSession {
             input_layout,
             reusable_inputs,
             reusable_outputs,
+            pending_outputs: VecDeque::new(),
+            ready_output_count: 0,
+            submitted_frames: 0,
         })
     }
 
@@ -1392,6 +1550,7 @@ impl NvEncodeSession {
         fps: i32,
         gop_length: Option<u32>,
         frame_interval_p: Option<i32>,
+        target_bitrate: Option<u32>,
         force_idr: bool,
     ) -> Result<(), BackendError> {
         let encode_guid = to_encode_guid(codec);
@@ -1409,6 +1568,7 @@ impl NvEncodeSession {
         if let Some(frame_interval_p) = frame_interval_p {
             preset_config.presetCfg.frameIntervalP = frame_interval_p;
         }
+        configure_rate_control(&mut preset_config.presetCfg, target_bitrate);
         configure_codec_preset(codec, &mut preset_config.presetCfg);
 
         let mut init_params =
@@ -1436,6 +1596,7 @@ impl NvEncodeSession {
 
 impl Drop for NvEncodeSession {
     fn drop(&mut self) {
+        self.pending_outputs.clear();
         self.reusable_inputs.clear();
         self.reusable_outputs.clear();
     }
@@ -1539,13 +1700,38 @@ fn configure_codec_preset(
     codec: Codec,
     config: &mut nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CONFIG,
 ) {
-    if codec != Codec::Av1 {
-        return;
+    match codec {
+        Codec::H264 => {
+            config.profileGUID =
+                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_H264_PROFILE_MAIN_GUID;
+            let h264_config = unsafe { &mut config.encodeCodecConfig.h264Config };
+            h264_config.set_disableSPSPPS(0);
+            h264_config.set_repeatSPSPPS(1);
+            h264_config.set_outputAUD(1);
+            h264_config.chromaFormatIDC = 1;
+            h264_config.idrPeriod = config.gopLength;
+        }
+        Codec::Hevc => {}
+        Codec::Av1 => {
+            let av1_config = unsafe { &mut config.encodeCodecConfig.av1Config };
+            av1_config.set_disableSeqHdr(0);
+            av1_config.set_repeatSeqHdr(1);
+        }
     }
+}
 
-    let av1_config = unsafe { &mut config.encodeCodecConfig.av1Config };
-    av1_config.set_disableSeqHdr(0);
-    av1_config.set_repeatSeqHdr(1);
+fn configure_rate_control(
+    config: &mut nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_CONFIG,
+    target_bitrate: Option<u32>,
+) {
+    let Some(target_bitrate) = target_bitrate else {
+        return;
+    };
+    let target_bitrate = target_bitrate.max(1);
+    config.rcParams.rateControlMode =
+        nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+    config.rcParams.averageBitRate = target_bitrate;
+    config.rcParams.maxBitRate = target_bitrate;
 }
 
 fn map_encode_error(error: nvidia_video_codec_sdk::EncodeError) -> BackendError {
