@@ -12,3 +12,4 @@ backend-android = ["video-hw-core/backend-android"]
 video-hw-core = { path = "../video-hw-core", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"

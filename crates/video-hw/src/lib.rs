@@ -31,7 +31,10 @@ pub use transform::{
     make_argb_to_nv12_dummy, nv12_to_rgb24, should_enqueue_transform,
 };
 #[cfg(all(target_os = "android", feature = "backend-android"))]
-pub use video_hw_backend_android::{AndroidDecoderAdapter, AndroidEncoderAdapter};
+pub use video_hw_backend_android::{
+    AndroidDecoderAdapter, AndroidEncoderAdapter, AndroidSurfaceEncoder,
+    AndroidSurfaceEncoderConfig,
+};
 #[cfg(all(
     feature = "backend-intel",
     any(target_os = "linux", target_os = "windows")

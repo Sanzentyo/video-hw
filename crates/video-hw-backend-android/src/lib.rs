@@ -7,5 +7,9 @@ mod codec;
 mod color;
 #[cfg(target_os = "android")]
 mod ffi;
+#[cfg(target_os = "android")]
+mod surface;
 
 pub use codec::{AndroidDecoderAdapter, AndroidEncoderAdapter};
+#[cfg(target_os = "android")]
+pub use surface::{AndroidSurfaceEncoder, AndroidSurfaceEncoderConfig};
