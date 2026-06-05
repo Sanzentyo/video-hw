@@ -31,6 +31,8 @@ use rstest::rstest;
     )
 ))]
 use video_hw::BackendEncoderOptions;
+#[cfg(all(target_os = "macos", feature = "backend-vt"))]
+use video_hw::EncodedLayout;
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
     all(
@@ -84,7 +86,7 @@ use video_hw::Timestamp90k;
 ))]
 use video_hw::{
     Backend, BackendDecoderOptions, BackendError, BackendKind, BitstreamInput, Codec,
-    DecodeOutputMode, DecodeSession, DecoderConfig, EncodedLayout,
+    DecodeOutputMode, DecodeSession, DecoderConfig,
 };
 #[cfg(any(
     all(target_os = "macos", feature = "backend-vt"),
@@ -1644,24 +1646,29 @@ fn e2e_nv_backend_encode_accepts_backend_specific_options() {
     any(target_os = "linux", target_os = "windows")
 ))]
 #[test]
-fn e2e_nv_backend_rejects_nv12_encode_input_without_synthetic_fallback() {
+fn e2e_nv_backend_accepts_nv12_encode_input() {
     let mut encoder = EncodeSession::<NvEncoderAdapter>::new(EncoderConfig::new(
         Codec::H264,
         30,
         true,
         EncodeInputFormat::Nv12,
     ));
-    let err = encoder
-        .submit(make_nv12_frame(0))
-        .expect_err("NVIDIA encode must reject NV12 input instead of synthesizing pixels");
-    assert!(matches!(err, BackendError::InvalidInput(_)));
-    assert!(
-        encoder
-            .try_reap()
-            .expect("try_reap should succeed")
-            .is_none()
-    );
-    assert!(encoder.flush().expect("flush should be empty").is_empty());
+    match encoder.submit(make_nv12_frame(0)) {
+        Ok(()) => {}
+        Err(err) if nv_runtime_unsupported(&err) => {
+            eprintln!("skip: CUDA/NVENC unavailable: {err}");
+            return;
+        }
+        Err(err) => panic!("unexpected encode error: {err:?}"),
+    }
+
+    match encoder.flush() {
+        Ok(packets) => assert!(!packets.is_empty()),
+        Err(err) if nv_runtime_unsupported(&err) => {
+            eprintln!("skip: CUDA/NVENC unavailable: {err}");
+        }
+        Err(err) => panic!("unexpected encode flush error: {err:?}"),
+    }
 }
 
 #[cfg(all(

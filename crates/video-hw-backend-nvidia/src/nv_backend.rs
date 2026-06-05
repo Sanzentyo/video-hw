@@ -112,7 +112,7 @@ fn nvidia_capability_report(codec: Codec) -> CapabilityReport {
             encode: EncodeCapability {
                 supported,
                 input_formats: if supported {
-                    vec![EncodeInputFormat::Argb8888]
+                    vec![EncodeInputFormat::Argb8888, EncodeInputFormat::Nv12]
                 } else {
                     Vec::new()
                 },
@@ -436,6 +436,7 @@ pub struct NvEncoderAdapter {
     gop_length: Option<u32>,
     frame_interval_p: Option<i32>,
     target_bitrate: Option<u32>,
+    input_format: EncodeInputFormat,
     cuda_ctx: Option<Arc<CudaContext>>,
     active_session: Option<NvEncodeSession>,
     session_reconfigure_pending: bool,
@@ -458,6 +459,22 @@ impl NvEncoderAdapter {
         fps: i32,
         require_hardware: bool,
         backend_options: BackendEncoderOptions,
+    ) -> Self {
+        Self::with_config_and_input_format(
+            codec,
+            fps,
+            require_hardware,
+            backend_options,
+            EncodeInputFormat::Argb8888,
+        )
+    }
+
+    pub fn with_config_and_input_format(
+        codec: Codec,
+        fps: i32,
+        require_hardware: bool,
+        backend_options: BackendEncoderOptions,
+        input_format: EncodeInputFormat,
     ) -> Self {
         let options = match backend_options {
             BackendEncoderOptions::Nvidia(options) => options,
@@ -496,6 +513,7 @@ impl NvEncoderAdapter {
             gop_length,
             frame_interval_p,
             target_bitrate,
+            input_format,
             cuda_ctx: None,
             active_session: None,
             session_reconfigure_pending: false,
@@ -608,7 +626,16 @@ impl NvEncoderAdapter {
         if !encode_guids.contains(&encode_guid) {
             return Err(BackendError::UnsupportedCodec(self.codec));
         }
-        let input_layout = NvInputLayout::Argb;
+        let (input_layout, buffer_format) = match self.input_format {
+            EncodeInputFormat::Argb8888 => (
+                NvInputLayout::Argb,
+                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+            ),
+            EncodeInputFormat::Nv12 => (
+                NvInputLayout::Nv12,
+                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+            ),
+        };
 
         let preset_guid = nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_PRESET_P1_GUID;
         let tuning_info =
@@ -642,10 +669,7 @@ impl NvEncoderAdapter {
             .encode_config(&mut preset_config.presetCfg);
 
         let session = encoder
-            .start_session(
-                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-                init_params,
-            )
+            .start_session(buffer_format, init_params)
             .map_err(map_encode_error)?;
 
         NvEncodeSession::new(
@@ -732,10 +756,8 @@ impl VideoEncoder for NvEncoderAdapter {
                 "frame dimensions must be positive".to_string(),
             ));
         }
-        if frame.argb.is_none() {
-            return Err(BackendError::InvalidInput(
-                "NVIDIA encode requires ARGB input payload".to_string(),
-            ));
+        if frame_buffer_for_layout(&frame, self.input_format).is_err() {
+            return Err(missing_input_payload_error(self.input_format));
         }
 
         if let Some(width) = self.width {
@@ -874,31 +896,16 @@ impl VideoEncoder for NvEncoderAdapter {
                     queue_depth_samples.push_value(pending_outputs.len() as f64);
                 }
                 let mut pair = session.checkout_pair()?;
-                let _ = input_layout;
-                let argb = frame.argb.clone().ok_or_else(|| {
-                    BackendError::InvalidInput(
-                        "NVIDIA encode requires ARGB input payload".to_string(),
-                    )
-                })?;
-                if argb.len() != width.saturating_mul(height).saturating_mul(4) {
-                    return Err(BackendError::InvalidInput(format!(
-                        "argb payload size mismatch: expected {}, got {}",
-                        width.saturating_mul(height).saturating_mul(4),
-                        argb.len()
-                    )));
-                }
-                copy_stats.input_upload_bytes = copy_stats
-                    .input_upload_bytes
-                    .saturating_add(argb.len() as u64);
-                copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
                 {
                     let upload_start = Instant::now();
-                    let nvenc_buf = argb_to_nvenc_format(&argb);
-                    let mut lock = pair.input.lock().map_err(map_encode_error)?;
-                    unsafe {
-                        lock.write_pitched(&nvenc_buf, width * 4, height);
-                    }
+                    let uploaded_bytes =
+                        upload_frame_to_input(&mut pair.input, frame, input_layout, width, height)?;
                     timing.upload += upload_start.elapsed();
+                    copy_stats.input_upload_bytes = copy_stats
+                        .input_upload_bytes
+                        .saturating_add(uploaded_bytes as u64);
+                    copy_stats.input_upload_frames =
+                        copy_stats.input_upload_frames.saturating_add(1);
                 }
                 let input_timestamp = frame
                     .pts_90k
@@ -1076,28 +1083,13 @@ impl NvEncoderAdapter {
         }
 
         let mut pair = session.checkout_pair()?;
-        let argb = frame.argb.as_ref().ok_or_else(|| {
-            BackendError::InvalidInput("NVIDIA encode requires ARGB input payload".to_string())
-        })?;
-        let expected_len = session
-            .width
-            .saturating_mul(session.height)
-            .saturating_mul(4);
-        if argb.len() != expected_len {
-            return Err(BackendError::InvalidInput(format!(
-                "argb payload size mismatch: expected {}, got {}",
-                expected_len,
-                argb.len()
-            )));
-        }
-
-        {
-            let nvenc_buf = argb_to_nvenc_format(argb);
-            let mut lock = pair.input.lock().map_err(map_encode_error)?;
-            unsafe {
-                lock.write_pitched(&nvenc_buf, session.width * 4, session.height);
-            }
-        }
+        upload_frame_to_input(
+            &mut pair.input,
+            frame,
+            session.input_layout,
+            session.width,
+            session.height,
+        )?;
 
         let input_timestamp = frame
             .pts_90k
@@ -1262,30 +1254,14 @@ impl NvEncoderAdapter {
                 BackendError::Backend("safe lifetime buffer pair is missing".to_string())
             })?;
 
-            let argb = frame.argb.clone().ok_or_else(|| {
-                BackendError::InvalidInput("NVIDIA encode requires ARGB input payload".to_string())
-            })?;
-            if argb.len() != width.saturating_mul(height).saturating_mul(4) {
-                return Err(BackendError::InvalidInput(format!(
-                    "argb payload size mismatch: expected {}, got {}",
-                    width.saturating_mul(height).saturating_mul(4),
-                    argb.len()
-                )));
-            }
+            let upload_start = Instant::now();
+            let uploaded_bytes =
+                upload_frame_to_input(&mut pair.input, frame, session.input_layout, width, height)?;
+            timing.upload += upload_start.elapsed();
             copy_stats.input_upload_bytes = copy_stats
                 .input_upload_bytes
-                .saturating_add(argb.len() as u64);
+                .saturating_add(uploaded_bytes as u64);
             copy_stats.input_upload_frames = copy_stats.input_upload_frames.saturating_add(1);
-
-            let upload_start = Instant::now();
-            {
-                let nvenc_buf = argb_to_nvenc_format(&argb);
-                let mut lock = pair.input.lock().map_err(map_encode_error)?;
-                unsafe {
-                    lock.write_pitched(&nvenc_buf, width * 4, height);
-                }
-            }
-            timing.upload += upload_start.elapsed();
 
             let input_timestamp = frame
                 .pts_90k
@@ -1456,6 +1432,16 @@ struct SafeFlushOptions {
 #[derive(Debug, Clone, Copy)]
 enum NvInputLayout {
     Argb,
+    Nv12,
+}
+
+impl NvInputLayout {
+    fn input_format(self) -> EncodeInputFormat {
+        match self {
+            Self::Argb => EncodeInputFormat::Argb8888,
+            Self::Nv12 => EncodeInputFormat::Nv12,
+        }
+    }
 }
 
 struct NvEncodeSession {
@@ -1765,6 +1751,97 @@ fn update_jitter_samples(
         jitter_samples.push_value((delta_ms - expected_frame_ms).abs());
     }
     *last_pts_90k = Some(current);
+}
+
+enum NvInputFrame<'a> {
+    Argb(&'a [u8]),
+    Nv12 { pitch: usize, data: &'a [u8] },
+}
+
+fn missing_input_payload_error(input_format: EncodeInputFormat) -> BackendError {
+    let payload = match input_format {
+        EncodeInputFormat::Argb8888 => "ARGB",
+        EncodeInputFormat::Nv12 => "NV12",
+    };
+    BackendError::InvalidInput(format!("NVIDIA encode requires {payload} input payload"))
+}
+
+fn frame_buffer_for_layout<'a>(
+    frame: &'a Frame,
+    input_format: EncodeInputFormat,
+) -> Result<NvInputFrame<'a>, BackendError> {
+    match input_format {
+        EncodeInputFormat::Argb8888 => frame
+            .argb
+            .as_deref()
+            .map(NvInputFrame::Argb)
+            .ok_or_else(|| missing_input_payload_error(input_format)),
+        EncodeInputFormat::Nv12 => frame
+            .nv12
+            .as_ref()
+            .map(|nv12| NvInputFrame::Nv12 {
+                pitch: nv12.pitch,
+                data: nv12.data.as_slice(),
+            })
+            .ok_or_else(|| missing_input_payload_error(input_format)),
+    }
+}
+
+fn upload_frame_to_input(
+    input: &mut nvidia_video_codec_sdk::Buffer<'_>,
+    frame: &Frame,
+    input_layout: NvInputLayout,
+    width: usize,
+    height: usize,
+) -> Result<usize, BackendError> {
+    match frame_buffer_for_layout(frame, input_layout.input_format())? {
+        NvInputFrame::Argb(argb) => {
+            let expected_len = width.saturating_mul(height).saturating_mul(4);
+            if argb.len() != expected_len {
+                return Err(BackendError::InvalidInput(format!(
+                    "argb payload size mismatch: expected {}, got {}",
+                    expected_len,
+                    argb.len()
+                )));
+            }
+            let nvenc_buf = argb_to_nvenc_format(argb);
+            let mut lock = input.lock().map_err(map_encode_error)?;
+            unsafe {
+                lock.write_pitched(&nvenc_buf, width * 4, height);
+            }
+            Ok(argb.len())
+        }
+        NvInputFrame::Nv12 { pitch, data } => {
+            if width % 2 != 0 || height % 2 != 0 {
+                return Err(BackendError::InvalidInput(format!(
+                    "nv12 dimensions must be even, got {}x{}",
+                    width, height
+                )));
+            }
+            if pitch < width {
+                return Err(BackendError::InvalidInput(format!(
+                    "nv12 pitch must be >= width: pitch={}, width={}",
+                    pitch, width
+                )));
+            }
+            let rows = height.saturating_add(height / 2);
+            let expected_len = pitch.checked_mul(rows).ok_or_else(|| {
+                BackendError::InvalidInput("nv12 payload size overflows usize".to_string())
+            })?;
+            if data.len() < expected_len {
+                return Err(BackendError::InvalidInput(format!(
+                    "nv12 payload size mismatch: expected at least {}, got {}",
+                    expected_len,
+                    data.len()
+                )));
+            }
+            let mut lock = input.lock().map_err(map_encode_error)?;
+            unsafe {
+                lock.write_pitched(&data[..expected_len], pitch, rows);
+            }
+            Ok(expected_len)
+        }
+    }
 }
 
 /// Convert internal TRUE-ARGB bytes `[A, R, G, B]` (as stored in [`RawFrameBuffer::Argb8888`])

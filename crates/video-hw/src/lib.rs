@@ -1571,11 +1571,12 @@ impl EncoderBackend for NvEncoderAdapter {
     const BACKEND_KIND: BackendKind = BackendKind::Nvidia;
 
     fn from_encoder_config(config: EncoderConfig) -> Self {
-        Self::with_config(
+        Self::with_config_and_input_format(
             config.codec,
             config.fps,
             config.require_hardware,
             config.backend_options,
+            config.input_format,
         )
     }
 }
