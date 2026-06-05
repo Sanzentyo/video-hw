@@ -12,4 +12,7 @@ mod surface;
 
 pub use codec::{AndroidDecoderAdapter, AndroidEncoderAdapter};
 #[cfg(target_os = "android")]
-pub use surface::{AndroidSurfaceEncoder, AndroidSurfaceEncoderConfig};
+pub use surface::{
+    AndroidSurfaceDecoder, AndroidSurfaceDecoderConfig, AndroidSurfaceEncoder,
+    AndroidSurfaceEncoderConfig,
+};

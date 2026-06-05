@@ -32,8 +32,8 @@ pub use transform::{
 };
 #[cfg(all(target_os = "android", feature = "backend-android"))]
 pub use video_hw_backend_android::{
-    AndroidDecoderAdapter, AndroidEncoderAdapter, AndroidSurfaceEncoder,
-    AndroidSurfaceEncoderConfig,
+    AndroidDecoderAdapter, AndroidEncoderAdapter, AndroidSurfaceDecoder,
+    AndroidSurfaceDecoderConfig, AndroidSurfaceEncoder, AndroidSurfaceEncoderConfig,
 };
 #[cfg(all(
     feature = "backend-intel",

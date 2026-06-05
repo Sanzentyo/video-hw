@@ -1,7 +1,7 @@
 use jni::{
     JNIEnv,
     objects::{GlobalRef, JByteBuffer, JObject, JValue},
-    sys::{JNI_FALSE, jobject},
+    sys::{JNI_FALSE, JNI_TRUE, jobject},
 };
 use video_hw_core::{BackendError, Codec, EncodedChunk, EncodedLayout, Timestamp90k};
 
@@ -52,6 +52,276 @@ pub struct AndroidSurfaceEncoder {
     input_surface: GlobalRef,
     eos_signaled: bool,
     eos_seen: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AndroidSurfaceDecoderConfig {
+    pub codec: Codec,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub timeout_us: i64,
+    pub codec_name: Option<String>,
+}
+
+impl AndroidSurfaceDecoderConfig {
+    #[must_use]
+    pub fn new(codec: Codec, width: u32, height: u32, fps: u32) -> Self {
+        Self {
+            codec,
+            width,
+            height,
+            fps,
+            timeout_us: 10_000,
+            codec_name: None,
+        }
+    }
+}
+
+pub struct AndroidSurfaceDecoder {
+    config: AndroidSurfaceDecoderConfig,
+    codec: Option<GlobalRef>,
+    pts_us: i64,
+}
+
+impl AndroidSurfaceDecoder {
+    pub fn new(
+        env: &mut JNIEnv<'_>,
+        config: AndroidSurfaceDecoderConfig,
+        output_surface: &JObject<'_>,
+    ) -> Result<Self, BackendError> {
+        if config.width == 0 || config.height == 0 {
+            return Err(BackendError::InvalidInput(
+                "Android surface decoder dimensions must be non-zero".to_string(),
+            ));
+        }
+        if config.fps == 0 {
+            return Err(BackendError::InvalidInput(
+                "Android surface decoder fps must be non-zero".to_string(),
+            ));
+        }
+        let mime = mime_for_codec(config.codec);
+        let mime_string = env.new_string(mime).map_err(jni_error)?;
+        let format = env
+            .call_static_method(
+                "android/media/MediaFormat",
+                "createVideoFormat",
+                "(Ljava/lang/String;II)Landroid/media/MediaFormat;",
+                &[
+                    JValue::Object(&JObject::from(mime_string)),
+                    JValue::Int(checked_i32(config.width, "width")?),
+                    JValue::Int(checked_i32(config.height, "height")?),
+                ],
+            )
+            .map_err(jni_error)?
+            .l()
+            .map_err(jni_error)?;
+        set_media_format_i32(env, &format, "frame-rate", checked_i32(config.fps, "fps")?)?;
+
+        let codec = match &config.codec_name {
+            Some(name) => {
+                let name = env.new_string(name).map_err(jni_error)?;
+                env.call_static_method(
+                    "android/media/MediaCodec",
+                    "createByCodecName",
+                    "(Ljava/lang/String;)Landroid/media/MediaCodec;",
+                    &[JValue::Object(&JObject::from(name))],
+                )
+                .map_err(jni_error)?
+                .l()
+                .map_err(jni_error)?
+            }
+            None => {
+                let mime = env.new_string(mime).map_err(jni_error)?;
+                env.call_static_method(
+                    "android/media/MediaCodec",
+                    "createDecoderByType",
+                    "(Ljava/lang/String;)Landroid/media/MediaCodec;",
+                    &[JValue::Object(&JObject::from(mime))],
+                )
+                .map_err(jni_error)?
+                .l()
+                .map_err(jni_error)?
+            }
+        };
+
+        let null = JObject::null();
+        env.call_method(
+            &codec,
+            "configure",
+            "(Landroid/media/MediaFormat;Landroid/view/Surface;Landroid/media/MediaCrypto;I)V",
+            &[
+                JValue::Object(&format),
+                JValue::Object(output_surface),
+                JValue::Object(&null),
+                JValue::Int(0),
+            ],
+        )
+        .map_err(jni_error)?;
+        env.call_method(&codec, "start", "()V", &[])
+            .map_err(jni_error)?;
+
+        Ok(Self {
+            config,
+            codec: Some(env.new_global_ref(codec).map_err(jni_error)?),
+            pts_us: 0,
+        })
+    }
+
+    pub fn queue(
+        &mut self,
+        env: &mut JNIEnv<'_>,
+        access_unit: &[u8],
+        is_keyframe: bool,
+    ) -> Result<bool, BackendError> {
+        let codec = self.codec()?;
+        let index = env
+            .call_method(
+                codec,
+                "dequeueInputBuffer",
+                "(J)I",
+                &[JValue::Long(self.config.timeout_us)],
+            )
+            .map_err(jni_error)?
+            .i()
+            .map_err(jni_error)?;
+        if index < 0 {
+            return Ok(false);
+        }
+
+        let buffer = env
+            .call_method(
+                codec,
+                "getInputBuffer",
+                "(I)Ljava/nio/ByteBuffer;",
+                &[JValue::Int(index)],
+            )
+            .map_err(jni_error)?
+            .l()
+            .map_err(jni_error)?;
+        if buffer.is_null() {
+            return Err(BackendError::Backend(
+                "MediaCodec.getInputBuffer returned null".to_string(),
+            ));
+        }
+        let buffer = JByteBuffer::from(buffer);
+        let buffer_ptr = env.get_direct_buffer_address(&buffer).map_err(jni_error)?;
+        let buffer_size = env.get_direct_buffer_capacity(&buffer).map_err(jni_error)?;
+        if access_unit.len() > buffer_size {
+            return Err(BackendError::InvalidInput(format!(
+                "decoder input buffer too small: buffer={}, data={}",
+                buffer_size,
+                access_unit.len()
+            )));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(access_unit.as_ptr(), buffer_ptr, access_unit.len());
+        }
+        let flags = if is_keyframe {
+            MEDIACODEC_BUFFER_FLAG_KEY_FRAME
+        } else {
+            0
+        };
+        env.call_method(
+            codec,
+            "queueInputBuffer",
+            "(IIIJI)V",
+            &[
+                JValue::Int(index),
+                JValue::Int(0),
+                JValue::Int(checked_i32(access_unit.len(), "access_unit_size")?),
+                JValue::Long(self.pts_us),
+                JValue::Int(flags),
+            ],
+        )
+        .map_err(jni_error)?;
+        self.pts_us = self
+            .pts_us
+            .saturating_add(1_000_000 / i64::from(self.config.fps.max(1)));
+        Ok(true)
+    }
+
+    pub fn drain(&mut self, env: &mut JNIEnv<'_>, wait: bool) -> Result<u32, BackendError> {
+        let mut rendered = 0_u32;
+        let mut spins = 0_u32;
+        let buffer_info = env
+            .new_object("android/media/MediaCodec$BufferInfo", "()V", &[])
+            .map_err(jni_error)?;
+        loop {
+            spins = spins.saturating_add(1);
+            let timeout_us = if wait { self.config.timeout_us } else { 0 };
+            let codec = self.codec()?;
+            let event = env
+                .call_method(
+                    codec,
+                    "dequeueOutputBuffer",
+                    "(Landroid/media/MediaCodec$BufferInfo;J)I",
+                    &[JValue::Object(&buffer_info), JValue::Long(timeout_us)],
+                )
+                .map_err(jni_error)?
+                .i()
+                .map_err(jni_error)?;
+            match event {
+                index if index >= 0 => {
+                    let info = OutputBufferInfo::read(env, &buffer_info)?;
+                    env.call_method(
+                        codec,
+                        "releaseOutputBuffer",
+                        "(IZ)V",
+                        &[JValue::Int(index), JValue::Bool(JNI_TRUE)],
+                    )
+                    .map_err(jni_error)?;
+                    if info.size > 0 {
+                        rendered = rendered.saturating_add(1);
+                    }
+                    if (info.flags & MEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0 {
+                        break;
+                    }
+                }
+                MEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED | MEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED => {}
+                MEDIACODEC_INFO_TRY_AGAIN_LATER => {
+                    if !wait || spins > 10_000 {
+                        break;
+                    }
+                }
+                other => {
+                    return Err(BackendError::Backend(format!(
+                        "MediaCodec.dequeueOutputBuffer returned {other}"
+                    )));
+                }
+            }
+        }
+        Ok(rendered)
+    }
+
+    pub fn flush(&mut self, env: &mut JNIEnv<'_>) -> Result<(), BackendError> {
+        let codec = self.codec()?;
+        env.call_method(codec, "flush", "()V", &[])
+            .map_err(jni_error)?;
+        self.pts_us = 0;
+        Ok(())
+    }
+
+    pub fn stop_and_release(&mut self, env: &mut JNIEnv<'_>) -> Result<(), BackendError> {
+        if let Some(codec) = self.codec.take() {
+            let _ = env.call_method(codec.as_obj(), "stop", "()V", &[]);
+            env.call_method(codec.as_obj(), "release", "()V", &[])
+                .map_err(jni_error)?;
+        }
+        Ok(())
+    }
+
+    fn codec(&self) -> Result<&JObject<'static>, BackendError> {
+        self.codec.as_ref().map(GlobalRef::as_obj).ok_or_else(|| {
+            BackendError::Backend("MediaCodec has already been released".to_string())
+        })
+    }
+}
+
+impl Drop for AndroidSurfaceDecoder {
+    fn drop(&mut self) {
+        // MediaCodec.stop/release need JNIEnv; callers should use stop_and_release during teardown.
+    }
 }
 
 impl AndroidSurfaceEncoder {
