@@ -1812,7 +1812,7 @@ fn upload_frame_to_input(
             Ok(argb.len())
         }
         NvInputFrame::Nv12 { pitch, data } => {
-            if width % 2 != 0 || height % 2 != 0 {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
                 return Err(BackendError::InvalidInput(format!(
                     "nv12 dimensions must be even, got {}x{}",
                     width, height
