@@ -1835,11 +1835,16 @@ fn upload_frame_to_input(
                     data.len()
                 )));
             }
+            let mut packed = Vec::with_capacity(width.saturating_mul(rows));
+            for row in 0..rows {
+                let src_offset = row.saturating_mul(pitch);
+                packed.extend_from_slice(&data[src_offset..src_offset + width]);
+            }
             let mut lock = input.lock().map_err(map_encode_error)?;
             unsafe {
-                lock.write_pitched(&data[..expected_len], pitch, rows);
+                lock.write_pitched(&packed, width, rows);
             }
-            Ok(expected_len)
+            Ok(packed.len())
         }
     }
 }
