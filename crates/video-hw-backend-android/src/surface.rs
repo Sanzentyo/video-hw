@@ -52,6 +52,8 @@ pub struct AndroidSurfaceEncoder {
     input_surface: GlobalRef,
     eos_signaled: bool,
     eos_seen: bool,
+    pts_origin_us: Option<i64>,
+    last_pts_90k: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +429,8 @@ impl AndroidSurfaceEncoder {
             input_surface: env.new_global_ref(input_surface).map_err(jni_error)?,
             eos_signaled: false,
             eos_seen: false,
+            pts_origin_us: None,
+            last_pts_90k: None,
         })
     }
 
@@ -529,7 +533,7 @@ impl AndroidSurfaceEncoder {
     }
 
     fn output_chunk(
-        &self,
+        &mut self,
         env: &mut JNIEnv<'_>,
         index: i32,
         info: &OutputBufferInfo,
@@ -566,12 +570,20 @@ impl AndroidSurfaceEncoder {
             )));
         }
         let data = unsafe { std::slice::from_raw_parts(buffer_ptr.add(offset), size) }.to_vec();
+        let pts_90k = if (info.flags & MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) == 0 {
+            Some(Timestamp90k(normalize_encoder_pts_90k(
+                &mut self.pts_origin_us,
+                &mut self.last_pts_90k,
+                info.presentation_time_us,
+            )))
+        } else {
+            None
+        };
         Ok(EncodedChunk {
             codec: self.config.codec,
             layout: encoded_layout(self.config.codec),
             data,
-            pts_90k: ((info.flags & MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) == 0)
-                .then_some(Timestamp90k(us_to_pts_90k(info.presentation_time_us))),
+            pts_90k,
             is_keyframe: (info.flags & MEDIACODEC_BUFFER_FLAG_KEY_FRAME) != 0
                 || (info.flags & MEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) != 0,
         })
@@ -774,6 +786,23 @@ fn us_to_pts_90k(value: i64) -> i64 {
     value.saturating_mul(90_000) / 1_000_000
 }
 
+fn normalize_encoder_pts_90k(
+    origin_us: &mut Option<i64>,
+    last_pts_90k: &mut Option<i64>,
+    presentation_time_us: i64,
+) -> i64 {
+    let origin = *origin_us.get_or_insert(presentation_time_us);
+    let delta_us = presentation_time_us.saturating_sub(origin).max(0);
+    let mut pts = us_to_pts_90k(delta_us);
+    if let Some(last) = *last_pts_90k
+        && pts <= last
+    {
+        pts = last.saturating_add(1);
+    }
+    *last_pts_90k = Some(pts);
+    pts
+}
+
 fn checked_i32<T>(value: T, name: &str) -> Result<i32, BackendError>
 where
     T: TryInto<i32> + Copy + std::fmt::Display,
@@ -785,4 +814,37 @@ where
 
 fn jni_error(error: jni::errors::Error) -> BackendError {
     BackendError::Backend(format!("JNI error: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_encoder_pts_90k;
+
+    #[test]
+    fn normalizes_large_surface_timestamps_to_relative_90k() {
+        let mut origin = None;
+        let mut last = None;
+
+        let first = normalize_encoder_pts_90k(&mut origin, &mut last, 1_780_746_839_834_000);
+        let second = normalize_encoder_pts_90k(&mut origin, &mut last, 1_780_746_839_867_333);
+
+        assert_eq!(first, 0);
+        assert_eq!(second, 2_999);
+    }
+
+    #[test]
+    fn keeps_repeated_or_backwards_timestamps_monotonic() {
+        let mut origin = None;
+        let mut last = None;
+
+        assert_eq!(
+            normalize_encoder_pts_90k(&mut origin, &mut last, 100_000),
+            0
+        );
+        assert_eq!(
+            normalize_encoder_pts_90k(&mut origin, &mut last, 100_000),
+            1
+        );
+        assert_eq!(normalize_encoder_pts_90k(&mut origin, &mut last, 90_000), 2);
+    }
 }
