@@ -629,7 +629,7 @@ impl NvEncoderAdapter {
         let (input_layout, buffer_format) = match self.input_format {
             EncodeInputFormat::Argb8888 => (
                 NvInputLayout::Argb,
-                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
+                nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR,
             ),
             EncodeInputFormat::Nv12 => (
                 NvInputLayout::Nv12,
@@ -1850,14 +1850,13 @@ fn upload_frame_to_input(
 }
 
 /// Convert internal TRUE-ARGB bytes `[A, R, G, B]` (as stored in [`RawFrameBuffer::Argb8888`])
-/// to the byte layout required by `NV_ENC_BUFFER_FORMAT_ARGB`.
+/// to the byte layout required by `NV_ENC_BUFFER_FORMAT_ABGR`.
 ///
-/// NVENC's "A8R8G8B8" format is word-ordered in little-endian:
-/// the 32-bit integer `0xAARRGGBB` is stored as bytes `[B, G, R, A]` in memory.
-/// Our internal format stores bytes as `[A, R, G, B]`, so a full 4-byte reversal is needed.
+/// NVENC's `ABGR` format is word-ordered in little-endian, so a 32-bit `0xAABBGGRR` pixel is
+/// stored as bytes `[R, G, B, A]`.
 fn argb_to_nvenc_format(argb: &[u8]) -> Vec<u8> {
     argb.chunks_exact(4)
-        .flat_map(|px| [px[3], px[2], px[1], px[0]])
+        .flat_map(|px| [px[1], px[2], px[3], px[0]])
         .collect()
 }
 
@@ -1918,6 +1917,15 @@ mod tests {
         assert_eq!(adapter.gop_length, Some(48));
         assert_eq!(adapter.frame_interval_p, Some(1));
         assert!(adapter.force_next_keyframe);
+    }
+
+    #[test]
+    fn argb_to_nvenc_abgr_format_preserves_logical_channels() {
+        let argb = vec![255, 10, 20, 30, 128, 40, 50, 60];
+        assert_eq!(
+            argb_to_nvenc_format(&argb),
+            vec![10, 20, 30, 255, 40, 50, 60, 128]
+        );
     }
 
     #[test]
