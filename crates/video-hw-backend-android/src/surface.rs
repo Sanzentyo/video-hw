@@ -176,6 +176,23 @@ impl AndroidSurfaceDecoder {
         access_unit: &[u8],
         is_keyframe: bool,
     ) -> Result<bool, BackendError> {
+        let queued =
+            self.queue_with_presentation_time_us(env, access_unit, is_keyframe, self.pts_us)?;
+        if queued {
+            self.pts_us = self
+                .pts_us
+                .saturating_add(1_000_000 / i64::from(self.config.fps.max(1)));
+        }
+        Ok(queued)
+    }
+
+    pub fn queue_with_presentation_time_us(
+        &mut self,
+        env: &mut JNIEnv<'_>,
+        access_unit: &[u8],
+        is_keyframe: bool,
+        presentation_time_us: i64,
+    ) -> Result<bool, BackendError> {
         let codec = self.codec()?;
         let index = env
             .call_method(
@@ -232,14 +249,11 @@ impl AndroidSurfaceDecoder {
                 JValue::Int(index),
                 JValue::Int(0),
                 JValue::Int(checked_i32(access_unit.len(), "access_unit_size")?),
-                JValue::Long(self.pts_us),
+                JValue::Long(presentation_time_us),
                 JValue::Int(flags),
             ],
         )
         .map_err(jni_error)?;
-        self.pts_us = self
-            .pts_us
-            .saturating_add(1_000_000 / i64::from(self.config.fps.max(1)));
         Ok(true)
     }
 
