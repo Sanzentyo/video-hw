@@ -15,7 +15,7 @@ use crate::ffi::codec::{
 #[cfg(target_os = "android")]
 use video_hw_core::{
     AndroidDecoderOptions, AndroidEncoderOptions, BackendDecoderOptions, BackendEncoderOptions,
-    Nv12FramePayload,
+    DecodeOutputMode, Nv12FramePayload, bitstream,
 };
 
 #[cfg(target_os = "android")]
@@ -248,6 +248,17 @@ impl AndroidDecoderAdapter {
         if self.codec.is_some() {
             return Ok(());
         }
+        if self.config.require_hardware {
+            return Err(BackendError::UnsupportedConfig(
+                "Android MediaCodec selection is OS managed and does not guarantee hardware decode"
+                    .to_string(),
+            ));
+        }
+        if self.config.output_mode != DecodeOutputMode::Metadata {
+            return Err(BackendError::UnsupportedConfig(
+                "Android decoder currently supports DecodeOutputMode::Metadata only".to_string(),
+            ));
+        }
         let width = self.options.video_width.map(usize::from).ok_or_else(|| {
             BackendError::UnsupportedConfig(
                 "Android decoder requires AndroidDecoderOptions.video_width".to_string(),
@@ -303,6 +314,7 @@ impl AndroidDecoderAdapter {
                 data.len()
             )));
         }
+        validate_android_decode_access_unit(self.config.codec, data)?;
         input[..data.len()].copy_from_slice(data);
         codec.queue_input(index, data.len(), pts_us, flags)
     }
@@ -403,6 +415,12 @@ impl AndroidEncoderAdapter {
     fn ensure_encoder_started(&mut self, frame: &Frame) -> Result<(), BackendError> {
         if self.codec.is_some() {
             return Ok(());
+        }
+        if self.config.require_hardware {
+            return Err(BackendError::UnsupportedConfig(
+                "Android MediaCodec selection is OS managed and does not guarantee hardware encode"
+                    .to_string(),
+            ));
         }
         let mime = mime_for_codec(self.config.codec);
         let bitrate = self.options.bitrate.or(Some(1_000_000));
@@ -525,6 +543,24 @@ impl AndroidEncoderAdapter {
 #[cfg(target_os = "android")]
 fn frame_to_nv12(frame: &Frame) -> Result<Nv12FramePayload, BackendError> {
     if let Some(nv12) = &frame.nv12 {
+        if nv12.pitch != frame.width {
+            return Err(BackendError::InvalidInput(format!(
+                "Android encoder currently requires tightly packed NV12: pitch={}, width={}",
+                nv12.pitch, frame.width
+            )));
+        }
+        let expected = frame
+            .width
+            .checked_mul(frame.height)
+            .and_then(|luma| luma.checked_add(luma / 2))
+            .ok_or_else(|| BackendError::InvalidInput("nv12 size overflow".to_string()))?;
+        if nv12.data.len() != expected {
+            return Err(BackendError::InvalidInput(format!(
+                "tight NV12 payload size mismatch: expected {}, got {}",
+                expected,
+                nv12.data.len()
+            )));
+        }
         return Ok(nv12.clone());
     }
     let Some(argb) = frame.argb.as_deref() else {
@@ -534,6 +570,22 @@ fn frame_to_nv12(frame: &Frame) -> Result<Nv12FramePayload, BackendError> {
     };
     let (pitch, data) = crate::color::argb_to_nv12(argb, frame.width, frame.height)?;
     Ok(Nv12FramePayload { pitch, data })
+}
+
+#[cfg(target_os = "android")]
+fn validate_android_decode_access_unit(codec: Codec, data: &[u8]) -> Result<(), BackendError> {
+    if data.is_empty() || codec == Codec::Av1 {
+        return Ok(());
+    }
+    let access_units =
+        bitstream::split_access_units(codec, bitstream::AnnexBAccessUnitRef::new(data))?;
+    if access_units.len() > 1 {
+        return Err(BackendError::InvalidBitstream(format!(
+            "Android decoder expects one complete access unit per submit, got {}",
+            access_units.len()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]

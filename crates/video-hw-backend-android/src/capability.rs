@@ -22,23 +22,13 @@ pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> Capabilit
         contract: CapabilityContract {
             decode: DecodeCapability {
                 supported: decode_supported,
-                output_modes: vec![
-                    DecodeOutputCapability {
-                        mode: DecodeOutputMode::Metadata,
-                        origin: DecodeOutputOrigin::MetadataOnly,
-                    },
-                    DecodeOutputCapability {
-                        mode: DecodeOutputMode::Nv12,
-                        origin: DecodeOutputOrigin::Native,
-                    },
-                    DecodeOutputCapability {
-                        mode: DecodeOutputMode::Rgb24,
-                        origin: DecodeOutputOrigin::ConvertedFromNv12,
-                    },
-                ],
+                output_modes: vec![DecodeOutputCapability {
+                    mode: DecodeOutputMode::Metadata,
+                    origin: DecodeOutputOrigin::MetadataOnly,
+                }],
                 streaming_mode: StreamingMode::PushReap,
                 fallback_policy: FallbackPolicy::OsManaged,
-                requires_side_data: false,
+                requires_side_data: true,
                 dimension_constraints: DimensionConstraints {
                     min_width: 16,
                     min_height: 16,
@@ -78,7 +68,7 @@ fn runtime_capability(codec: Codec, encode: bool) -> RuntimeCapability {
         } else {
             RuntimeStatus::Unavailable
         },
-        hardware_acceleration: available,
+        hardware_acceleration: false,
         reason: (!available).then(|| format!("AMediaCodec could not create codec for {mime}")),
     }
 }
@@ -89,5 +79,27 @@ fn runtime_capability(_codec: Codec, _encode: bool) -> RuntimeCapability {
         status: RuntimeStatus::NotProbed,
         hardware_acceleration: false,
         reason: Some("Android MediaCodec runtime is only available on Android".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_decode_contract_advertises_metadata_only_with_side_data() {
+        let report = android_capability_report(Codec::H264, false);
+
+        assert!(report.supports_decode_output_mode(DecodeOutputMode::Metadata));
+        assert!(!report.supports_decode_output_mode(DecodeOutputMode::Nv12));
+        assert!(!report.supports_decode_output_mode(DecodeOutputMode::Rgb24));
+        assert!(report.contract.decode.requires_side_data);
+    }
+
+    #[test]
+    fn android_runtime_does_not_claim_guaranteed_hardware_acceleration() {
+        let report = android_capability_report(Codec::H264, true);
+
+        assert!(!report.runtime.hardware_acceleration);
     }
 }

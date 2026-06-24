@@ -42,6 +42,10 @@ Smoke result:
 
 ## Changes Made During Readiness Pass
 
+- After independent subagent review, narrowed the Android public contract to the
+  functionality that is currently validated: metadata decode with explicit
+  width/height side data, OS-managed MediaCodec selection without guaranteed
+  hardware acceleration, and tightly packed NV12 encode input.
 - Updated the NVIDIA integrated pipeline scheduler unit test to exercise the
   scheduler through explicit NVIDIA encoder options while preserving the safe
   pending-frame assertion.
@@ -57,6 +61,8 @@ Smoke result:
 - Android validation currently covers one connected Samsung device and its
   MediaCodec implementation. It does not cover vendor differences across Pixel,
   Qualcomm-only, MediaTek, Exynos variants, or older API levels.
+- Android pixel decode (`Nv12`/`Rgb24`) is intentionally not advertised yet
+  because output `color-format` handling needs broader device validation.
 - The smoke APK builds a debug native recorder. That is enough for functional
   encode/decode readiness; performance claims should use release builds and
   separate measurements.

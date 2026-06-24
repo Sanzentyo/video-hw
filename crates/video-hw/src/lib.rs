@@ -1502,10 +1502,7 @@ impl DecoderBackend for AndroidDecoderAdapter {
     }
 
     fn supports_output_mode(mode: DecodeOutputMode) -> bool {
-        matches!(
-            mode,
-            DecodeOutputMode::Metadata | DecodeOutputMode::Nv12 | DecodeOutputMode::Rgb24
-        )
+        matches!(mode, DecodeOutputMode::Metadata)
     }
 }
 
