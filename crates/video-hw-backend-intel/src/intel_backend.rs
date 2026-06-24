@@ -1802,9 +1802,9 @@ fn argb_to_i420(
     let mut u_plane = vec![128_u8; uv_size];
     let mut v_plane = vec![128_u8; uv_size];
     for idx in 0..uv_size {
-        if uv_count[idx] > 0 {
-            u_plane[idx] = (u_acc[idx] / uv_count[idx]) as u8;
-            v_plane[idx] = (v_acc[idx] / uv_count[idx]) as u8;
+        if let Some(count) = std::num::NonZeroU32::new(uv_count[idx]) {
+            u_plane[idx] = (u_acc[idx] / count.get()) as u8;
+            v_plane[idx] = (v_acc[idx] / count.get()) as u8;
         }
     }
 

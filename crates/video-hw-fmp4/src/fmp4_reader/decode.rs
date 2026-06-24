@@ -1941,7 +1941,6 @@ mod tests {
         process::{Command, Stdio},
         time::{SystemTime, UNIX_EPOCH},
     };
-    use video_hw::Dimensions;
 
     use super::*;
     use crate::fmp4_reader::{Fmp4ReaderConfig, MediaTime, TrackKind};
@@ -1960,7 +1959,7 @@ mod tests {
             any(target_os = "linux", target_os = "windows")
         )
     ))]
-    use video_hw::{Codec, DecoderConfig};
+    use video_hw::{Codec, DecoderConfig, Dimensions};
 
     #[test]
     fn av1_track_options_preserve_fmp4_av1c_record() {

@@ -1,6 +1,6 @@
 # video-hw Status
 
-更新日: 2026-05-16
+更新日: 2026-06-25
 
 ## 1. 現在の構成（実装実態）
 
@@ -8,6 +8,7 @@
   - `crates/video-hw-core`: 共通型・エラー・契約
   - `crates/video-hw`: facade + backend adapter 統合
 - backend は `video-hw` crate の feature + target で有効化
+  - `backend-android`: Android
   - `backend-vt`: macOS
   - `backend-nvidia`: Linux / Windows
   - `backend-intel`: Linux / Windows
@@ -71,6 +72,11 @@
 - `cargo test -p video-hw-backend-vt --features backend-vt -- --nocapture`: pass（26 passed, 2026-05-16）
 - `cargo test -p video-hw --features backend-vt e2e_vt -- --nocapture --test-threads=1`: pass（9 passed, 2026-05-16）
 - `cargo test -p video-hw --features backend-vt preflight_encode_rejects_vt_nv12_by_contract -- --nocapture`: pass（1 passed, 2026-05-16）
+- `cargo fmt --all -- --check`: pass（2026-06-25, Windows）
+- `cargo test --workspace --all-targets`: pass（2026-06-25, Windows）
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass（2026-06-25, Windows）
+- `cargo deny check licenses bans sources`: pass（2026-06-25, Windows; warnings remain for existing Sanzentyo onevpl fork metadata and duplicate transitive crates）
+- Android camera smoke APK: pass（2026-06-25, Samsung device over `192.168.0.244:42133`; `4080x3060@30fps`, Rust surface recorder, MP4 write PASS, decode PASS）
 
 注記:
 - `backend-vt` は target 条件上、非 macOS 環境では VT 本体テストは有効化されない
@@ -97,3 +103,4 @@
 - `docs/spec/TEST_SPEC_INVENTORY.md`
 - `docs/plan/ROADMAP.md`
 - `docs/plan/NEXT_ACTION_PLAN_2026-02-23.md`
+- `docs/status/ANDROID_BACKEND_MERGE_READINESS_2026-06-25.md`

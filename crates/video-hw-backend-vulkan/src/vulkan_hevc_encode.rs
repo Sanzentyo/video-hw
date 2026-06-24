@@ -1145,7 +1145,7 @@ fn run_hevc_encode_probe() -> HevcEncodePrerequisiteProbe {
             }
         }
 
-        candidates.sort_by(|lhs, rhs| rhs.0.cmp(&lhs.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
         let mut device_init_errors = Vec::new();
         for (_, physical_device, queue_family_index, extensions) in candidates {
             match try_initialize_hevc_encode_device(

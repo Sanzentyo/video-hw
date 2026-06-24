@@ -1863,6 +1863,7 @@ fn argb_to_nvenc_format(argb: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NvidiaEncoderOptions;
     use crate::backend_transform_adapter::NvidiaTransformAdapter;
     use crate::pipeline_scheduler::PipelineScheduler;
 
@@ -1949,11 +1950,22 @@ mod tests {
 
     #[test]
     fn push_frame_succeeds_with_integrated_pipeline_scheduler() {
-        let mut adapter =
-            NvEncoderAdapter::with_config(Codec::H264, 30, true, BackendEncoderOptions::Default);
-        let scheduler = PipelineScheduler::new(NvidiaTransformAdapter::new(1, 8), 8);
-        scheduler.set_generation(999);
-        adapter.pipeline_scheduler = Some(scheduler);
+        let mut adapter = NvEncoderAdapter::with_config(
+            Codec::H264,
+            30,
+            true,
+            BackendEncoderOptions::Nvidia(NvidiaEncoderOptions {
+                safe_lifetime_mode: Some(true),
+                enable_pipeline_scheduler: Some(true),
+                pipeline_queue_capacity: Some(8),
+                ..NvidiaEncoderOptions::default()
+            }),
+        );
+        adapter
+            .pipeline_scheduler
+            .as_ref()
+            .expect("pipeline scheduler should be enabled")
+            .set_generation(999);
 
         adapter
             .push_frame(Frame {
