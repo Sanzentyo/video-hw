@@ -6,12 +6,10 @@ use video_hw_core::{
 };
 
 #[must_use]
-pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> CapabilityReport {
-    let runtime = runtime_capability(codec, encode);
+pub(crate) fn android_capability_report(codec: Codec) -> CapabilityReport {
+    let decode_runtime = runtime_capability(codec, false);
+    let encode_runtime = runtime_capability(codec, true);
     let codec_supported = matches!(codec, Codec::H264 | Codec::Hevc | Codec::Av1);
-    let runtime_available = !matches!(runtime.status, RuntimeStatus::Unavailable);
-    let decode_supported = codec_supported && !encode && runtime_available;
-    let encode_supported = codec_supported && encode && runtime_available;
     let encoded_layouts = match codec {
         Codec::H264 | Codec::Hevc => vec![EncodedLayout::AnnexB],
         Codec::Av1 => vec![EncodedLayout::Av1],
@@ -21,14 +19,18 @@ pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> Capabilit
         codec,
         contract: CapabilityContract {
             decode: DecodeCapability {
-                supported: decode_supported,
-                output_modes: vec![DecodeOutputCapability {
-                    mode: DecodeOutputMode::Metadata,
-                    origin: DecodeOutputOrigin::MetadataOnly,
-                }],
+                supported: codec_supported,
+                output_modes: if codec_supported {
+                    vec![DecodeOutputCapability {
+                        mode: DecodeOutputMode::Metadata,
+                        origin: DecodeOutputOrigin::MetadataOnly,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 streaming_mode: StreamingMode::PushReap,
                 fallback_policy: FallbackPolicy::OsManaged,
-                requires_side_data: true,
+                requires_side_data: codec_supported,
                 dimension_constraints: DimensionConstraints {
                     min_width: 16,
                     min_height: 16,
@@ -37,9 +39,17 @@ pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> Capabilit
                 },
             },
             encode: EncodeCapability {
-                supported: encode_supported,
-                input_formats: vec![EncodeInputFormat::Nv12, EncodeInputFormat::Argb8888],
-                encoded_layouts,
+                supported: codec_supported,
+                input_formats: if codec_supported {
+                    vec![EncodeInputFormat::Nv12, EncodeInputFormat::Argb8888]
+                } else {
+                    Vec::new()
+                },
+                encoded_layouts: if codec_supported {
+                    encoded_layouts
+                } else {
+                    Vec::new()
+                },
                 streaming_mode: StreamingMode::PushReap,
                 fallback_policy: FallbackPolicy::OsManaged,
                 dimension_constraints: DimensionConstraints {
@@ -50,7 +60,8 @@ pub(crate) fn android_capability_report(codec: Codec, encode: bool) -> Capabilit
                 },
             },
         },
-        runtime,
+        decode_runtime,
+        encode_runtime,
     }
 }
 
@@ -88,7 +99,7 @@ mod tests {
 
     #[test]
     fn android_decode_contract_advertises_metadata_only_with_side_data() {
-        let report = android_capability_report(Codec::H264, false);
+        let report = android_capability_report(Codec::H264);
 
         assert!(report.supports_decode_output_mode(DecodeOutputMode::Metadata));
         assert!(!report.supports_decode_output_mode(DecodeOutputMode::Nv12));
@@ -98,8 +109,19 @@ mod tests {
 
     #[test]
     fn android_runtime_does_not_claim_guaranteed_hardware_acceleration() {
-        let report = android_capability_report(Codec::H264, true);
+        let report = android_capability_report(Codec::H264);
 
-        assert!(!report.runtime.hardware_acceleration);
+        assert!(!report.decode_runtime.hardware_acceleration);
+        assert!(!report.encode_runtime.hardware_acceleration);
+    }
+
+    #[test]
+    fn capability_report_describes_both_directions() {
+        let report = android_capability_report(Codec::H264);
+
+        assert!(!report.contract.encode.input_formats.is_empty());
+        assert!(!report.contract.encode.encoded_layouts.is_empty());
+        assert!(!report.contract.decode.output_modes.is_empty());
+        assert!(report.contract.decode.requires_side_data);
     }
 }

@@ -3,15 +3,20 @@ name = "video-hw-backend-nvidia"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["backend-nvidia"]
-backend-nvidia = ["video-hw-core/backend-nvidia"]
-backend-vt = []
+backend-nvidia = [
+  "dep:cudarc",
+  "dep:nvidia-video-codec-sdk",
+  "nvidia-video-codec-sdk/cuda",
+]
+backend-nvidia-d3d12 = ["dep:nvidia-video-codec-sdk", "nvidia-video-codec-sdk/d3d12"]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", default-features = false }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.19.2", default-features = false, features = ["driver", "nvrtc", "cuda-version-from-build-system"] }
-nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk", rev = "d2d0fec631365106d26adfe462f3ce15b043b879", version = "0.4.0", default-features = false }
+cudarc = { version = "=0.19.2", optional = true, default-features = false, features = ["driver", "nvrtc", "cuda-version-from-build-system"] }
+nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk.git", rev = "bfb321f2c8cae914334035931fbb74c1e4ee1a8c", version = "0.4.0", optional = true, default-features = false }

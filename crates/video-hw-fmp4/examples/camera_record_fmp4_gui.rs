@@ -17,8 +17,8 @@ use shiguredo_video_device::{
 use tokio::runtime::Builder;
 use video_hw::{Backend, Codec};
 use video_hw_fmp4::{
-    AsyncRecording, AsyncWriterEvent, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus,
-    Fmp4WriterSummary, FragmentFrames, FrameRate, FrameSize, Pts90k, Ready, RgbaFrame,
+    AsyncRecording, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary,
+    FragmentFrames, FrameRate, FrameSize, Pts90k, Ready, RgbaFrame,
 };
 
 #[derive(Debug, Parser)]
@@ -228,7 +228,12 @@ fn run_recorder_worker(
     command_rx: mpsc::Receiver<RecorderWorkerCommand>,
     event_tx: mpsc::Sender<RecorderWorkerEvent>,
 ) {
-    drain_writer_events(&mut writer, &event_tx);
+    if let Err(err) = report_writer_status(&runtime, &mut writer, &event_tx) {
+        let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+            "failed to read initial writer status: {err:#}"
+        )));
+        return;
+    }
     while let Ok(command) = command_rx.recv() {
         match command {
             RecorderWorkerCommand::SubmitFrame {
@@ -253,8 +258,10 @@ fn run_recorder_worker(
                     )));
                     break;
                 }
-                if let Some(message) = drain_writer_events(&mut writer, &event_tx) {
-                    let _ = event_tx.send(RecorderWorkerEvent::Error(message));
+                if let Err(err) = report_writer_status(&runtime, &mut writer, &event_tx) {
+                    let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+                        "failed to read writer status: {err:#}"
+                    )));
                     break;
                 }
             }
@@ -269,8 +276,10 @@ fn run_recorder_worker(
                     )));
                     break;
                 }
-                if let Some(message) = drain_writer_events(&mut writer, &event_tx) {
-                    let _ = event_tx.send(RecorderWorkerEvent::Error(message));
+                if let Err(err) = report_writer_status(&runtime, &mut writer, &event_tx) {
+                    let _ = event_tx.send(RecorderWorkerEvent::Error(format!(
+                        "failed to read writer status: {err:#}"
+                    )));
                     break;
                 }
             }
@@ -297,22 +306,15 @@ fn finalize_async_writer(
     Ok(finished.into_summary())
 }
 
-fn drain_writer_events(
+fn report_writer_status(
+    runtime: &tokio::runtime::Runtime,
     writer: &mut Fmp4Writer<AsyncRecording>,
     event_tx: &mpsc::Sender<RecorderWorkerEvent>,
-) -> Option<String> {
-    while let Some(event) = writer.try_recv_event() {
-        match event {
-            AsyncWriterEvent::FrameConsumed => {
-                let _ = event_tx.send(RecorderWorkerEvent::FrameConsumed);
-            }
-            AsyncWriterEvent::Status(status) => {
-                let _ = event_tx.send(RecorderWorkerEvent::Status(status));
-            }
-            AsyncWriterEvent::Error(message) => return Some(message),
-        }
-    }
-    None
+) -> Result<()> {
+    let status = runtime.block_on(writer.status())?;
+    event_tx
+        .send(RecorderWorkerEvent::Status(status))
+        .context("recorder UI event channel closed")
 }
 
 #[derive(Debug, Clone)]
@@ -829,7 +831,8 @@ impl Drop for CameraRecordApp {
 }
 
 impl eframe::App for CameraRecordApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
         ctx.request_repaint_after(Duration::from_millis(16));
         self.poll_capture_events();
         self.poll_recording_events();
@@ -856,10 +859,10 @@ impl eframe::App for CameraRecordApp {
             }
         }
 
-        egui::SidePanel::left("camera-controls")
+        egui::Panel::left("camera-controls")
             .resizable(true)
-            .default_width(360.0)
-            .show(ctx, |ui| {
+            .default_size(360.0)
+            .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     let toggle_label = if self.controls_collapsed {
                         ">> expand controls"
@@ -881,7 +884,7 @@ impl eframe::App for CameraRecordApp {
                 }
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root_ui, |ui| {
             ui.heading("Camera Preview");
             self.update_texture_if_needed(ui);
             if let Some(texture) = &self.texture {

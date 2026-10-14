@@ -1,6 +1,4 @@
-use std::marker::PhantomData;
-
-use crate::{Codec, EncodedLayout, Timestamp90k};
+use crate::{Codec, EncodedLayout};
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum BitstreamError {
@@ -10,41 +8,12 @@ pub enum BitstreamError {
     UnsupportedLayout { codec: Codec, layout: EncodedLayout },
     #[error("opaque encoded payload cannot be converted")]
     OpaquePayload,
-    #[error("access unit is empty")]
-    EmptyAccessUnit,
-    #[error("access unit exceeds configured byte limit: {actual} > {limit}")]
-    AccessUnitTooLarge { actual: usize, limit: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ValidationLevel {
-    Full,
-    #[default]
-    StructuralOnly,
-    TrustCaller,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CopyPolicy {
-    #[default]
-    BorrowWhenPossible,
-    AlwaysOwned,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BitstreamParseOptions {
-    pub validation: ValidationLevel,
-    pub copy_policy: CopyPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnexBAccessUnit(Vec<u8>);
 
 impl AnnexBAccessUnit {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data)
-    }
-
     pub fn as_ref(&self) -> AnnexBAccessUnitRef<'_> {
         AnnexBAccessUnitRef(&self.0)
     }
@@ -79,10 +48,6 @@ impl<'a> AnnexBAccessUnitRef<'a> {
 pub struct NalUnit(Vec<u8>);
 
 impl NalUnit {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(strip_start_code(&data).to_vec())
-    }
-
     pub fn as_ref(&self) -> NalUnitRef<'_> {
         NalUnitRef(&self.0)
     }
@@ -111,16 +76,28 @@ impl<'a> NalUnitRef<'a> {
     pub fn to_owned_nal(self) -> NalUnit {
         NalUnit(self.0.to_vec())
     }
+
+    /// Reports whether this VCL NAL starts a new coded picture.
+    ///
+    /// `None` means that the codec does not use NAL units, the NAL is not a
+    /// supported VCL type, or its slice header is truncated or malformed.
+    pub fn starts_new_picture(self, codec: Codec) -> Option<bool> {
+        match codec {
+            Codec::H264 if matches!(h264_nal_type(self.0), Some(1..=5)) => {
+                h264_first_mb_in_slice(self.0).map(|first_mb| first_mb == 0)
+            }
+            Codec::Hevc if matches!(hevc_nal_type(self.0), Some(0..=31)) => {
+                hevc_first_slice_segment_in_pic_flag(self.0)
+            }
+            Codec::H264 | Codec::Hevc | Codec::Av1 => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LengthPrefixedSample(Vec<u8>);
 
 impl LengthPrefixedSample {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data)
-    }
-
     pub fn as_ref(&self) -> LengthPrefixedSampleRef<'_> {
         LengthPrefixedSampleRef(&self.0)
     }
@@ -173,6 +150,15 @@ pub enum ParameterSets {
 }
 
 impl ParameterSets {
+    #[must_use]
+    pub const fn codec(&self) -> Codec {
+        match self {
+            Self::H264(_) => Codec::H264,
+            Self::Hevc(_) => Codec::Hevc,
+            Self::Av1(_) => Codec::Av1,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             Self::H264(sets) => sets.sps.is_empty() && sets.pps.is_empty(),
@@ -234,120 +220,18 @@ pub struct EncodedPayloadRef<'a> {
     pub codec: Codec,
     pub layout: EncodedLayout,
     pub data: &'a [u8],
-    pub is_keyframe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodePayload(Vec<u8>);
 
 impl DecodePayload {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data)
-    }
-
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     pub fn into_inner(self) -> Vec<u8> {
         self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AccessUnitAssemblerOptions {
-    pub preallocate_bytes: Option<usize>,
-    pub max_access_unit_bytes: Option<usize>,
-    pub copy_policy: CopyPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Idle;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Collecting;
-
-#[derive(Debug)]
-pub struct AccessUnitAssembler<State> {
-    codec: Codec,
-    options: AccessUnitAssemblerOptions,
-    pts_90k: Option<Timestamp90k>,
-    data: Vec<u8>,
-    _state: PhantomData<State>,
-}
-
-impl AccessUnitAssembler<Idle> {
-    pub fn new(codec: Codec, options: AccessUnitAssemblerOptions) -> Self {
-        Self {
-            codec,
-            options,
-            pts_90k: None,
-            data: Vec::with_capacity(options.preallocate_bytes.unwrap_or(0)),
-            _state: PhantomData,
-        }
-    }
-
-    pub fn push_chunk(
-        mut self,
-        chunk: NalUnitRef<'_>,
-        pts_90k: Option<Timestamp90k>,
-    ) -> AccessUnitAssembler<Collecting> {
-        append_annexb_nalu(&mut self.data, chunk.as_bytes());
-        AccessUnitAssembler {
-            codec: self.codec,
-            options: self.options,
-            pts_90k,
-            data: self.data,
-            _state: PhantomData,
-        }
-    }
-}
-
-impl AccessUnitAssembler<Collecting> {
-    pub fn push_chunk(&mut self, chunk: NalUnitRef<'_>) -> Result<(), BitstreamError> {
-        append_annexb_nalu(&mut self.data, chunk.as_bytes());
-        self.validate_size()
-    }
-
-    pub fn finish(self) -> Result<(AnnexBAccessUnit, AccessUnitAssembler<Idle>), BitstreamError> {
-        if self.data.is_empty() {
-            return Err(BitstreamError::EmptyAccessUnit);
-        }
-        self.validate_size()?;
-        let idle = AccessUnitAssembler {
-            codec: self.codec,
-            options: self.options,
-            pts_90k: None,
-            data: Vec::with_capacity(self.options.preallocate_bytes.unwrap_or(0)),
-            _state: PhantomData,
-        };
-        Ok((AnnexBAccessUnit(self.data), idle))
-    }
-
-    pub fn discard(self) -> AccessUnitAssembler<Idle> {
-        AccessUnitAssembler {
-            codec: self.codec,
-            options: self.options,
-            pts_90k: None,
-            data: Vec::with_capacity(self.options.preallocate_bytes.unwrap_or(0)),
-            _state: PhantomData,
-        }
-    }
-
-    pub fn pts_90k(&self) -> Option<Timestamp90k> {
-        self.pts_90k
-    }
-
-    fn validate_size(&self) -> Result<(), BitstreamError> {
-        if let Some(limit) = self.options.max_access_unit_bytes
-            && self.data.len() > limit
-        {
-            return Err(BitstreamError::AccessUnitTooLarge {
-                actual: self.data.len(),
-                limit,
-            });
-        }
-        Ok(())
     }
 }
 
@@ -377,13 +261,19 @@ pub fn split_annexb_nalus(
     let mut nalus = Vec::new();
     for (index, (start, prefix_len)) in starts.iter().copied().enumerate() {
         let payload_start = start + prefix_len;
-        let end = starts
+        let mut end = starts
             .get(index + 1)
             .map(|(next, _)| *next)
             .unwrap_or(bytes.len());
-        if payload_start < end {
-            nalus.push(NalUnitRef(&bytes[payload_start..end]));
+        while end > payload_start && bytes[end - 1] == 0 {
+            end -= 1;
         }
+        if payload_start >= end {
+            return Err(BitstreamError::Invalid(format!(
+                "Annex-B payload contains an empty NAL unit at byte {start}"
+            )));
+        }
+        nalus.push(NalUnitRef(&bytes[payload_start..end]));
     }
     Ok(nalus)
 }
@@ -407,6 +297,11 @@ pub fn length_prefixed_to_annexb(
 ) -> Result<AnnexBAccessUnit, BitstreamError> {
     let mut out = Vec::new();
     let mut payload = data.as_bytes();
+    if payload.is_empty() {
+        return Err(BitstreamError::Invalid(
+            "length-prefixed sample is empty".to_string(),
+        ));
+    }
     let len_size = nal_length_size.bytes();
     while payload.len() >= len_size {
         let nal_len = read_be_nal_length(&payload[..len_size]);
@@ -466,12 +361,18 @@ pub fn split_access_units(
 }
 
 pub fn extract_parameter_sets(
-    codec: Codec,
     payload: EncodedPayloadRef<'_>,
 ) -> Result<ParameterSets, BitstreamError> {
+    validate_layout(payload.codec, payload.layout)?;
+    if payload.codec == Codec::Av1 {
+        return Ok(ParameterSets::Av1(Av1ConfigObus {
+            config_obus: vec![payload.data.to_vec()],
+        }));
+    }
+
     let annexb = payload_to_annexb(payload, NalLengthSize::Four)?;
     let nalus = split_annexb_nalus(annexb.as_ref())?;
-    Ok(match codec {
+    Ok(match payload.codec {
         Codec::H264 => {
             let mut sets = H264ParameterSets::default();
             for nalu in nalus {
@@ -495,9 +396,7 @@ pub fn extract_parameter_sets(
             }
             ParameterSets::Hevc(sets)
         }
-        Codec::Av1 => ParameterSets::Av1(Av1ConfigObus {
-            config_obus: vec![payload.data.to_vec()],
-        }),
+        Codec::Av1 => unreachable!("AV1 is returned before Annex-B parsing"),
     })
 }
 
@@ -505,12 +404,16 @@ pub fn payload_to_annexb(
     payload: EncodedPayloadRef<'_>,
     nal_length_size: NalLengthSize,
 ) -> Result<AnnexBAccessUnit, BitstreamError> {
+    validate_layout(payload.codec, payload.layout)?;
     match payload.layout {
         EncodedLayout::AnnexB => Ok(AnnexBAccessUnit(payload.data.to_vec())),
         EncodedLayout::Avcc | EncodedLayout::Hvcc => {
             length_prefixed_to_annexb(LengthPrefixedSampleRef(payload.data), nal_length_size)
         }
-        EncodedLayout::Av1 => Ok(AnnexBAccessUnit(payload.data.to_vec())),
+        EncodedLayout::Av1 => Err(BitstreamError::UnsupportedLayout {
+            codec: payload.codec,
+            layout: payload.layout,
+        }),
         EncodedLayout::Opaque => Err(BitstreamError::OpaquePayload),
     }
 }
@@ -519,8 +422,12 @@ pub fn payload_to_nalus(
     payload: EncodedPayloadRef<'_>,
     nal_length_size: NalLengthSize,
 ) -> Result<Vec<NalUnit>, BitstreamError> {
+    validate_layout(payload.codec, payload.layout)?;
     match payload.layout {
-        EncodedLayout::Av1 => Ok(vec![NalUnit(payload.data.to_vec())]),
+        EncodedLayout::Av1 => Err(BitstreamError::UnsupportedLayout {
+            codec: payload.codec,
+            layout: payload.layout,
+        }),
         _ => Ok(
             split_annexb_nalus(payload_to_annexb(payload, nal_length_size)?.as_ref())?
                 .into_iter()
@@ -534,11 +441,29 @@ pub fn payload_to_decode_payload(
     payload: EncodedPayloadRef<'_>,
     nal_length_size: NalLengthSize,
 ) -> Result<DecodePayload, BitstreamError> {
+    validate_layout(payload.codec, payload.layout)?;
     match payload.layout {
         EncodedLayout::Av1 => Ok(DecodePayload(payload.data.to_vec())),
         _ => Ok(DecodePayload(
             payload_to_annexb(payload, nal_length_size)?.into_inner(),
         )),
+    }
+}
+
+fn validate_layout(codec: Codec, layout: EncodedLayout) -> Result<(), BitstreamError> {
+    if layout == EncodedLayout::Opaque {
+        return Err(BitstreamError::OpaquePayload);
+    }
+    let valid = matches!(
+        (codec, layout),
+        (Codec::H264, EncodedLayout::AnnexB | EncodedLayout::Avcc)
+            | (Codec::Hevc, EncodedLayout::AnnexB | EncodedLayout::Hvcc)
+            | (Codec::Av1, EncodedLayout::Av1)
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(BitstreamError::UnsupportedLayout { codec, layout })
     }
 }
 
@@ -708,16 +633,100 @@ mod tests {
     }
 
     #[test]
+    fn empty_length_prefixed_sample_is_rejected() {
+        let error =
+            length_prefixed_to_annexb(LengthPrefixedSampleRef::new(&[]), NalLengthSize::Four)
+                .unwrap_err();
+
+        assert_eq!(
+            error,
+            BitstreamError::Invalid("length-prefixed sample is empty".to_string())
+        );
+    }
+
+    #[test]
     fn opaque_payload_is_typed_error() {
         let payload = EncodedPayloadRef {
             codec: Codec::H264,
             layout: EncodedLayout::Opaque,
             data: &[1, 2, 3],
-            is_keyframe: false,
         };
         assert_eq!(
             payload_to_annexb(payload, NalLengthSize::Four),
             Err(BitstreamError::OpaquePayload)
+        );
+    }
+
+    #[test]
+    fn codec_and_layout_mismatch_is_rejected() {
+        let payload = EncodedPayloadRef {
+            codec: Codec::H264,
+            layout: EncodedLayout::Hvcc,
+            data: &[0, 0, 0, 1],
+        };
+
+        assert_eq!(
+            payload_to_decode_payload(payload, NalLengthSize::Four),
+            Err(BitstreamError::UnsupportedLayout {
+                codec: Codec::H264,
+                layout: EncodedLayout::Hvcc,
+            })
+        );
+    }
+
+    #[test]
+    fn av1_payload_is_not_mislabeled_as_annex_b_or_nal_units() {
+        let payload = EncodedPayloadRef {
+            codec: Codec::Av1,
+            layout: EncodedLayout::Av1,
+            data: &[0x12, 0x00],
+        };
+
+        assert!(matches!(
+            payload_to_annexb(payload, NalLengthSize::Four),
+            Err(BitstreamError::UnsupportedLayout { .. })
+        ));
+        assert!(matches!(
+            payload_to_nalus(payload, NalLengthSize::Four),
+            Err(BitstreamError::UnsupportedLayout { .. })
+        ));
+        assert_eq!(
+            payload_to_decode_payload(payload, NalLengthSize::Four)
+                .expect("AV1 decode payload remains supported")
+                .as_bytes(),
+            payload.data
+        );
+    }
+
+    #[test]
+    fn annexb_split_excludes_trailing_zero_bytes_between_nalus() {
+        let data =
+            AnnexBAccessUnitRef::new(&[0, 0, 0, 1, 0x65, 0x80, 0, 0, 0, 0, 1, 0x41, 0x80, 0, 0]);
+
+        let nalus = split_annexb_nalus(data).expect("valid Annex-B payload");
+
+        assert_eq!(
+            nalus
+                .into_iter()
+                .map(NalUnitRef::as_bytes)
+                .collect::<Vec<_>>(),
+            vec![&[0x65, 0x80][..], &[0x41, 0x80][..]]
+        );
+    }
+
+    #[test]
+    fn slice_headers_distinguish_first_and_following_h264_slices() {
+        assert_eq!(
+            NalUnitRef::new(&[0x65, 0x80]).starts_new_picture(Codec::H264),
+            Some(true)
+        );
+        assert_eq!(
+            NalUnitRef::new(&[0x41, 0x40]).starts_new_picture(Codec::H264),
+            Some(false)
+        );
+        assert_eq!(
+            NalUnitRef::new(&[0x41]).starts_new_picture(Codec::H264),
+            None
         );
     }
 }

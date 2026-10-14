@@ -3,10 +3,11 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::Result;
-use video_hw::{Backend, Codec, bitstream::ParameterSets};
+use video_hw::{Backend, Codec, Timestamp90k, bitstream::ParameterSets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Pts90k(u64);
 
 impl Pts90k {
@@ -17,48 +18,33 @@ impl Pts90k {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Converts this non-negative timestamp to the signed timestamp used by
+    /// `video-hw`, rejecting values that cannot be represented.
+    pub fn try_into_timestamp(
+        self,
+    ) -> std::result::Result<Timestamp90k, std::num::TryFromIntError> {
+        i64::try_from(self.0).map(Timestamp90k)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SampleDuration90k(u32);
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+pub struct SampleDuration90k(NonZeroU32);
 
 impl SampleDuration90k {
-    pub const fn new(value: u32) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CompositionOffset90k(i32);
-
-impl CompositionOffset90k {
-    pub const fn new(value: i32) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> i32 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TrackTimescale(NonZeroU32);
-
-impl TrackTimescale {
     pub const fn new(value: NonZeroU32) -> Self {
         Self(value)
     }
 
-    pub const fn get(self) -> NonZeroU32 {
-        self.0
+    pub const fn get(self) -> u32 {
+        self.0.get()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrameSize {
     width: NonZeroU32,
     height: NonZeroU32,
@@ -77,19 +63,16 @@ impl FrameSize {
         self.height
     }
 
-    pub fn pixel_count(self) -> usize {
-        (self.width.get() as usize).saturating_mul(self.height.get() as usize)
-    }
-
-    pub fn dims(self) -> Result<video_hw::Dimensions> {
-        Ok(video_hw::Dimensions {
-            width: self.width,
-            height: self.height,
-        })
+    pub fn checked_pixel_count(self) -> Option<usize> {
+        usize::try_from(self.width.get())
+            .ok()?
+            .checked_mul(usize::try_from(self.height.get()).ok()?)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct FrameRate(NonZeroU32);
 
 impl FrameRate {
@@ -103,6 +86,8 @@ impl FrameRate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct FragmentFrames(NonZeroUsize);
 
 impl FragmentFrames {
@@ -137,7 +122,8 @@ pub struct EncodedTrackConfig {
     pub initial_parameter_sets: Option<ParameterSets>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fmp4WriterStatus {
     pub output_path: PathBuf,
     pub segments_written: u64,
@@ -146,7 +132,8 @@ pub struct Fmp4WriterStatus {
     pub fragment_frames: FragmentFrames,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fmp4WriterSummary {
     pub output_path: PathBuf,
     pub segments_written: u64,

@@ -1,63 +1,5 @@
 use video_hw_core::BackendError;
 
-pub(crate) fn argb_to_nv12(
-    argb: &[u8],
-    width: usize,
-    height: usize,
-) -> Result<(usize, Vec<u8>), BackendError> {
-    let expected = width
-        .checked_mul(height)
-        .and_then(|px| px.checked_mul(4))
-        .ok_or_else(|| BackendError::InvalidInput("argb size overflow".to_string()))?;
-    if argb.len() != expected {
-        return Err(BackendError::InvalidInput(format!(
-            "argb payload size mismatch: expected {}, got {}",
-            expected,
-            argb.len()
-        )));
-    }
-    let pitch = width;
-    let y_size = pitch
-        .checked_mul(height)
-        .ok_or_else(|| BackendError::InvalidInput("nv12 luma size overflow".to_string()))?;
-    let mut out = vec![0_u8; y_size + y_size / 2];
-    for y in (0..height).step_by(2) {
-        let uv_row = y_size + (y / 2) * pitch;
-        for x in (0..width).step_by(2) {
-            let mut u_acc = 0_i32;
-            let mut v_acc = 0_i32;
-            let mut count = 0_i32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let px = x + dx;
-                    let py = y + dy;
-                    if px >= width || py >= height {
-                        continue;
-                    }
-                    let src = (py * width + px) * 4;
-                    let r = i32::from(argb[src + 1]);
-                    let g = i32::from(argb[src + 2]);
-                    let b = i32::from(argb[src + 3]);
-                    let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                    let uu = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                    let vv = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-                    out[py * pitch + px] = yy.clamp(0, 255) as u8;
-                    u_acc += uu;
-                    v_acc += vv;
-                    count += 1;
-                }
-            }
-            let dst = uv_row + x;
-            let denom = count.max(1);
-            out[dst] = (u_acc / denom).clamp(0, 255) as u8;
-            if dst + 1 < out.len() {
-                out[dst + 1] = (v_acc / denom).clamp(0, 255) as u8;
-            }
-        }
-    }
-    Ok((pitch, out))
-}
-
 pub(crate) fn copy_semiplanar_yuv420_to_nv12(
     src: &[u8],
     width: usize,
@@ -65,14 +7,40 @@ pub(crate) fn copy_semiplanar_yuv420_to_nv12(
     stride: usize,
     slice_height: usize,
 ) -> Result<Vec<u8>, BackendError> {
-    let pitch = stride.max(width);
+    validate_nv12_dimensions(width, height)?;
+    if stride < width {
+        return Err(BackendError::InvalidInput(format!(
+            "source stride is smaller than width: stride={stride}, width={width}"
+        )));
+    }
+    if slice_height < height {
+        return Err(BackendError::InvalidInput(format!(
+            "source slice height is smaller than height: slice_height={slice_height}, height={height}"
+        )));
+    }
+    let pitch = stride;
     let src_luma_size = pitch
-        .checked_mul(slice_height.max(height))
+        .checked_mul(slice_height)
         .ok_or_else(|| BackendError::InvalidInput("source luma size overflow".to_string()))?;
+    let src_chroma_size = pitch
+        .checked_mul(height / 2)
+        .ok_or_else(|| BackendError::InvalidInput("source chroma size overflow".to_string()))?;
+    let required_src_len = src_luma_size
+        .checked_add(src_chroma_size)
+        .ok_or_else(|| BackendError::InvalidInput("source nv12 size overflow".to_string()))?;
+    if src.len() < required_src_len {
+        return Err(BackendError::InvalidInput(format!(
+            "source nv12 payload is too short: expected at least {required_src_len}, got {}",
+            src.len()
+        )));
+    }
     let dst_luma_size = pitch
         .checked_mul(height)
         .ok_or_else(|| BackendError::InvalidInput("destination luma size overflow".to_string()))?;
-    let mut out = vec![0_u8; dst_luma_size + dst_luma_size / 2];
+    let dst_size = dst_luma_size
+        .checked_add(dst_luma_size / 2)
+        .ok_or_else(|| BackendError::InvalidInput("destination nv12 size overflow".to_string()))?;
+    let mut out = vec![0_u8; dst_size];
     for row in 0..height {
         let src_start = row * pitch;
         let dst_start = row * pitch;
@@ -84,4 +52,38 @@ pub(crate) fn copy_semiplanar_yuv420_to_nv12(
         out[dst_start..dst_start + width].copy_from_slice(&src[src_start..src_start + width]);
     }
     Ok(out)
+}
+
+fn validate_nv12_dimensions(width: usize, height: usize) -> Result<(), BackendError> {
+    if width == 0 || height == 0 {
+        return Err(BackendError::InvalidInput(
+            "nv12 dimensions must be positive".to_string(),
+        ));
+    }
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(format!(
+            "nv12 dimensions must be even, got {width}x{height}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semiplanar_copy_rejects_short_source_without_panicking() {
+        let error = copy_semiplanar_yuv420_to_nv12(&[0; 5], 2, 2, 2, 2)
+            .expect_err("short source must be rejected");
+        assert!(matches!(error, BackendError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn semiplanar_copy_preserves_stride_and_rows() {
+        let source = [1, 2, 9, 9, 3, 4];
+        let copied = copy_semiplanar_yuv420_to_nv12(&source, 2, 2, 2, 2)
+            .expect("valid tightly packed NV12 should copy");
+        assert_eq!(copied, source);
+    }
 }

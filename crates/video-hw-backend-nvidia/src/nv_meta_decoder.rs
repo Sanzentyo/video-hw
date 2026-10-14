@@ -19,20 +19,20 @@ use nvidia_video_codec_sdk::sys::nvcuvid::{
     cuvidParseVideoData,
 };
 
-use crate::{BackendError, DecodeOutputMode, Frame, Nv12FramePayload};
+use video_hw_core::{BackendError, DecodeOutputMode, Frame, Nv12FramePayload};
 
 const PIXEL_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 const MAX_DISPLAY_DELAY_FRAMES: u32 = 0;
 
 #[derive(Debug)]
-pub struct NvMetaDecoder {
+pub(crate) struct NvMetaDecoder {
     ctx: Arc<CudaContext>,
     parser: CUvideoparser,
     bridge: Box<MetaCallbackBridge>,
 }
 
 impl NvMetaDecoder {
-    pub fn new(
+    pub(crate) fn new(
         ctx: Arc<CudaContext>,
         codec: DecodeCodec,
         output_mode: DecodeOutputMode,
@@ -62,6 +62,8 @@ impl NvMetaDecoder {
 
         let mut parser = ptr::null_mut();
         check_nvdec(
+            // SAFETY: `parser_params` and its callback user-data point at initialized,
+            // stable storage in `bridge`, which is kept alive for the parser lifetime.
             unsafe { cuvidCreateVideoParser(&mut parser, &mut parser_params) },
             "cuvidCreateVideoParser",
         )?;
@@ -73,7 +75,7 @@ impl NvMetaDecoder {
         })
     }
 
-    pub fn push_access_unit(
+    pub(crate) fn push_access_unit(
         &mut self,
         access_unit: &[u8],
         timestamp_90k: i64,
@@ -98,6 +100,8 @@ impl NvMetaDecoder {
             timestamp: timestamp_90k as c_longlong,
         };
         check_nvdec(
+            // SAFETY: the parser is live and `packet.payload` borrows `access_unit`
+            // for this synchronous CUVID call only.
             unsafe { cuvidParseVideoData(self.parser, &mut packet) },
             "cuvidParseVideoData",
         )?;
@@ -106,7 +110,7 @@ impl NvMetaDecoder {
         self.drain_display_queue()
     }
 
-    pub fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
+    pub(crate) fn flush(&mut self) -> Result<Vec<Frame>, BackendError> {
         self.ctx.bind_to_thread().map_err(map_cuda_error)?;
         self.ensure_no_callback_error()?;
 
@@ -119,6 +123,7 @@ impl NvMetaDecoder {
             timestamp: 0,
         };
         check_nvdec(
+            // SAFETY: the parser is live and the EOS packet has no payload.
             unsafe { cuvidParseVideoData(self.parser, &mut packet) },
             "cuvidParseVideoData",
         )?;
@@ -127,7 +132,7 @@ impl NvMetaDecoder {
         self.drain_display_queue()
     }
 
-    pub fn try_drain(&mut self) -> Result<Vec<Frame>, BackendError> {
+    pub(crate) fn try_drain(&mut self) -> Result<Vec<Frame>, BackendError> {
         self.ctx.bind_to_thread().map_err(map_cuda_error)?;
         self.ensure_no_callback_error()?;
         self.drain_display_queue()
@@ -184,6 +189,7 @@ impl NvMetaDecoder {
                 transfer_function: None,
                 ycbcr_matrix: None,
                 argb: None,
+                rgb24: None,
                 nv12,
                 force_keyframe: false,
             });
@@ -208,6 +214,8 @@ impl NvMetaDecoder {
         let mut dev_ptr = 0_u64;
         let mut pitch = 0_u32;
         check_nvdec(
+            // SAFETY: decoder and picture index originate from successful CUVID
+            // callbacks; output pointers remain valid until the matching unmap.
             unsafe {
                 cuvidMapVideoFrame64(
                     decoder,
@@ -221,6 +229,8 @@ impl NvMetaDecoder {
         )?;
 
         let mapped = copy_mapped_nv12_to_host(dev_ptr, pitch as usize, layout);
+        // SAFETY: `dev_ptr` was returned by the successful map immediately above
+        // and is unmapped exactly once here.
         let unmap = check_nvdec(
             unsafe { cuvidUnmapVideoFrame64(decoder, dev_ptr) },
             "cuvidUnmapVideoFrame64",
@@ -235,8 +245,15 @@ impl NvMetaDecoder {
 
 impl Drop for NvMetaDecoder {
     fn drop(&mut self) {
-        let _ = self.ctx.bind_to_thread();
+        if self.ctx.bind_to_thread().is_err() {
+            // Calling CUVID destructors without the owning CUDA context current is
+            // unsafe. Leaking on this exceptional path is preferable to invoking
+            // the driver with an invalid context.
+            return;
+        }
         if !self.parser.is_null() {
+            // SAFETY: parser was created by CUVID, the owning context is current,
+            // and this is its only destruction path.
             let _ = unsafe { cuvidDestroyVideoParser(self.parser) };
             self.parser = ptr::null_mut();
         }
@@ -246,6 +263,8 @@ impl Drop for NvMetaDecoder {
             state.decoder.take()
         };
         if let Some(decoder) = decoder {
+            // SAFETY: decoder was created by CUVID, removed from state exactly once,
+            // and the owning context is current.
             let _ = unsafe { cuvidDestroyDecoder(decoder) };
         }
     }
@@ -307,6 +326,12 @@ impl MetaDecoderState {
         if format.coded_width == 0 || format.coded_height == 0 {
             return Err("decoder reported zero dimensions".to_string());
         }
+        if format.coded_width > i16::MAX as u32 || format.coded_height > i16::MAX as u32 {
+            return Err(format!(
+                "decoder dimensions exceed CUVID rectangle limits: {}x{}",
+                format.coded_width, format.coded_height
+            ));
+        }
 
         let num_surfaces = u32::from(format.min_num_decode_surfaces.max(1));
         let rect = resolve_target_rect(format);
@@ -325,6 +350,8 @@ impl MetaDecoderState {
                 ..Default::default()
             };
             check_nvdec(
+                // SAFETY: `decoder` is a live CUVID decoder owned by this state and
+                // `reconfigure` remains initialized for the synchronous call.
                 unsafe { cuvidReconfigureDecoder(decoder, &mut reconfigure) },
                 "cuvidReconfigureDecoder",
             )
@@ -354,6 +381,8 @@ impl MetaDecoderState {
             };
             let mut decoder = ptr::null_mut();
             check_nvdec(
+                // SAFETY: `create_info` is fully initialized and `decoder` is a valid
+                // out-pointer retained by this state after a successful call.
                 unsafe { cuvidCreateDecoder(&mut decoder, &mut create_info) },
                 "cuvidCreateDecoder",
             )
@@ -373,7 +402,8 @@ unsafe extern "C" fn sequence_callback(
     user_data: *mut c_void,
     format: *mut CUVIDEOFORMAT,
 ) -> c_int {
-    let Some(bridge) = bridge_from_user_data(user_data) else {
+    // SAFETY: CUVID calls this with the `pUserData` registered during parser creation.
+    let Some(bridge) = (unsafe { bridge_from_user_data(user_data) }) else {
         return 0;
     };
     if format.is_null() {
@@ -383,7 +413,10 @@ unsafe extern "C" fn sequence_callback(
     }
 
     let mut state = lock_state(&bridge.state);
-    let result = state.configure_decoder(bridge.codec, unsafe { &*format });
+    // SAFETY: null was rejected above and CUVID keeps the callback format alive
+    // for the duration of this synchronous callback.
+    let format = unsafe { &*format };
+    let result = state.configure_decoder(bridge.codec, format);
     match result {
         Ok(surfaces) => surfaces,
         Err(message) => {
@@ -397,7 +430,8 @@ unsafe extern "C" fn decode_callback(
     user_data: *mut c_void,
     pic_params: *mut CUVIDPICPARAMS,
 ) -> c_int {
-    let Some(bridge) = bridge_from_user_data(user_data) else {
+    // SAFETY: CUVID calls this with the `pUserData` registered during parser creation.
+    let Some(bridge) = (unsafe { bridge_from_user_data(user_data) }) else {
         return 0;
     };
     if pic_params.is_null() {
@@ -413,6 +447,8 @@ unsafe extern "C" fn decode_callback(
     };
 
     match check_nvdec(
+        // SAFETY: `decoder` is live and CUVID supplied a non-null `pic_params`
+        // pointer that remains valid for this synchronous callback.
         unsafe { cuvidDecodePicture(decoder, pic_params) },
         "cuvidDecodePicture",
     ) {
@@ -428,12 +464,19 @@ unsafe extern "C" fn display_callback(
     user_data: *mut c_void,
     display_info: *mut CUVIDPARSERDISPINFO,
 ) -> c_int {
-    let Some(bridge) = bridge_from_user_data(user_data) else {
+    // SAFETY: CUVID calls this with the `pUserData` registered during parser creation.
+    let Some(bridge) = (unsafe { bridge_from_user_data(user_data) }) else {
         return 0;
     };
     if display_info.is_null() {
+        // CUVID explicitly invokes the display callback with a null display-info
+        // pointer as the end-of-stream notification requested by
+        // `CUVID_PKT_NOTIFY_EOS`. This is a successful control notification, not
+        // malformed bitstream data.
         return 1;
     }
+    // SAFETY: null was rejected above and CUVID owns `display_info` for the
+    // duration of this synchronous callback.
     let info = unsafe { &*display_info };
     let mut state = lock_state(&bridge.state);
     state.display_queue.push_back(DisplayQueueEntry {
@@ -450,6 +493,12 @@ fn copy_mapped_nv12_to_host(
     pitch: usize,
     layout: OutputLayout,
 ) -> Result<Nv12FramePayload, BackendError> {
+    if !layout.visible_width.is_multiple_of(2) || !layout.visible_height.is_multiple_of(2) {
+        return Err(BackendError::InvalidInput(format!(
+            "NVDEC NV12 output requires even dimensions, got {}x{}",
+            layout.visible_width, layout.visible_height
+        )));
+    }
     if pitch == 0 || pitch < layout.visible_width as usize {
         return Err(BackendError::Backend(format!(
             "invalid mapped NV12 pitch: pitch={}, width={}",
@@ -464,6 +513,8 @@ fn copy_mapped_nv12_to_host(
         .checked_add(luma_size / 2)
         .ok_or_else(|| BackendError::Backend("mapped NV12 total size overflow".to_string()))?;
     let mut data = vec![0_u8; total_size];
+    // SAFETY: `dev_ptr` is a currently mapped CUVID frame and `data` is sized
+    // to the validated pitched NV12 allocation copied by this call.
     unsafe { driver_result::memcpy_dtoh_sync(data.as_mut_slice(), dev_ptr) }
         .map_err(map_cuda_error)?;
     Ok(Nv12FramePayload { pitch, data })
@@ -477,6 +528,8 @@ fn check_decoder_caps(codec: DecodeCodec) -> Result<(), BackendError> {
         ..Default::default()
     };
     check_nvdec(
+        // SAFETY: `caps` is initialized as the SDK requires and remains a valid
+        // in/out object for this synchronous capability query.
         unsafe { cuvidGetDecoderCaps(&mut caps) },
         "cuvidGetDecoderCaps",
     )?;
@@ -577,10 +630,17 @@ fn to_c_short(value: i32) -> i16 {
     value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
-fn bridge_from_user_data(user_data: *mut c_void) -> Option<&'static MetaCallbackBridge> {
+/// Recovers the callback bridge registered in `CUVIDPARSERPARAMS`.
+///
+/// # Safety
+///
+/// A non-null pointer must be the live `MetaCallbackBridge` supplied when the
+/// current parser was created.
+unsafe fn bridge_from_user_data(user_data: *mut c_void) -> Option<&'static MetaCallbackBridge> {
     if user_data.is_null() {
         None
     } else {
+        // SAFETY: guaranteed by this function's caller.
         Some(unsafe { &*user_data.cast::<MetaCallbackBridge>() })
     }
 }
@@ -589,5 +649,28 @@ fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_display_info_is_a_successful_eos_notification() {
+        let bridge = MetaCallbackBridge {
+            codec: DecodeCodec::H264,
+            output_mode: DecodeOutputMode::Metadata,
+            state: Mutex::new(MetaDecoderState::default()),
+        };
+        let user_data = ptr::from_ref(&bridge).cast_mut().cast::<c_void>();
+
+        // SAFETY: `user_data` points to the live bridge for the duration of the call.
+        let status = unsafe { display_callback(user_data, ptr::null_mut()) };
+
+        assert_eq!(status, 1);
+        let state = lock_state(&bridge.state);
+        assert!(state.sticky_error.is_none());
+        assert!(state.display_queue.is_empty());
     }
 }

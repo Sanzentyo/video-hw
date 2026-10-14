@@ -28,10 +28,6 @@ struct Args {
     nv_report_metrics: Option<bool>,
     #[arg(long)]
     vt_report_metrics: Option<bool>,
-    #[arg(long)]
-    vt_enable_pipeline_scheduler: Option<bool>,
-    #[arg(long)]
-    vt_pipeline_queue_capacity: Option<usize>,
     #[arg(long, default_value_t = false)]
     intel_force_software: bool,
 }
@@ -59,8 +55,6 @@ fn main() -> Result<()> {
     } else if backend_is_vt(resolved_backend) {
         BackendDecoderOptions::VideoToolbox(VtDecoderOptions {
             report_metrics: args.vt_report_metrics,
-            enable_pipeline_scheduler: args.vt_enable_pipeline_scheduler,
-            pipeline_queue_capacity: args.vt_pipeline_queue_capacity,
             ..Default::default()
         })
     } else if backend_is_intel(resolved_backend) {

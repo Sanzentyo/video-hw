@@ -7,12 +7,6 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow};
 
-#[derive(Debug, Clone)]
-pub enum AsyncReaderEvent {
-    Status(Fmp4ReaderStatus),
-    Error(String),
-}
-
 enum AsyncReaderCommand {
     Samples {
         track: TrackId,
@@ -70,81 +64,68 @@ enum AsyncReaderCommand {
     Finish {
         reply: tokio::sync::oneshot::Sender<Result<Fmp4ReaderStatus>>,
     },
+    Abort,
 }
 
 pub(crate) struct AsyncReaderHandle {
     command_tx: tokio::sync::mpsc::UnboundedSender<AsyncReaderCommand>,
-    event_rx: tokio::sync::mpsc::UnboundedReceiver<AsyncReaderEvent>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AsyncReaderHandle {
     pub(crate) fn spawn(config: Fmp4ReaderConfig) -> Result<(Self, Vec<Fmp4Track>)> {
         let core = ReaderCore::open(&config)?;
         let tracks = core.tracks().to_vec();
-        let initial_status = core.status();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::Builder::new()
+        let join_handle = std::thread::Builder::new()
             .name("video-hw-fmp4-reader-worker".to_string())
             .spawn(move || {
                 let mut core = core;
-                let _ = event_tx.send(AsyncReaderEvent::Status(initial_status));
                 while let Some(command) = command_rx.blocking_recv() {
                     match command {
                         AsyncReaderCommand::Samples { track, reply } => {
                             let result = core.samples(track).map(<[_]>::to_vec);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::SampleMeta { sample, reply } => {
-                            let result = Ok(core.sample_meta(sample).cloned());
+                            let result = core.sample_meta(sample).map(|sample| sample.cloned());
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::SampleAtPts { track, pts, reply } => {
-                            let result = Ok(core.sample_at_pts(track, pts));
+                            let result = core.sample_at_pts(track, pts);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::SampleAtPtsWithDelta { track, pts, reply } => {
-                            let result = Ok(core.sample_at_pts_with_delta(track, pts));
+                            let result = core.sample_at_pts_with_delta(track, pts);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::KeyframeBefore { sample, reply } => {
-                            let result = Ok(core.keyframe_before(sample));
+                            let result = core.keyframe_before(sample);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::GopForSample { sample, reply } => {
-                            let result = Ok(core.gop_for_sample(sample));
+                            let result = core.gop_for_sample(sample);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::ReadSample { sample, reply } => {
                             let result = core.read_sample(sample);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::ReadGop { sample, reply } => {
                             let result = core.read_gop(sample);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::ReadSegment { segment, reply } => {
                             let result = core.read_segment(segment);
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::NextSample { reply } => {
                             let result = core.next_sample();
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::IndexSnapshot { reply } => {
                             let result = core.index_snapshot();
                             let _ = reply.send(result);
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::Status { reply } => {
                             let _ = reply.send(Ok(core.status()));
@@ -155,12 +136,12 @@ impl AsyncReaderHandle {
                         AsyncReaderCommand::ClearCache { reply } => {
                             core.clear_cache();
                             let _ = reply.send(Ok(()));
-                            let _ = event_tx.send(AsyncReaderEvent::Status(core.status()));
                         }
                         AsyncReaderCommand::Finish { reply } => {
                             let _ = reply.send(Ok(core.status()));
                             return;
                         }
+                        AsyncReaderCommand::Abort => return,
                     }
                 }
             })
@@ -168,7 +149,7 @@ impl AsyncReaderHandle {
         Ok((
             Self {
                 command_tx,
-                event_rx,
+                join_handle: Some(join_handle),
             },
             tracks,
         ))
@@ -291,14 +272,19 @@ impl AsyncReaderHandle {
         .await
     }
 
-    pub(crate) async fn finish(self) -> Result<Fmp4ReaderStatus> {
+    pub(crate) async fn finish(mut self) -> Result<Fmp4ReaderStatus> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.command_tx
+        if self
+            .command_tx
             .send(AsyncReaderCommand::Finish { reply: reply_tx })
-            .map_err(|_| anyhow!("reader worker command channel closed"))?;
-        reply_rx
-            .await
-            .context("reader worker dropped finish reply")?
+            .is_err()
+        {
+            self.join_worker()?;
+            return Err(anyhow!("reader worker command channel closed"));
+        }
+        let result = reply_rx.await.context("reader worker dropped finish reply");
+        self.join_worker()?;
+        result?
     }
 
     async fn request<T>(
@@ -315,11 +301,27 @@ impl AsyncReaderHandle {
             .with_context(|| format!("reader worker dropped {label} reply"))?
     }
 
-    pub(crate) async fn recv_event(&mut self) -> Option<AsyncReaderEvent> {
-        self.event_rx.recv().await
+    fn join_worker(&mut self) -> Result<()> {
+        if let Some(handle) = self.join_handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow!("reader worker thread panicked"))?;
+        }
+        Ok(())
     }
+}
 
-    pub(crate) fn try_recv_event(&mut self) -> Option<AsyncReaderEvent> {
-        self.event_rx.try_recv().ok()
+impl Drop for AsyncReaderHandle {
+    fn drop(&mut self) {
+        if self.join_handle.is_some() {
+            let _ = self.command_tx.send(AsyncReaderCommand::Abort);
+        }
+        if self
+            .join_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            let _ = self.join_worker();
+        }
     }
 }

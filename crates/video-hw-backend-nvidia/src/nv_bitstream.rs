@@ -1,19 +1,15 @@
 use std::mem;
 
-use crate::{BackendError, Codec};
+use video_hw_core::{BackendError, Codec, bitstream::NalUnitRef};
 
 #[derive(Debug, Clone)]
-pub struct AccessUnit {
-    pub nalus: Vec<Vec<u8>>,
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    pub pts_90k: Option<i64>,
+pub(crate) struct AccessUnit {
+    pub(crate) nalus: Vec<Vec<u8>>,
+    pub(crate) pts_90k: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ParameterSetCache {
+pub(crate) struct ParameterSetCache {
     h264_sps: Option<Vec<u8>>,
     h264_pps: Option<Vec<u8>>,
     hevc_vps: Option<Vec<u8>>,
@@ -22,7 +18,7 @@ pub struct ParameterSetCache {
 }
 
 #[derive(Debug, Default)]
-pub struct StatefulBitstreamAssembler {
+pub(crate) struct StatefulBitstreamAssembler {
     codec: Option<Codec>,
     pending: Vec<u8>,
     saw_aud: bool,
@@ -38,14 +34,14 @@ impl StatefulBitstreamAssembler {
         Self::default()
     }
 
-    pub fn with_codec(codec: Codec) -> Self {
+    pub(crate) fn with_codec(codec: Codec) -> Self {
         Self {
             codec: Some(codec),
             ..Self::default()
         }
     }
 
-    pub fn push_chunk(
+    pub(crate) fn push_chunk(
         &mut self,
         chunk: &[u8],
         codec: Codec,
@@ -60,10 +56,6 @@ impl StatefulBitstreamAssembler {
                 return Ok((
                     vec![AccessUnit {
                         nalus: vec![chunk.to_vec()],
-                        #[cfg(all(
-                            feature = "backend-nvidia",
-                            any(target_os = "linux", target_os = "windows")
-                        ))]
                         pts_90k,
                     }],
                     self.parameter_sets.clone(),
@@ -81,13 +73,13 @@ impl StatefulBitstreamAssembler {
         let nalus = self.take_complete_nals(finalize_chunk);
         let mut access_units = self.process_nals(codec, nalus, pts_90k);
         if finalize_chunk && self.current_has_vcl && !self.current_nalus.is_empty() {
-            access_units.push(self.finish_current_access_unit(codec));
+            access_units.push(self.finish_current_access_unit());
         }
 
         Ok((access_units, self.parameter_sets.clone()))
     }
 
-    pub fn flush(&mut self) -> Result<(Vec<AccessUnit>, ParameterSetCache), BackendError> {
+    pub(crate) fn flush(&mut self) -> Result<(Vec<AccessUnit>, ParameterSetCache), BackendError> {
         let codec = self
             .codec
             .ok_or_else(|| BackendError::InvalidInput("codec is not set".to_string()))?;
@@ -100,7 +92,7 @@ impl StatefulBitstreamAssembler {
         let nalus = self.take_complete_nals(true);
         let mut access_units = self.process_nals(codec, nalus, None);
         if self.current_has_vcl && !self.current_nalus.is_empty() {
-            access_units.push(self.finish_current_access_unit(codec));
+            access_units.push(self.finish_current_access_unit());
         }
 
         Ok((access_units, self.parameter_sets.clone()))
@@ -160,7 +152,7 @@ impl StatefulBitstreamAssembler {
             if is_aud(codec, &nal) {
                 self.saw_aud = true;
                 if self.current_has_vcl && !self.current_nalus.is_empty() {
-                    out.push(self.finish_current_access_unit(codec));
+                    out.push(self.finish_current_access_unit());
                 } else {
                     self.current_nalus.clear();
                     self.clear_current_flags();
@@ -168,15 +160,18 @@ impl StatefulBitstreamAssembler {
                 continue;
             }
 
+            let nal_is_vcl = is_vcl(codec, &nal);
             if !self.saw_aud
-                && is_vcl(codec, &nal)
+                && nal_is_vcl
                 && self.current_has_vcl
                 && !self.current_nalus.is_empty()
+                && NalUnitRef::new(&nal)
+                    .starts_new_picture(codec)
+                    .unwrap_or(true)
             {
-                out.push(self.finish_current_access_unit(codec));
+                out.push(self.finish_current_access_unit());
             }
 
-            let nal_is_vcl = is_vcl(codec, &nal);
             if self.current_nalus.is_empty() {
                 self.current_pts_90k = pts_90k;
             }
@@ -189,12 +184,7 @@ impl StatefulBitstreamAssembler {
         out
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
-        let _ = codec;
+    fn finish_current_access_unit(&mut self) -> AccessUnit {
         let au = AccessUnit {
             nalus: mem::take(&mut self.current_nalus),
             pts_90k: self.current_pts_90k.take(),
@@ -203,48 +193,10 @@ impl StatefulBitstreamAssembler {
         au
     }
 
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
-    fn finish_current_access_unit(&mut self, codec: Codec) -> AccessUnit {
-        let _ = codec;
-        let au = AccessUnit {
-            nalus: mem::take(&mut self.current_nalus),
-        };
-        self.clear_current_flags();
-        au
-    }
-
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
     fn record_vcl(&mut self) {
         self.current_has_vcl = true;
     }
 
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
-    fn record_vcl(&mut self) {
-        self.current_has_vcl = true;
-    }
-
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
-    fn clear_current_flags(&mut self) {
-        self.current_has_vcl = false;
-        self.current_pts_90k = None;
-    }
-
-    #[cfg(not(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    )))]
     fn clear_current_flags(&mut self) {
         self.current_has_vcl = false;
         self.current_pts_90k = None;
@@ -275,8 +227,8 @@ impl StatefulBitstreamAssembler {
         let mut nalus = Vec::new();
         for window in start_codes.windows(2) {
             let (start, start_len) = window[0];
-            let end = window[1].0;
             let payload_start = start + start_len;
+            let end = annexb_nal_end(&self.pending, payload_start, window[1].0);
             if end > payload_start {
                 nalus.push(self.pending[payload_start..end].to_vec());
             }
@@ -285,8 +237,9 @@ impl StatefulBitstreamAssembler {
         if finalize {
             if let Some((start, start_len)) = start_codes.last().copied() {
                 let payload_start = start + start_len;
-                if self.pending.len() > payload_start {
-                    nalus.push(self.pending[payload_start..].to_vec());
+                let end = annexb_nal_end(&self.pending, payload_start, self.pending.len());
+                if end > payload_start {
+                    nalus.push(self.pending[payload_start..end].to_vec());
                 }
             }
             self.pending.clear();
@@ -297,6 +250,13 @@ impl StatefulBitstreamAssembler {
 
         nalus
     }
+}
+
+fn annexb_nal_end(data: &[u8], payload_start: usize, mut end: usize) -> usize {
+    while end > payload_start && data[end - 1] == 0 {
+        end -= 1;
+    }
+    end
 }
 
 #[cfg(test)]
@@ -321,10 +281,6 @@ struct Av1ParseResult<'a> {
 fn av1_access_unit(data: Vec<u8>, pts_90k: Option<i64>) -> AccessUnit {
     AccessUnit {
         nalus: vec![data],
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
         pts_90k,
     }
 }
@@ -397,7 +353,7 @@ fn read_leb128(data: &[u8]) -> Option<(u64, usize)> {
 }
 
 impl ParameterSetCache {
-    #[cfg(any(test, all(target_os = "macos", feature = "backend-vt")))]
+    #[cfg(test)]
     pub fn required_for_codec(&self, codec: Codec) -> Option<Vec<Vec<u8>>> {
         match codec {
             Codec::H264 => Some(vec![self.h264_sps.clone()?, self.h264_pps.clone()?]),
@@ -531,13 +487,7 @@ mod tests {
 
         assert_eq!(emitted.len(), 2);
         assert!(!emitted[0].nalus.is_empty());
-        #[cfg(all(
-            feature = "backend-nvidia",
-            any(target_os = "linux", target_os = "windows")
-        ))]
-        {
-            assert!(emitted[0].pts_90k.is_none());
-        }
+        assert!(emitted[0].pts_90k.is_none());
     }
 
     #[test]
@@ -570,10 +520,6 @@ mod tests {
         assert!(emitted[1].nalus[0].starts_with(&[(AV1_OBU_TEMPORAL_DELIMITER << 3) | 0x02]));
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
     #[test]
     fn av1_timestamped_chunk_stays_single_access_unit() {
         let data = av1_sample_obu_stream();
@@ -588,10 +534,6 @@ mod tests {
         assert_eq!(aus[0].pts_90k, Some(9_000));
     }
 
-    #[cfg(all(
-        feature = "backend-nvidia",
-        any(target_os = "linux", target_os = "windows")
-    ))]
     #[test]
     fn timestamped_chunks_emit_access_units_with_matching_pts() {
         let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::H264);
@@ -609,5 +551,35 @@ mod tests {
         assert_eq!(first_aus[0].pts_90k, Some(1_000));
         assert_eq!(second_aus.len(), 1);
         assert_eq!(second_aus[0].pts_90k, Some(2_000));
+    }
+
+    #[test]
+    fn following_slice_stays_in_the_same_h264_access_unit() {
+        let data = [
+            0, 0, 0, 1, 0x65, 0x80, // first_mb_in_slice = 0
+            0, 0, 0, 1, 0x41, 0x40, // first_mb_in_slice = 1
+            0, 0, 0, 1, 0x41, 0x80, // next picture, first_mb_in_slice = 0
+        ];
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::H264);
+
+        let (mut access_units, _) = assembler
+            .push_chunk(&data, Codec::H264, Some(1_000))
+            .expect("valid multi-slice chunk");
+        let (flushed, _) = assembler.flush().expect("flush multi-slice chunk");
+        access_units.extend(flushed);
+
+        assert_eq!(access_units.len(), 2);
+        assert_eq!(access_units[0].nalus.len(), 2);
+        assert_eq!(access_units[1].nalus.len(), 1);
+    }
+
+    #[test]
+    fn annexb_trailing_zero_bytes_are_not_part_of_nalus() {
+        let mut assembler = StatefulBitstreamAssembler::with_codec(Codec::H264);
+        assembler.pending = vec![0, 0, 0, 1, 0x65, 0x80, 0, 0, 0, 0, 1, 0x41, 0x80, 0, 0];
+
+        let nalus = assembler.take_complete_nals(true);
+
+        assert_eq!(nalus, vec![vec![0x65, 0x80], vec![0x41, 0x80]]);
     }
 }

@@ -3,7 +3,7 @@
 //! Supports:
 //! - AnnexB input (`.h264`, `.h265`): submitted as `BitstreamInput::AnnexBChunk`
 //! - MP4/fMP4 input (`--input-format mp4`): demuxed per-sample via `shiguredo_mp4`
-//!   and submitted as `BitstreamInput::LengthPrefixedSample` (exercises the AVCC/HVCC path)
+//!   and submitted with the sample entry's declared NAL length size (or as AV1 OBUs)
 //!
 //! Output modes:
 //! - `rgb24` – raw R8G8B8 bytes, one frame after another (no pitch padding)
@@ -22,7 +22,7 @@ use shiguredo_mp4::{TrackKind, boxes::SampleEntry};
 use video_hw::{
     AnyDecodeSession, Backend, BackendDecoderOptions, BackendKind, BitstreamInput, Codec,
     DecodeOutputMode, DecodedFrame, DecoderConfig, IntelDecoderOptions, NvidiaDecoderOptions,
-    VtDecoderOptions, VulkanDecoderOptions,
+    Timestamp90k, VtDecoderOptions, VulkanDecoderOptions, bitstream,
 };
 
 #[derive(Parser, Debug)]
@@ -181,7 +181,6 @@ fn decode_mp4(
         )?)
     };
     let mut stats = DecodeStats::default();
-    let mut pts_counter = 0i64;
     let mut current_sample_entry: Option<SampleEntry> = None;
 
     loop {
@@ -220,6 +219,7 @@ fn decode_mp4(
             let mut buf = current_sample_entry
                 .as_ref()
                 .map(codec_config_for_sample)
+                .transpose()?
                 .unwrap_or_default();
             buf.extend_from_slice(raw_sample);
             buf
@@ -227,8 +227,16 @@ fn decode_mp4(
             raw_sample.to_vec()
         };
 
-        let pts_90k = Some(video_hw::Timestamp90k(pts_counter * 3000));
-        pts_counter += 1;
+        let pts_90k = Some(sample_pts_90k(&sample)?);
+        let nal_length_size = if codec == Codec::Av1 {
+            None
+        } else {
+            Some(sample_nal_length_size(
+                current_sample_entry
+                    .as_ref()
+                    .context("H.264/HEVC sample is missing its sample entry")?,
+            )?)
+        };
         if decoder.is_none() {
             if let Some(entry) = current_sample_entry.as_ref()
                 && let Some(options) = vt_options_from_sample_entry(entry)
@@ -245,11 +253,19 @@ fn decode_mp4(
             .context("decoder should be initialized before sample submit")?;
 
         loop {
-            match decoder.submit(BitstreamInput::LengthPrefixedSample {
-                codec,
-                sample: sample_bytes.clone(),
-                pts_90k,
-            }) {
+            let input = match nal_length_size {
+                Some(nal_length_size) => BitstreamInput::LengthPrefixedSample {
+                    codec,
+                    sample: sample_bytes.clone(),
+                    nal_length_size,
+                    pts_90k,
+                },
+                None => BitstreamInput::Av1ObuSample {
+                    sample: sample_bytes.clone(),
+                    pts_90k,
+                },
+            };
+            match decoder.submit(input) {
                 Ok(()) => break,
                 Err(video_hw::BackendError::TemporaryBackpressure(_)) => {
                     drain_frames(decoder, &mut stats, output)?;
@@ -291,36 +307,47 @@ fn feed_demuxer(demuxer: &mut shiguredo_mp4::demux::Fmp4FileDemuxer, bytes: &[u8
 /// For H.264 (`avc1`): SPS then PPS from the AVCC box.  
 /// For H.265 (`hev1`/`hvc1`): every NAL array in the HVCC box.  
 /// For AV1 (`av01`): the `av1C` config OBUs as-is.
-/// The resulting bytes are suitable for prepending to a compressed sample before
-/// passing it to [`BitstreamInput::LengthPrefixedSample`].
-fn codec_config_for_sample(entry: &SampleEntry) -> Vec<u8> {
-    fn append_nalu(out: &mut Vec<u8>, nalu: &[u8]) {
-        let len = u32::try_from(nalu.len()).unwrap_or(u32::MAX);
-        out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(nalu);
+/// The resulting bytes are suitable for prepending to a compressed sample.
+fn codec_config_for_sample(entry: &SampleEntry) -> Result<Vec<u8>> {
+    fn append_nalu(
+        out: &mut Vec<u8>,
+        nalu: &[u8],
+        nal_length_size: bitstream::NalLengthSize,
+    ) -> Result<()> {
+        let mut annexb = Vec::with_capacity(nalu.len().saturating_add(4));
+        bitstream::append_annexb_nalu(&mut annexb, nalu);
+        let packed = bitstream::annexb_to_length_prefixed(
+            bitstream::AnnexBAccessUnitRef::new(&annexb),
+            nal_length_size,
+        )?;
+        out.extend_from_slice(packed.as_ref().as_bytes());
+        Ok(())
     }
 
     let mut out = Vec::new();
     match entry {
         SampleEntry::Avc1(avc1) => {
+            let nal_length_size = sample_nal_length_size(entry)?;
             for sps in &avc1.avcc_box.sps_list {
-                append_nalu(&mut out, sps);
+                append_nalu(&mut out, sps, nal_length_size)?;
             }
             for pps in &avc1.avcc_box.pps_list {
-                append_nalu(&mut out, pps);
+                append_nalu(&mut out, pps, nal_length_size)?;
             }
         }
         SampleEntry::Hev1(hev1) => {
+            let nal_length_size = sample_nal_length_size(entry)?;
             for arr in &hev1.hvcc_box.nalu_arrays {
                 for nalu in &arr.nalus {
-                    append_nalu(&mut out, nalu);
+                    append_nalu(&mut out, nalu, nal_length_size)?;
                 }
             }
         }
         SampleEntry::Hvc1(hvc1) => {
+            let nal_length_size = sample_nal_length_size(entry)?;
             for arr in &hvc1.hvcc_box.nalu_arrays {
                 for nalu in &arr.nalus {
-                    append_nalu(&mut out, nalu);
+                    append_nalu(&mut out, nalu, nal_length_size)?;
                 }
             }
         }
@@ -329,7 +356,35 @@ fn codec_config_for_sample(entry: &SampleEntry) -> Vec<u8> {
         }
         _ => {}
     }
-    out
+    Ok(out)
+}
+
+fn sample_nal_length_size(entry: &SampleEntry) -> Result<bitstream::NalLengthSize> {
+    let length_size_minus_one = match entry {
+        SampleEntry::Avc1(avc1) => avc1.avcc_box.length_size_minus_one.get(),
+        SampleEntry::Hev1(hev1) => hev1.hvcc_box.length_size_minus_one.get(),
+        SampleEntry::Hvc1(hvc1) => hvc1.hvcc_box.length_size_minus_one.get(),
+        _ => anyhow::bail!("sample entry does not describe H.264 or HEVC NAL lengths"),
+    };
+    match length_size_minus_one.saturating_add(1) {
+        1 => Ok(bitstream::NalLengthSize::One),
+        2 => Ok(bitstream::NalLengthSize::Two),
+        4 => Ok(bitstream::NalLengthSize::Four),
+        value => anyhow::bail!("unsupported MP4 NAL length size {value}"),
+    }
+}
+
+fn sample_pts_90k(sample: &shiguredo_mp4::demux::Sample<'_>) -> Result<Timestamp90k> {
+    let pts = i128::from(sample.timestamp)
+        .checked_add(i128::from(sample.composition_time_offset.unwrap_or(0)))
+        .context("sample PTS overflow")?;
+    let scaled = pts
+        .checked_mul(90_000)
+        .context("sample PTS rescale overflow")?
+        / i128::from(sample.track.timescale.get());
+    Ok(Timestamp90k(
+        i64::try_from(scaled).context("sample PTS exceeds i64")?,
+    ))
 }
 
 fn vt_options_from_sample_entry(entry: &SampleEntry) -> Option<VtDecoderOptions> {

@@ -1,33 +1,37 @@
 [package]
 name = "video-hw"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [features]
 default = []
 backend-android = [
-  "video-hw-core/backend-android",
   "dep:video-hw-backend-android",
   "video-hw-backend-android/backend-android",
 ]
+backend-android-imagereader = [
+  "dep:video-hw-backend-android",
+  "video-hw-backend-android/backend-android-imagereader",
+]
 backend-vt = [
-  "video-hw-core/backend-vt",
   "dep:video-hw-backend-vt",
   "video-hw-backend-vt/backend-vt",
 ]
 backend-nvidia = [
-  "video-hw-core/backend-nvidia",
   "dep:video-hw-backend-nvidia",
   "video-hw-backend-nvidia/backend-nvidia",
 ]
+backend-nvidia-d3d12 = [
+  "dep:video-hw-backend-nvidia",
+  "video-hw-backend-nvidia/backend-nvidia-d3d12",
+]
 backend-intel = [
-  "video-hw-core/backend-intel",
   "dep:video-hw-backend-intel",
   "video-hw-backend-intel/backend-intel",
 ]
 backend-vulkan = [
-  "video-hw-core/backend-vulkan",
   "dep:video-hw-backend-vulkan",
   "video-hw-backend-vulkan/backend-vulkan",
 ]
@@ -39,18 +43,15 @@ video-hw-backend-nvidia = { path = "../video-hw-backend-nvidia", optional = true
 video-hw-backend-intel = { path = "../video-hw-backend-intel", optional = true, default-features = false }
 video-hw-backend-vulkan = { path = "../video-hw-backend-vulkan", optional = true, default-features = false }
 video-hw-backend-vt = { path = "../video-hw-backend-vt", optional = true, default-features = false }
-thiserror = "2.0.18"
-anyhow = "1.0.101"
-clap = { version = "4.5.59", features = ["derive"] }
 
 [dev-dependencies]
+anyhow = "1.0.101"
+clap = { version = "4.5.59", features = ["derive"] }
 rstest = "0.26.1"
 criterion = "0.8.2"
-shiguredo_video_device = "2026.1.0-canary.3"
-shiguredo_mp4 = "2026.2.0"
-eframe = "0.33.3"
-
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+shiguredo_video_device = "2026.1.0"
+shiguredo_mp4 = "2026.3.0"
+eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11"] }
 
 [[bench]]
 name = "decode_bench"

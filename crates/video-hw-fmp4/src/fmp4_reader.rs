@@ -4,6 +4,7 @@ mod decode;
 #[cfg(feature = "async-session")]
 mod session_async;
 mod state;
+mod timeline;
 
 pub use config::{
     EncodedSample, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track, Fmp4TrackDescription, GopSegment,
@@ -18,12 +19,11 @@ pub use decode::{
     FrameDecodeRangeResult, FrameDecodeRequest, FrameDecodeResult, FrameDecodeWindowRequest,
     FrameDecoder, GopCursor, ReturnedFrameOrder,
 };
-#[cfg(feature = "async-session")]
-pub use session_async::AsyncReaderEvent;
 pub use shiguredo_mp4::TrackKind;
 #[cfg(feature = "async-session")]
 pub use state::AsyncReading;
 pub use state::{Finished, ReaderReady, SyncReading};
+pub use timeline::PresentationTimeline;
 
 use anyhow::Result;
 use std::marker::PhantomData;
@@ -81,7 +81,11 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.samples(track)
     }
 
-    pub fn sample_meta(&mut self, sample: SampleId) -> Option<&SampleMeta> {
+    /// Looks up sample metadata, indexing lazily as needed.
+    ///
+    /// Returns `Ok(None)` for an unknown sample id and propagates I/O or demux
+    /// failures instead of treating them as a missing sample.
+    pub fn sample_meta(&mut self, sample: SampleId) -> Result<Option<&SampleMeta>> {
         self.state.core.sample_meta(sample)
     }
 
@@ -89,23 +93,29 @@ impl Fmp4Reader<SyncReading> {
         self.state.core.iter_samples(track)
     }
 
-    pub fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Option<SampleId> {
+    /// Finds the sample at or immediately before a presentation timestamp.
+    ///
+    /// `pts` is rescaled to the track timescale before lookup.
+    pub fn sample_at_pts(&mut self, track: TrackId, pts: MediaTime) -> Result<Option<SampleId>> {
         self.state.core.sample_at_pts(track, pts)
     }
 
+    /// Performs a presentation timestamp lookup and reports the signed delta.
     pub fn sample_at_pts_with_delta(
         &mut self,
         track: TrackId,
         pts: MediaTime,
-    ) -> Option<SampleLookup> {
+    ) -> Result<Option<SampleLookup>> {
         self.state.core.sample_at_pts_with_delta(track, pts)
     }
 
-    pub fn keyframe_before(&mut self, sample: SampleId) -> Option<SampleId> {
+    /// Finds the decode-order keyframe at or before `sample`.
+    pub fn keyframe_before(&mut self, sample: SampleId) -> Result<Option<SampleId>> {
         self.state.core.keyframe_before(sample)
     }
 
-    pub fn gop_for_sample(&mut self, sample: SampleId) -> Option<GopSegment> {
+    /// Builds the decode segment from the preceding keyframe through `sample`.
+    pub fn gop_for_sample(&mut self, sample: SampleId) -> Result<Option<GopSegment>> {
         self.state.core.gop_for_sample(sample)
     }
 
@@ -228,14 +238,6 @@ impl Fmp4Reader<AsyncReading> {
 
     pub async fn clear_cache(&mut self) -> Result<()> {
         self.state.handle.clear_cache().await
-    }
-
-    pub async fn recv_event(&mut self) -> Option<AsyncReaderEvent> {
-        self.state.handle.recv_event().await
-    }
-
-    pub fn try_recv_event(&mut self) -> Option<AsyncReaderEvent> {
-        self.state.handle.try_recv_event()
     }
 
     pub async fn finish(self) -> Result<Fmp4Reader<Finished>> {

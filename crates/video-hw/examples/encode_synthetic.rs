@@ -43,17 +43,7 @@ struct Args {
     #[arg(long)]
     nv_report_metrics: Option<bool>,
     #[arg(long)]
-    nv_safe_lifetime_mode: Option<bool>,
-    #[arg(long)]
-    nv_enable_pipeline_scheduler: Option<bool>,
-    #[arg(long)]
-    nv_pipeline_queue_capacity: Option<usize>,
-    #[arg(long)]
     vt_report_metrics: Option<bool>,
-    #[arg(long)]
-    vt_enable_pipeline_scheduler: Option<bool>,
-    #[arg(long)]
-    vt_pipeline_queue_capacity: Option<usize>,
     #[arg(long, default_value_t = false)]
     intel_force_software: bool,
     #[arg(long)]
@@ -82,15 +72,10 @@ fn main() -> Result<()> {
         options.gop_length = args.nv_gop_length;
         options.frame_interval_p = args.nv_frame_interval_p;
         options.report_metrics = args.nv_report_metrics;
-        options.safe_lifetime_mode = args.nv_safe_lifetime_mode;
-        options.enable_pipeline_scheduler = args.nv_enable_pipeline_scheduler;
-        options.pipeline_queue_capacity = args.nv_pipeline_queue_capacity;
         config.backend_options = BackendEncoderOptions::Nvidia(options);
     } else if backend_is_vt(resolved_backend) {
         config.backend_options = BackendEncoderOptions::VideoToolbox(VtEncoderOptions {
             report_metrics: args.vt_report_metrics,
-            enable_pipeline_scheduler: args.vt_enable_pipeline_scheduler,
-            pipeline_queue_capacity: args.vt_pipeline_queue_capacity,
         });
     } else if backend_is_intel(resolved_backend) {
         config.backend_options = BackendEncoderOptions::Intel(IntelEncoderOptions {

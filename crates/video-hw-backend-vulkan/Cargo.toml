@@ -6,13 +6,21 @@ license.workspace = true
 
 [features]
 default = ["backend-vulkan"]
-backend-vulkan = ["video-hw-core/backend-vulkan"]
+backend-vulkan = [
+  "dep:ash",
+  "dep:oxideav-av1",
+  "dep:scuffle-h265",
+  "dep:video-hw-core",
+  "dep:vk-video",
+]
 
 [dependencies]
-video-hw-core = { path = "../video-hw-core", default-features = false }
+video-hw-core = { path = "../video-hw-core", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-vk-video = { version = "0.2.1" }
-ash = { version = "0.38.0" }
-scuffle-h265 = { version = "0.2.2" }
-oxideav-av1 = "0.1.5"
+vk-video = { version = "0.2.1", optional = true }
+ash = { version = "0.38.0", optional = true }
+scuffle-h265 = { version = "0.2.2", optional = true }
+# Newer oxideav-av1 0.1.x releases removed parser APIs while remaining
+# semver-compatible with 0.1.5. Keep this exact contract until replacement.
+oxideav-av1 = { version = "=0.1.5", optional = true }

@@ -3,13 +3,16 @@ name = "video-hw-backend-android"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["backend-android"]
-backend-android = ["video-hw-core/backend-android"]
+backend-android = ["dep:jni", "dep:video-hw-core"]
+backend-android-imagereader = ["dep:thiserror"]
 
 [dependencies]
-video-hw-core = { path = "../video-hw-core", default-features = false }
+video-hw-core = { path = "../video-hw-core", optional = true }
+thiserror = { version = "2.0", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21.1"
+jni = { version = "0.21.1", optional = true }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use video_hw_fmp4::{Fmp4Reader, Fmp4ReaderConfig, SampleId, TrackKind};
 
@@ -13,8 +13,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(cli.input));
-    let mut reader = reader.into_sync_session()?;
+    let input = cli.input;
+    let reader = Fmp4Reader::new(Fmp4ReaderConfig::new(input.clone()));
+    let mut reader = reader
+        .into_sync_session()
+        .with_context(|| format!("failed to open {}", input.display()))?;
     println!("tracks={}", reader.tracks().len());
     let tracks = reader.tracks().to_vec();
     for track in &tracks {
@@ -56,7 +59,13 @@ fn main() -> Result<()> {
         });
 
     if let Some(sample_id) = sample_id {
-        let sample = reader.read_sample(sample_id)?;
+        let sample = reader
+            .read_sample(sample_id)
+            .with_context(|| format!("failed to read sample {sample_id}"))?;
+        let annexb = match sample.to_annexb() {
+            Ok(payload) => format!("{} bytes", payload.len()),
+            Err(error) => format!("unavailable ({error:#})"),
+        };
         println!(
             "read sample={} track={} dts={} pts={} dur={} keyframe={} bytes={} annexb={}",
             sample.meta.sample_id,
@@ -66,7 +75,7 @@ fn main() -> Result<()> {
             sample.meta.duration,
             sample.meta.keyframe,
             sample.data.len(),
-            sample.to_annexb().map(|annexb| annexb.len()).unwrap_or(0)
+            annexb
         );
     }
     let finished = reader.finish();

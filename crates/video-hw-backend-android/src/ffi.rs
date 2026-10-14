@@ -34,6 +34,9 @@ pub(crate) mod codec {
         pub(crate) flags: u32,
     }
 
+    // SAFETY CONTRACT: these declarations mirror the Android NDK MediaCodec/MediaFormat ABI.
+    // Safe wrappers below own each non-null codec/format pointer exactly once, keep C strings
+    // alive for each call, and tie borrowed buffers to an exclusive codec borrow.
     #[link(name = "mediandk")]
     unsafe extern "C" {
         fn AMediaCodec_createDecoderByType(mime_type: *const c_char) -> *mut AMediaCodec;
@@ -109,18 +112,21 @@ pub(crate) mod codec {
     impl MediaCodec {
         pub(crate) fn decoder_by_type(mime: &str) -> Result<Self, BackendError> {
             let mime = nul_terminated(mime)?;
+            // SAFETY: `mime` is NUL-terminated and remains alive for the duration of the call.
             let ptr = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr().cast()) };
             Self::from_raw(ptr, "AMediaCodec_createDecoderByType")
         }
 
         pub(crate) fn encoder_by_type(mime: &str) -> Result<Self, BackendError> {
             let mime = nul_terminated(mime)?;
+            // SAFETY: `mime` is NUL-terminated and remains alive for the duration of the call.
             let ptr = unsafe { AMediaCodec_createEncoderByType(mime.as_ptr().cast()) };
             Self::from_raw(ptr, "AMediaCodec_createEncoderByType")
         }
 
         pub(crate) fn codec_by_name(name: &str) -> Result<Self, BackendError> {
             let name = nul_terminated(name)?;
+            // SAFETY: `name` is NUL-terminated and remains alive for the duration of the call.
             let ptr = unsafe { AMediaCodec_createCodecByName(name.as_ptr().cast()) };
             Self::from_raw(ptr, "AMediaCodec_createCodecByName")
         }
@@ -138,6 +144,8 @@ pub(crate) mod codec {
         ) -> Result<(), BackendError> {
             let flags = if encode { CONFIGURE_FLAG_ENCODE } else { 0 };
             status_to_result(
+                // SAFETY: both pointers are owned live objects; null surface and crypto are the
+                // documented byte-buffer configuration, and `flags` uses the NDK bit value.
                 unsafe {
                     AMediaCodec_configure(
                         self.ptr.as_ptr(),
@@ -153,28 +161,36 @@ pub(crate) mod codec {
 
         pub(crate) fn start(&mut self) -> Result<(), BackendError> {
             status_to_result(
+                // SAFETY: `self.ptr` remains a live, uniquely owned MediaCodec handle.
                 unsafe { AMediaCodec_start(self.ptr.as_ptr()) },
                 "AMediaCodec_start",
             )
         }
 
         pub(crate) fn stop(&mut self) {
+            // SAFETY: `self.ptr` is live. Stop is permitted to report an invalid state during
+            // best-effort Drop cleanup, which is intentionally ignored here.
             let _ = unsafe { AMediaCodec_stop(self.ptr.as_ptr()) };
         }
 
         pub(crate) fn dequeue_input(&mut self, timeout_us: i64) -> Option<usize> {
+            // SAFETY: `self.ptr` is a live MediaCodec and the call writes no Rust-owned memory.
             let index = unsafe { AMediaCodec_dequeueInputBuffer(self.ptr.as_ptr(), timeout_us) };
             (index >= 0).then_some(index as usize)
         }
 
         pub(crate) fn input_buffer(&mut self, index: usize) -> Result<&mut [u8], BackendError> {
             let mut size = 0_usize;
+            // SAFETY: `index` came from MediaCodec dequeue; `size` is valid writable storage.
             let ptr = unsafe { AMediaCodec_getInputBuffer(self.ptr.as_ptr(), index, &mut size) };
             if ptr.is_null() {
                 return Err(BackendError::Backend(
                     "AMediaCodec_getInputBuffer returned null".to_string(),
                 ));
             }
+            // SAFETY: MediaCodec returned a non-null buffer pointer and its exact capacity. The
+            // slice is tied to `&mut self`, so safe callers cannot queue the buffer or otherwise
+            // mutably access the codec while the slice remains borrowed.
             Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
         }
 
@@ -186,6 +202,8 @@ pub(crate) mod codec {
             flags: u32,
         ) -> Result<(), BackendError> {
             status_to_result(
+                // SAFETY: the codec and dequeued index are live. Callers bound `size` to the
+                // capacity returned by `input_buffer`, or pass zero when returning the index.
                 unsafe {
                     AMediaCodec_queueInputBuffer(self.ptr.as_ptr(), index, 0, size, pts_us, flags)
                 },
@@ -203,6 +221,7 @@ pub(crate) mod codec {
                 presentation_time_us: 0,
                 flags: 0,
             };
+            // SAFETY: `info` is initialized writable storage and `self.ptr` is live.
             let index = unsafe {
                 AMediaCodec_dequeueOutputBuffer(self.ptr.as_ptr(), &mut info, timeout_us)
             };
@@ -221,20 +240,29 @@ pub(crate) mod codec {
 
         pub(crate) fn output_buffer(&mut self, index: usize) -> Result<&[u8], BackendError> {
             let mut size = 0_usize;
+            // SAFETY: `index` came from a successful output dequeue and `size` is writable.
             let ptr = unsafe { AMediaCodec_getOutputBuffer(self.ptr.as_ptr(), index, &mut size) };
             if ptr.is_null() {
                 return Err(BackendError::Backend(
                     "AMediaCodec_getOutputBuffer returned null".to_string(),
                 ));
             }
+            // SAFETY: MediaCodec returned a non-null buffer pointer and its exact capacity. The
+            // borrow prevents releasing or dequeuing through this wrapper until the slice is no
+            // longer used.
             Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
         }
 
-        pub(crate) fn release_output(&mut self, index: usize) {
-            let _ = unsafe { AMediaCodec_releaseOutputBuffer(self.ptr.as_ptr(), index, false) };
+        pub(crate) fn release_output(&mut self, index: usize) -> Result<(), BackendError> {
+            status_to_result(
+                // SAFETY: `index` identifies an outstanding output buffer from this codec.
+                unsafe { AMediaCodec_releaseOutputBuffer(self.ptr.as_ptr(), index, false) },
+                "AMediaCodec_releaseOutputBuffer",
+            )
         }
 
         pub(crate) fn output_format(&mut self) -> Option<MediaFormat> {
+            // SAFETY: `self.ptr` is live; the NDK returns a newly owned format or null.
             let ptr = unsafe { AMediaCodec_getOutputFormat(self.ptr.as_ptr()) };
             NonNull::new(ptr).map(|ptr| MediaFormat { ptr })
         }
@@ -243,6 +271,7 @@ pub(crate) mod codec {
     impl Drop for MediaCodec {
         fn drop(&mut self) {
             self.stop();
+            // SAFETY: this wrapper uniquely owns the non-null codec handle and deletes it once.
             let _ = unsafe { AMediaCodec_delete(self.ptr.as_ptr()) };
         }
     }
@@ -262,6 +291,7 @@ pub(crate) mod codec {
             i_frame_interval_sec: Option<i32>,
             color_format: bool,
         ) -> Result<Self, BackendError> {
+            // SAFETY: no arguments are required; a non-null return is uniquely owned below.
             let ptr = unsafe { AMediaFormat_new() };
             let mut format = NonNull::new(ptr).map(|ptr| Self { ptr }).ok_or_else(|| {
                 BackendError::Backend("AMediaFormat_new returned null".to_string())
@@ -285,6 +315,7 @@ pub(crate) mod codec {
         pub(crate) fn set_string(&mut self, key: &str, value: &str) -> Result<(), BackendError> {
             let key = nul_terminated(key)?;
             let value = nul_terminated(value)?;
+            // SAFETY: format is live and both NUL-terminated strings remain alive for the call.
             unsafe {
                 AMediaFormat_setString(
                     self.ptr.as_ptr(),
@@ -297,6 +328,7 @@ pub(crate) mod codec {
 
         pub(crate) fn set_i32(&mut self, key: &str, value: i32) {
             if let Ok(key) = nul_terminated(key) {
+                // SAFETY: format is live and `key` is NUL-terminated for the duration of the call.
                 unsafe { AMediaFormat_setInt32(self.ptr.as_ptr(), key.as_ptr().cast(), value) };
             }
         }
@@ -304,6 +336,7 @@ pub(crate) mod codec {
         pub(crate) fn get_i32(&mut self, key: &str) -> Option<i32> {
             let key = nul_terminated(key).ok()?;
             let mut out = 0_i32;
+            // SAFETY: format is live, `key` is NUL-terminated, and `out` is writable.
             unsafe { AMediaFormat_getInt32(self.ptr.as_ptr(), key.as_ptr().cast(), &mut out) }
                 .then_some(out)
         }
@@ -312,18 +345,23 @@ pub(crate) mod codec {
             let key = nul_terminated(key).ok()?;
             let mut data = std::ptr::null_mut::<c_void>();
             let mut size = 0_usize;
+            // SAFETY: format is live; both out-parameters point to initialized writable storage.
             let ok = unsafe {
                 AMediaFormat_getBuffer(self.ptr.as_ptr(), key.as_ptr().cast(), &mut data, &mut size)
             };
             if !ok || data.is_null() || size == 0 {
                 return None;
             }
+            // SAFETY: AMediaFormat owns the returned buffer for at least the duration of this
+            // call. We copy the reported byte range before returning, so no borrowed FFI memory
+            // escapes the format lifetime.
             Some(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size).to_vec() })
         }
     }
 
     impl Drop for MediaFormat {
         fn drop(&mut self) {
+            // SAFETY: this wrapper uniquely owns the non-null format handle and deletes it once.
             let _ = unsafe { AMediaFormat_delete(self.ptr.as_ptr()) };
         }
     }

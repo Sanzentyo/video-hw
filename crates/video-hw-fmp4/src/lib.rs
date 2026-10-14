@@ -22,18 +22,18 @@ pub use fmp4_reader::{
     Finished as ReaderFinished, Fmp4Reader, Fmp4ReaderConfig, Fmp4ReaderStatus, Fmp4Track,
     Fmp4TrackDescription, FrameDecodeRangeRequest, FrameDecodeRangeResult, FrameDecodeRequest,
     FrameDecodeResult, FrameDecodeWindowRequest, FrameDecoder, GopCursor, GopSegment, IndexMode,
-    MediaTime, Mp4IndexSnapshot, RangeCacheConfig, RangeCacheStats, ReaderReady as Fmp4ReaderReady,
-    ReturnedFrameOrder, SampleEntryDescription, SampleId, SampleLookup, SampleLookupMatch,
-    SampleMeta, SampleRange, SampleReadStats, SyncReading, TrackId, TrackKind, TrackReadStats,
+    MediaTime, Mp4IndexSnapshot, PresentationTimeline, RangeCacheConfig, RangeCacheStats,
+    ReaderReady as Fmp4ReaderReady, ReturnedFrameOrder, SampleEntryDescription, SampleId,
+    SampleLookup, SampleLookupMatch, SampleMeta, SampleRange, SampleReadStats, SyncReading,
+    TrackId, TrackKind, TrackReadStats,
 };
 pub use fmp4_writer::{
-    ArgbFrame, CompositionOffset90k, EncodedSampleInput, EncodedTrackConfig, Finished, Fmp4Writer,
-    Fmp4WriterConfig, Fmp4WriterStatus, Fmp4WriterSummary, FragmentFrames, FrameRate, FrameSize,
-    Pts90k, Ready, RgbaFrame, SampleDuration90k, SyncEncodedRecording, SyncRecording,
-    TrackTimescale,
+    ArgbFrame, EncodedTrackConfig, Finished, Fmp4Writer, Fmp4WriterConfig, Fmp4WriterStatus,
+    Fmp4WriterSummary, FragmentFrames, FrameRate, FrameSize, Pts90k, Ready, RgbaFrame,
+    SampleDuration90k, SyncEncodedRecording, SyncRecording,
 };
 
 #[cfg(feature = "async-session")]
-pub use fmp4_reader::{AsyncReaderEvent, AsyncReading};
+pub use fmp4_reader::AsyncReading;
 #[cfg(feature = "async-session")]
-pub use fmp4_writer::{AsyncRecording, AsyncWriterEvent};
+pub use fmp4_writer::AsyncRecording;

@@ -6,12 +6,14 @@ license.workspace = true
 
 [features]
 default = ["backend-intel"]
-backend-intel = ["video-hw-core/backend-intel"]
+backend-intel = [
+  "dep:onevpl",
+  "dep:tokio",
+]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", default-features = false }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-onevpl = { git = "https://github.com/Sanzentyo/onevpl-rs", rev = "d6bbdfe88753a7b6809783ca2be44f8a24ef2199", default-features = false }
-tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-thread"] }
-rayon = { version = "1.11.0" }
+onevpl = { git = "https://github.com/Sanzentyo/onevpl-rs", rev = "d6bbdfe88753a7b6809783ca2be44f8a24ef2199", optional = true, default-features = false }
+tokio = { version = "1.48.0", optional = true, default-features = false, features = ["rt-multi-thread"] }

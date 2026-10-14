@@ -32,11 +32,6 @@ pub struct AsyncRecording {
 }
 
 #[cfg(feature = "async-session")]
-pub struct AsyncEncodedRecording {
-    pub(crate) handle: AsyncWriterHandle,
-}
-
-#[cfg(feature = "async-session")]
 impl core::fmt::Debug for AsyncRecording {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AsyncRecording").finish_non_exhaustive()

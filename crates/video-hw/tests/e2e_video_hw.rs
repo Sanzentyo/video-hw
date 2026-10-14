@@ -329,6 +329,9 @@ fn decode_count(
             total += decoder.flush()?.len();
             Ok(total)
         }
+        kind => Err(BackendError::UnsupportedConfig(format!(
+            "{kind} is not available to this desktop E2E helper"
+        ))),
     }
 }
 
@@ -439,6 +442,9 @@ fn decode_total_and_summary(
             let summary = decoder.summary();
             Ok((total, summary.decoded_frames))
         }
+        kind => Err(BackendError::UnsupportedConfig(format!(
+            "{kind} is not available to this desktop E2E helper"
+        ))),
     }
 }
 
@@ -475,7 +481,7 @@ fn intel_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("intel test mutex should not be poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(all(target_os = "macos", feature = "backend-vt"))]
@@ -979,16 +985,10 @@ fn e2e_nv_encode_h264_rejects_invalid_argb_payload() {
         force_keyframe: false,
     };
 
-    encoder
-        .submit(bad_frame)
-        .expect("submit should enqueue frame before validation");
-    match encoder.flush() {
-        Err(BackendError::InvalidInput(_)) => {}
-        Err(err) if nv_runtime_unsupported(&err) => {
-            eprintln!("skip: CUDA/NVENC unavailable: {err}");
-        }
-        other => panic!("unexpected NV invalid-payload result: {other:?}"),
-    }
+    assert!(matches!(
+        encoder.submit(bad_frame),
+        Err(BackendError::InvalidInput(_))
+    ));
 }
 
 #[cfg(all(
@@ -1057,21 +1057,10 @@ fn e2e_intel_encode_h264_rejects_invalid_argb_payload() {
         force_keyframe: false,
     };
 
-    if let Err(err) = encoder.submit(bad_frame) {
-        if intel_runtime_unsupported(&err) {
-            eprintln!("skip: Intel hardware encode unavailable: {err}");
-            return;
-        }
-        panic!("unexpected Intel hardware encode submit error: {err:?}");
-    }
-
-    match encoder.flush() {
-        Err(BackendError::InvalidInput(_)) => {}
-        Err(err) if intel_runtime_unsupported(&err) => {
-            eprintln!("skip: Intel hardware encode unavailable: {err}");
-        }
-        other => panic!("unexpected Intel invalid-payload result: {other:?}"),
-    }
+    assert!(matches!(
+        encoder.submit(bad_frame),
+        Err(BackendError::InvalidInput(_))
+    ));
 }
 
 #[cfg(all(
@@ -1374,8 +1363,6 @@ fn e2e_vt_backend_encode_accepts_backend_specific_options() {
     let mut config = EncoderConfig::new(Codec::H264, 30, false, EncodeInputFormat::Argb8888);
     config.backend_options = BackendEncoderOptions::VideoToolbox(VtEncoderOptions {
         report_metrics: Some(false),
-        enable_pipeline_scheduler: Some(false),
-        pipeline_queue_capacity: Some(4),
     });
     let mut encoder = EncodeSession::<VtEncoderAdapter>::new(config);
 
@@ -1430,7 +1417,8 @@ fn e2e_nv_backend_decode_and_encode_work() {
         .expect("capability query should not fail");
     assert!(capability.contract.decode.supported);
     assert!(capability.contract.encode.supported);
-    assert!(capability.runtime.hardware_acceleration);
+    assert!(capability.decode_runtime.hardware_acceleration);
+    assert!(capability.encode_runtime.hardware_acceleration);
 
     let data = fs::read(sample_path("sample-10s.h264")).expect("sample bitstream should exist");
     let mut decoded_frames = 0usize;

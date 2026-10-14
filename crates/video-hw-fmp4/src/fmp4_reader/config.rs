@@ -62,6 +62,19 @@ impl MediaTime {
     pub const fn new(ticks: u64, timescale: NonZeroU32) -> Self {
         Self { ticks, timescale }
     }
+
+    /// Rescales this timestamp with nearest-tick rounding.
+    ///
+    /// Returns `None` when the rescaled tick count cannot fit in `u64`.
+    pub fn checked_rescale(self, timescale: NonZeroU32) -> Option<Self> {
+        if self.timescale == timescale {
+            return Some(self);
+        }
+        let numerator = u128::from(self.ticks).checked_mul(u128::from(timescale.get()))?;
+        let denominator = u128::from(self.timescale.get());
+        let rounded = numerator.checked_add(denominator / 2)? / denominator;
+        Some(Self::new(u64::try_from(rounded).ok()?, timescale))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -270,10 +283,23 @@ impl EncodedSample {
         match self.encoded_layout() {
             Some(EncodedLayout::Av1) if self.meta.keyframe => {
                 let parameter_sets = self.parameter_sets();
-                let parameter_sets_len = parameter_sets.iter().map(Vec::len).sum::<usize>();
+                let missing_parameter_sets = parameter_sets
+                    .iter()
+                    .filter(|parameter_set| {
+                        !parameter_set.is_empty()
+                            && !self
+                                .data
+                                .windows(parameter_set.len())
+                                .any(|window| window == parameter_set.as_slice())
+                    })
+                    .collect::<Vec<_>>();
+                let parameter_sets_len = missing_parameter_sets
+                    .iter()
+                    .map(|parameter_set| parameter_set.len())
+                    .sum::<usize>();
                 let mut payload = Vec::with_capacity(parameter_sets_len + self.data.len());
-                for parameter_set in parameter_sets {
-                    payload.extend_from_slice(&parameter_set);
+                for parameter_set in missing_parameter_sets {
+                    payload.extend_from_slice(parameter_set);
                 }
                 payload.extend_from_slice(&self.data);
                 Ok(payload)
@@ -458,6 +484,25 @@ mod tests {
     };
 
     #[test]
+    fn media_time_rescales_with_rounding_and_reports_overflow() {
+        let one_third = MediaTime::new(1, NonZeroU32::new(3).expect("non-zero timescale"));
+        assert_eq!(
+            one_third.checked_rescale(NonZeroU32::new(1_000).expect("non-zero timescale")),
+            Some(MediaTime::new(
+                333,
+                NonZeroU32::new(1_000).expect("non-zero timescale")
+            ))
+        );
+
+        let overflowing = MediaTime::new(u64::MAX, NonZeroU32::new(1).expect("non-zero timescale"));
+        assert!(
+            overflowing
+                .checked_rescale(NonZeroU32::new(2).expect("non-zero timescale"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn h264_helpers_detect_codec_layout_and_annexb() {
         let sample_entry = h264_sample_entry(3);
         let sample = EncodedSample {
@@ -615,6 +660,22 @@ mod tests {
             data: data.clone(),
         };
         assert_eq!(delta.to_decode_payload().expect("delta payload"), data);
+    }
+
+    #[test]
+    fn av1_decode_payload_does_not_duplicate_in_band_config_obus() {
+        let data = vec![0x0a, 0x01, 0x00, 0x32, 0x01, 0x80];
+        let keyframe = EncodedSample {
+            meta: test_meta(true),
+            kind: TrackKind::Video,
+            sample_entry: Some(av1_sample_entry()),
+            data: data.clone(),
+        };
+
+        assert_eq!(
+            keyframe.to_decode_payload().expect("keyframe payload"),
+            data
+        );
     }
 
     #[cfg(feature = "serde")]
