@@ -25,6 +25,17 @@ pub use decoder::{
 pub enum DecodeError {
     #[error("ImageReader contract: {0}")]
     Contract(&'static str),
+    #[error(
+        "hardware buffer descriptor: extent={extent:?}, image={image_extent:?}, layers={layers}, format={format:#x}, usage={usage:#x}, stride={stride}"
+    )]
+    HardwareBufferDescriptor {
+        extent: [u32; 2],
+        image_extent: [u32; 2],
+        layers: u32,
+        format: u32,
+        usage: u64,
+        stride: u32,
+    },
     #[error("NDK {operation} failed with status {status}")]
     Media {
         operation: &'static str,

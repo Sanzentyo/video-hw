@@ -31,7 +31,14 @@ impl HardwareBufferDescriptor {
             || format != 35
             || usage & IMAGE_USAGE != IMAGE_USAGE
         {
-            return Err(DecodeError::Contract("hardware buffer descriptor differs"));
+            return Err(DecodeError::HardwareBufferDescriptor {
+                extent,
+                image_extent,
+                layers,
+                format,
+                usage,
+                stride,
+            });
         }
         Ok(Self {
             width: extent[0],
