@@ -11,6 +11,19 @@ pub struct CropRect {
     height: usize,
 }
 impl CropRect {
+    pub const fn left(self) -> usize {
+        self.left
+    }
+    pub const fn top(self) -> usize {
+        self.top
+    }
+    pub const fn width(self) -> usize {
+        self.width
+    }
+    pub const fn height(self) -> usize {
+        self.height
+    }
+
     pub fn new(
         left: i32,
         top: i32,

@@ -23,6 +23,28 @@ pub(super) struct ANativeWindow {
     _private: [u8; 0],
 }
 #[repr(C)]
+pub(super) struct AHardwareBuffer {
+    _private: [u8; 0],
+}
+#[repr(C)]
+#[derive(Default)]
+pub(super) struct HardwareBufferDesc {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub format: u32,
+    pub usage: u64,
+    pub stride: u32,
+    pub rfu0: u32,
+    pub rfu1: u64,
+}
+#[repr(C)]
+pub(super) struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+#[repr(C)]
 #[derive(Default)]
 pub(super) struct BufferInfo {
     pub offset: i32,
@@ -42,7 +64,22 @@ const _: () = {
     assert!(std::mem::size_of::<BufferInfo>() == 24);
     assert!(std::mem::offset_of!(BufferInfo, presentation_time_us) == 8);
     assert!(std::mem::size_of::<Crop>() == 16);
+    assert!(std::mem::size_of::<HardwareBufferDesc>() == 40);
+    assert!(std::mem::offset_of!(HardwareBufferDesc, usage) == 16);
+    assert!(std::mem::offset_of!(HardwareBufferDesc, rfu1) == 32);
+    assert!(std::mem::size_of::<PollFd>() == 8);
 };
+
+#[link(name = "android")]
+unsafe extern "C" {
+    pub(super) fn AHardwareBuffer_describe(
+        buffer: *const AHardwareBuffer,
+        desc: *mut HardwareBufferDesc,
+    );
+}
+unsafe extern "C" {
+    pub(super) fn poll(fds: *mut PollFd, count: u32, timeout_ms: i32) -> i32;
+}
 
 // SAFETY CONTRACT: callers own each live pointer, initialize output storage,
 // retain reader-owned windows and image memory, and invoke only on their worker.
@@ -60,12 +97,18 @@ unsafe extern "C" {
         reader: *mut AImageReader,
         window: *mut *mut ANativeWindow,
     ) -> i32;
-    pub(super) fn AImageReader_acquireNextImage(
+    pub(super) fn AImageReader_acquireNextImageAsync(
         reader: *mut AImageReader,
         image: *mut *mut AImage,
+        acquire_fence_fd: *mut i32,
     ) -> i32;
     pub(super) fn AImageReader_delete(reader: *mut AImageReader);
     pub(super) fn AImage_delete(image: *mut AImage);
+    pub(super) fn AImage_deleteAsync(image: *mut AImage, release_fence_fd: i32);
+    pub(super) fn AImage_getHardwareBuffer(
+        image: *const AImage,
+        buffer: *mut *mut AHardwareBuffer,
+    ) -> i32;
     pub(super) fn AImage_getTimestamp(image: *const AImage, ns: *mut i64) -> i32;
     pub(super) fn AImage_getWidth(image: *const AImage, width: *mut i32) -> i32;
     pub(super) fn AImage_getHeight(image: *const AImage, height: *mut i32) -> i32;

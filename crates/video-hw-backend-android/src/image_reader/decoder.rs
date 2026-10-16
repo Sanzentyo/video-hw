@@ -1,12 +1,17 @@
+use super::hardware_buffer::{
+    DECODE_TIMEOUT, HardwareBufferDescriptor, IMAGE_USAGE, ImageAccess, validate_metadata,
+    wait_acquire_fence,
+};
 use super::{CropRect, DecodeError, PlaneView, TimestampMicros, YuvImageView, ffi};
 use std::{
     cell::RefCell,
     ffi::CString,
     mem::ManuallyDrop,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     ptr::{self, NonNull},
     rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 const MAX_PACKET: usize = 8 * 1024 * 1024;
@@ -185,16 +190,18 @@ impl ImageReaderDecoder {
         session.decode_phase = DecodePhase::Failed;
         let start = Instant::now();
         let raw = session.decode(packet, pts, start)?;
-        let lease = DecodedImageLease {
+        let mut lease = DecodedImageLease {
             raw,
             _anchor: Rc::clone(&self.anchor),
             timestamp: pts,
             width: session.config.width,
             height: session.config.height,
+            access: ImageAccess::default(),
         };
-        // Validate the actual image layout before committing reusable state.
-        lease.planes()?;
-        if start.elapsed() >= Duration::from_secs(5) {
+        // Metadata and allocation capability only: getPlaneData would CPU-lock
+        // the image until its return, preventing subsequent GPU access.
+        lease.hardware_buffer()?;
+        if start.elapsed() >= DECODE_TIMEOUT {
             return Err(DecodeError::Deadline);
         }
         session.last_pts = pts.get();
@@ -223,6 +230,35 @@ pub struct DecodedImageLease {
     timestamp: TimestampMicros,
     width: u32,
     height: u32,
+    access: ImageAccess,
+}
+/// Exclusive, worker-affine borrow of an acquire-ready decoded hardware buffer.
+///
+/// Dropping this value does not wait for GPU work. A caller importing the raw
+/// pointer must finish all external access before ending this borrow. Keeping an
+/// allocation reference does not protect its contents after the image is returned.
+pub struct HardwareBufferBorrow<'image> {
+    image: &'image mut DecodedImageLease,
+    buffer: NonNull<ffi::AHardwareBuffer>,
+    descriptor: HardwareBufferDescriptor,
+    crop: CropRect,
+}
+impl HardwareBufferBorrow<'_> {
+    /// Borrowed AHardwareBuffer pointer, never transferred or separately released.
+    /// Importing or accessing it through an external API requires that API's
+    /// synchronization contract; no access may outlive this exclusive borrow.
+    pub fn as_ptr(&self) -> NonNull<std::ffi::c_void> {
+        self.buffer.cast()
+    }
+    pub const fn descriptor(&self) -> HardwareBufferDescriptor {
+        self.descriptor
+    }
+    pub const fn crop(&self) -> CropRect {
+        self.crop
+    }
+    pub const fn timestamp(&self) -> TimestampMicros {
+        self.image.timestamp
+    }
 }
 impl std::fmt::Debug for DecodedImageLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -243,7 +279,7 @@ impl DecodedImageLease {
     pub const fn timestamp(&self) -> TimestampMicros {
         self.timestamp
     }
-    pub fn planes(&self) -> Result<YuvImageView<'_>, DecodeError> {
+    fn metadata(&self) -> Result<(CropRect, [u32; 2]), DecodeError> {
         let image = self.raw.as_ptr();
         let mut width = 0;
         let mut height = 0;
@@ -267,12 +303,74 @@ impl DecodedImageLease {
             )?;
             check("image crop", ffi::AImage_getCropRect(image, &raw mut crop))?;
         }
-        if format != 35 || count != 3 {
-            return Err(DecodeError::Contract(
-                "image is not three-plane YUV420Flexible",
-            ));
+        let crop = validate_metadata(
+            [width, height],
+            format,
+            count,
+            [crop.left, crop.top, crop.right, crop.bottom],
+            [self.width, self.height],
+        )?;
+        Ok((crop, [width as u32, height as u32]))
+    }
+    /// Borrow an acquire-ready allocation without mapping its CPU planes.
+    ///
+    /// The exclusive borrow prevents simultaneous CPU access:
+    /// ```compile_fail,E0502
+    /// use video_hw_backend_android::image_reader::DecodedImageLease;
+    /// fn overlapping(image: &mut DecodedImageLease) {
+    ///     let gpu = image.hardware_buffer().unwrap();
+    ///     let cpu = image.planes().unwrap();
+    ///     std::hint::black_box((gpu, cpu));
+    /// }
+    /// ```
+    /// The image owner cannot be dropped while its capability is in use:
+    /// ```compile_fail,E0505
+    /// use video_hw_backend_android::image_reader::DecodedImageLease;
+    /// fn early_return(mut image: DecodedImageLease) {
+    ///     let gpu = image.hardware_buffer().unwrap();
+    ///     drop(image);
+    ///     std::hint::black_box(gpu);
+    /// }
+    /// ```
+    pub fn hardware_buffer(&mut self) -> Result<HardwareBufferBorrow<'_>, DecodeError> {
+        self.access.hardware()?;
+        let (crop, extent) = self.metadata()?;
+        let mut buffer = ptr::null_mut();
+        // SAFETY: acquire-ready live image, initialized output; NDK lends the
+        // allocation without changing its reference count.
+        unsafe {
+            check(
+                "image hardware buffer",
+                ffi::AImage_getHardwareBuffer(self.raw.as_ptr(), &raw mut buffer),
+            )?;
         }
-        let crop = CropRect::new(crop.left, crop.top, crop.right, crop.bottom, width, height)?;
+        let buffer = NonNull::new(buffer).ok_or(DecodeError::Contract("null hardware buffer"))?;
+        let mut desc = ffi::HardwareBufferDesc::default();
+        // SAFETY: buffer remains owned by this exclusively borrowed live image.
+        unsafe {
+            ffi::AHardwareBuffer_describe(buffer.as_ptr(), &raw mut desc);
+        }
+        let descriptor = HardwareBufferDescriptor::new(
+            [desc.width, desc.height],
+            desc.layers,
+            desc.format,
+            desc.usage,
+            desc.stride,
+            extent,
+        )?;
+        Ok(HardwareBufferBorrow {
+            image: self,
+            buffer,
+            descriptor,
+            crop,
+        })
+    }
+    /// CPU mapping stays active in AImage until image return. GPU borrowing is
+    /// forbidden after this call, even if validation fails or this view is dropped.
+    pub fn planes(&self) -> Result<YuvImageView<'_>, DecodeError> {
+        let (crop, _) = self.metadata()?;
+        self.access.begin_cpu();
+        let image = self.raw.as_ptr();
         let mut planes = Vec::with_capacity(3);
         for index in 0..3 {
             let mut data = ptr::null_mut();
@@ -318,6 +416,76 @@ fn check(operation: &'static str, status: i32) -> Result<(), DecodeError> {
         Err(DecodeError::Media { operation, status })
     }
 }
+
+/// Owns both acquisition outputs before any fallible observation. Returning an
+/// unready image transfers its original acquire fence as the release fence; no
+/// synchronous image drop or unbounded wait is hidden in this destructor.
+struct PendingImage {
+    image: Option<NonNull<ffi::AImage>>,
+    fence: Option<OwnedFd>,
+}
+impl PendingImage {
+    fn new(image: *mut ffi::AImage, fence: i32) -> Self {
+        Self {
+            image: NonNull::new(image),
+            fence: if fence >= 0 {
+                // SAFETY: acquireNextImageAsync transfers this unique fd to us.
+                Some(unsafe { OwnedFd::from_raw_fd(fence) })
+            } else {
+                None
+            },
+        }
+    }
+    fn ready(mut self, start: Instant) -> Result<NonNull<ffi::AImage>, DecodeError> {
+        if self.image.is_none() {
+            return Err(DecodeError::Contract("null acquired image"));
+        }
+        if let Some(fence) = &self.fence {
+            wait_acquire_fence(
+                || start.elapsed(),
+                |timeout| {
+                    let mut fd = ffi::PollFd {
+                        fd: fence.as_raw_fd(),
+                        events: 1,
+                        revents: 0,
+                    };
+                    // SAFETY: one initialized pollfd with a uniquely owned live fd;
+                    // timeout is finite and bounded by the decode's absolute budget.
+                    let result = unsafe { ffi::poll(&raw mut fd, 1, timeout) };
+                    if result < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    match result {
+                        0 => Ok(None),
+                        1 => Ok(Some(fd.revents)),
+                        _ => Err(std::io::Error::other("unexpected poll count")),
+                    }
+                },
+            )?;
+        }
+        if start.elapsed() >= DECODE_TIMEOUT {
+            return Err(DecodeError::Deadline);
+        }
+        // The ready fence is no longer needed; its close occurs exactly once.
+        drop(self.fence.take());
+        self.image
+            .take()
+            .ok_or(DecodeError::Contract("missing acquired image"))
+    }
+}
+impl Drop for PendingImage {
+    fn drop(&mut self) {
+        if let Some(image) = self.image.take() {
+            let release_fence = self.fence.take().map_or(-1, IntoRawFd::into_raw_fd);
+            // SAFETY: image has never escaped or been CPU/GPU accessed. NDK
+            // consumes it and the transferred fd exactly once, waiting before
+            // making its allocation reusable by the producer.
+            unsafe {
+                ffi::AImage_deleteAsync(image.as_ptr(), release_fence);
+            }
+        }
+    }
+}
 struct Format(NonNull<ffi::AMediaFormat>);
 impl Drop for Format {
     fn drop(&mut self) {
@@ -337,7 +505,7 @@ impl Session {
                     self.config.width as i32,
                     self.config.height as i32,
                     35,
-                    3,
+                    IMAGE_USAGE,
                     4,
                     &raw mut self.reader,
                 ),
@@ -402,7 +570,7 @@ impl Session {
     ) -> Result<NonNull<ffi::AImage>, DecodeError> {
         let mut queued = false;
         let mut rendered = false;
-        while start.elapsed() < Duration::from_secs(5) {
+        while start.elapsed() < DECODE_TIMEOUT {
             if !queued {
                 // SAFETY: started codec on its owning worker, no outstanding input index.
                 let index = unsafe { ffi::AMediaCodec_dequeueInputBuffer(self.codec, 0) };
@@ -468,13 +636,22 @@ impl Session {
                 return Err(DecodeError::Contract("output dequeue failed"));
             }
             let mut image = ptr::null_mut();
+            let mut acquire_fence = -1;
             // SAFETY: live reader, no previous lease outstanding; writable output.
-            let status = unsafe { ffi::AImageReader_acquireNextImage(self.reader, &raw mut image) };
+            let status = unsafe {
+                ffi::AImageReader_acquireNextImageAsync(
+                    self.reader,
+                    &raw mut image,
+                    &raw mut acquire_fence,
+                )
+            };
+            // Claim outputs before any fallible status/metadata observation.
+            let pending = PendingImage::new(image, acquire_fence);
             if status == -30001 {
                 continue;
             }
             check("acquire image", status)?;
-            let image = NonNull::new(image).ok_or(DecodeError::Contract("null acquired image"))?;
+            let image = pending.ready(start)?;
             let mut ns = 0;
             // SAFETY: uniquely acquired live image; timestamp output initialized.
             let outcome = check("image timestamp", unsafe {

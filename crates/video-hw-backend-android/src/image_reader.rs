@@ -1,4 +1,4 @@
-//! Exact-timestamp Android ImageReader decoding and validated CPU plane views.
+//! Exact-timestamp Android ImageReader decoding, borrowed hardware buffers and CPU views.
 
 #[cfg(all(target_os = "android", not(target_arch = "aarch64")))]
 compile_error!("ImageReader NDK FFI is verified only for aarch64 Android API 32+");
@@ -6,12 +6,19 @@ compile_error!("ImageReader NDK FFI is verified only for aarch64 Android API 32+
 mod planes;
 pub use planes::{CompactYuv, CropRect, PlaneView, YuvImageView};
 
+#[cfg(any(target_os = "android", test))]
+mod hardware_buffer;
+#[cfg(target_os = "android")]
+pub use hardware_buffer::HardwareBufferDescriptor;
+
 #[cfg(target_os = "android")]
 mod decoder;
 #[cfg(target_os = "android")]
 mod ffi;
 #[cfg(target_os = "android")]
-pub use decoder::{CloseOutcome, DecodedImageLease, DecoderConfig, ImageReaderDecoder};
+pub use decoder::{
+    CloseOutcome, DecodedImageLease, DecoderConfig, HardwareBufferBorrow, ImageReaderDecoder,
+};
 
 /// Plane, timestamp, or platform decoder operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +29,12 @@ pub enum DecodeError {
     Media {
         operation: &'static str,
         status: i32,
+    },
+    #[error("{operation} failed: {source}")]
+    System {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
     },
     #[error("decoder has an outstanding image lease")]
     Borrowed,
