@@ -28,7 +28,6 @@ impl HardwareBufferDescriptor {
             || extent.contains(&0)
             || extent.iter().any(|v| *v > i32::MAX as u32)
             || layers != 1
-            || format != 35
             || usage & IMAGE_USAGE != IMAGE_USAGE
         {
             return Err(DecodeError::HardwareBufferDescriptor {
@@ -58,6 +57,7 @@ impl HardwareBufferDescriptor {
     pub const fn layers(self) -> u32 {
         self.layers
     }
+    /// Opaque allocation format; it can differ from the image's logical format.
     pub const fn format(self) -> u32 {
         self.format
     }
@@ -156,7 +156,7 @@ mod tests {
         let d = HardwareBufferDescriptor::new(
             [1088, 1088],
             1,
-            35,
+            0x7fa3_0c04,
             IMAGE_USAGE | 0x800,
             0,
             [1080, 1080],
@@ -171,19 +171,17 @@ mod tests {
                 d.usage(),
                 d.stride()
             ),
-            (1088, 1088, 1, 35, IMAGE_USAGE | 0x800, 0)
+            (1088, 1088, 1, 0x7fa3_0c04, IMAGE_USAGE | 0x800, 0)
         );
-        for (extent, layers, format, usage) in [
-            ([1079, 1088], 1, 35, IMAGE_USAGE),
-            ([1088, 0], 1, 35, IMAGE_USAGE),
-            ([1088, 1088], 2, 35, IMAGE_USAGE),
-            ([1088, 1088], 1, 1, IMAGE_USAGE),
-            ([1088, 1088], 1, 35, 3),
-            ([u32::MAX, 1088], 1, 35, IMAGE_USAGE),
+        for (extent, layers, usage) in [
+            ([1079, 1088], 1, IMAGE_USAGE),
+            ([1088, 0], 1, IMAGE_USAGE),
+            ([1088, 1088], 2, IMAGE_USAGE),
+            ([1088, 1088], 1, 3),
+            ([u32::MAX, 1088], 1, IMAGE_USAGE),
         ] {
             assert!(
-                HardwareBufferDescriptor::new(extent, layers, format, usage, 0, [1080, 1080])
-                    .is_err()
+                HardwareBufferDescriptor::new(extent, layers, 35, usage, 0, [1080, 1080]).is_err()
             );
         }
     }
