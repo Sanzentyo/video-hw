@@ -20,6 +20,41 @@ pub use decoder::{
     CloseOutcome, DecodedImageLease, DecoderConfig, HardwareBufferBorrow, ImageReaderDecoder,
 };
 
+/// Explicit coding syntax for a named ImageReader decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageReaderCodec {
+    /// H.264/AVC.
+    H264,
+    /// H.265/HEVC.
+    Hevc,
+}
+impl ImageReaderCodec {
+    /// Fixed NDK MIME corresponding to the selected coding syntax.
+    pub const fn mime(self) -> &'static std::ffi::CStr {
+        match self {
+            Self::H264 => c"video/avc",
+            Self::Hevc => c"video/hevc",
+        }
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::ImageReaderCodec;
+    #[test]
+    fn explicit_codec_has_one_exact_ndk_mime() {
+        assert_eq!(
+            ImageReaderCodec::H264.mime().to_bytes_with_nul(),
+            b"video/avc\0"
+        );
+        assert_eq!(
+            ImageReaderCodec::Hevc.mime().to_bytes_with_nul(),
+            b"video/hevc\0"
+        );
+        assert_ne!(ImageReaderCodec::H264, ImageReaderCodec::Hevc);
+    }
+}
+
 /// Plane, timestamp, or platform decoder operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

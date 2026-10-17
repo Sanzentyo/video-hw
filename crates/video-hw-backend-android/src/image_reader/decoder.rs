@@ -2,7 +2,9 @@ use super::hardware_buffer::{
     DECODE_TIMEOUT, HardwareBufferDescriptor, IMAGE_USAGE, ImageAccess, validate_metadata,
     wait_acquire_fence,
 };
-use super::{CropRect, DecodeError, PlaneView, TimestampMicros, YuvImageView, ffi};
+use super::{
+    CropRect, DecodeError, ImageReaderCodec, PlaneView, TimestampMicros, YuvImageView, ffi,
+};
 use std::{
     cell::RefCell,
     ffi::CString,
@@ -36,6 +38,7 @@ impl Drop for Permit {
 /// Immutable coded image and an explicit hardware codec policy.
 #[derive(Debug)]
 pub struct DecoderConfig {
+    codec: ImageReaderCodec,
     width: u32,
     height: u32,
     name: CString,
@@ -43,6 +46,7 @@ pub struct DecoderConfig {
 }
 impl DecoderConfig {
     pub fn new(
+        codec: ImageReaderCodec,
         width: u32,
         height: u32,
         codec_name: &str,
@@ -65,6 +69,7 @@ impl DecoderConfig {
             return Err(DecodeError::Contract("empty codec name"));
         }
         Ok(Self {
+            codec,
             width,
             height,
             name,
@@ -533,7 +538,11 @@ impl Session {
         );
         // SAFETY: live format/codec/reader-owned window, static NUL-terminated keys. Coded config copied by codec.
         unsafe {
-            ffi::AMediaFormat_setString(format.0.as_ptr(), c"mime".as_ptr(), c"video/avc".as_ptr());
+            ffi::AMediaFormat_setString(
+                format.0.as_ptr(),
+                c"mime".as_ptr(),
+                self.config.codec.mime().as_ptr(),
+            );
             for (key, value) in [
                 (c"width", self.config.width as i32),
                 (c"height", self.config.height as i32),
