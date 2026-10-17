@@ -2912,7 +2912,7 @@ dependencies = [
 [[package]]
 name = "nvidia-video-codec-sdk"
 version = "0.4.0"
-source = "git+https://github.com/Sanzentyo/nvidia-video-codec-sdk.git?rev=ba1d0d18a88051bf0c4ceee026c7fd69047f7ef5#ba1d0d18a88051bf0c4ceee026c7fd69047f7ef5"
+source = "git+https://github.com/Sanzentyo/nvidia-video-codec-sdk.git?rev=d4d899fa58020929da0c64dce0c455eadadc39e5#d4d899fa58020929da0c64dce0c455eadadc39e5"
 dependencies = [
  "anyhow",
  "ash",
