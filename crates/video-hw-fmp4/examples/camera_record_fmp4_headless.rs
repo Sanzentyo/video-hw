@@ -278,7 +278,7 @@ fn yuy2_to_rgba(data: &[u8], w: usize, h: usize) -> Vec<u8> {
     for row in 0..h {
         let row_start = row * w * 2;
         let row_data = &data[row_start..row_start + w * 2];
-        for chunk in row_data.chunks_exact(4) {
+        for chunk in row_data.as_chunks::<4>().0 {
             let y0 = chunk[0];
             let u = chunk[1];
             let y1 = chunk[2];

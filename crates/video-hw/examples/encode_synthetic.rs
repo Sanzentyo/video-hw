@@ -231,7 +231,7 @@ fn synthetic_argb(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
     for (y, row) in buffer.chunks_exact_mut(width.saturating_mul(4)).enumerate() {
         let mut red = frame_shift;
         let green = (y as u8).wrapping_add(green_shift);
-        for px in row.chunks_exact_mut(4) {
+        for px in row.as_chunks_mut::<4>().0 {
             px[0] = 255;
             px[1] = red;
             px[2] = green;

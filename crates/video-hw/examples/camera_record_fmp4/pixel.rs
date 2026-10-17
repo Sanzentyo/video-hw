@@ -16,7 +16,7 @@ pub(super) struct UiFrame {
 
 pub(super) fn rgba_to_argb_bytes(rgba: &[u8]) -> Vec<u8> {
     let mut argb = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         argb.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     argb
@@ -142,7 +142,7 @@ pub(super) fn yuy2_to_rgba(data: &[u8], w: usize, h: usize) -> Vec<u8> {
     for row in 0..h {
         let row_start = row * w * 2;
         let row_data = &data[row_start..row_start + w * 2];
-        for chunk in row_data.chunks_exact(4) {
+        for chunk in row_data.as_chunks::<4>().0 {
             let y0 = chunk[0];
             let u = chunk[1];
             let y1 = chunk[2];

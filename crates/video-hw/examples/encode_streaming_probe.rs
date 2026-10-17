@@ -201,7 +201,7 @@ fn make_frame(width: usize, height: usize, index: usize, fps: i32) -> Result<Enc
     let frame_size = width.saturating_mul(height).saturating_mul(4);
     let mut argb = vec![0u8; frame_size];
 
-    for px in argb.chunks_exact_mut(4) {
+    for px in argb.as_chunks_mut::<4>().0 {
         px[0] = 255;
         px[1] = (index.wrapping_mul(13) % 255) as u8;
         px[2] = 96;

@@ -64,7 +64,7 @@ pub(super) fn convert_duration_timescale(
 
 pub(super) fn rgba_to_argb_bytes(rgba: &[u8]) -> Vec<u8> {
     let mut argb = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         argb.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     argb
