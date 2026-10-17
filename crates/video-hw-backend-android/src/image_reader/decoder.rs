@@ -246,6 +246,7 @@ pub struct HardwareBufferBorrow<'image> {
     image: &'image mut DecodedImageLease,
     buffer: NonNull<ffi::AHardwareBuffer>,
     descriptor: HardwareBufferDescriptor,
+    image_extent: [u32; 2],
     crop: CropRect,
 }
 impl HardwareBufferBorrow<'_> {
@@ -257,6 +258,10 @@ impl HardwareBufferBorrow<'_> {
     }
     pub const fn descriptor(&self) -> HardwareBufferDescriptor {
         self.descriptor
+    }
+    /// Full extent observed from AImage metadata, before applying its crop.
+    pub const fn image_extent(&self) -> [u32; 2] {
+        self.image_extent
     }
     pub const fn crop(&self) -> CropRect {
         self.crop
@@ -367,6 +372,7 @@ impl DecodedImageLease {
             image: self,
             buffer,
             descriptor,
+            image_extent: extent,
             crop,
         })
     }

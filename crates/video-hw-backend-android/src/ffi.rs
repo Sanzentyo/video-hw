@@ -27,6 +27,11 @@ pub(crate) mod codec {
     }
 
     #[repr(C)]
+    pub(crate) struct ANativeWindow {
+        _private: [u8; 0],
+    }
+
+    #[repr(C)]
     pub(crate) struct AMediaCodecBufferInfo {
         pub(crate) offset: i32,
         pub(crate) size: i32,
@@ -46,7 +51,7 @@ pub(crate) mod codec {
         fn AMediaCodec_configure(
             codec: *mut AMediaCodec,
             format: *const AMediaFormat,
-            surface: *mut c_void,
+            surface: *mut ANativeWindow,
             crypto: *mut c_void,
             flags: u32,
         ) -> i32;
@@ -61,9 +66,9 @@ pub(crate) mod codec {
         fn AMediaCodec_queueInputBuffer(
             codec: *mut AMediaCodec,
             idx: usize,
-            offset: usize,
+            offset: std::ffi::c_long,
             size: usize,
-            time: i64,
+            time: u64,
             flags: u32,
         ) -> i32;
         fn AMediaCodec_dequeueOutputBuffer(
@@ -201,11 +206,20 @@ pub(crate) mod codec {
             pts_us: i64,
             flags: u32,
         ) -> Result<(), BackendError> {
+            let timestamp = u64::try_from(pts_us)
+                .map_err(|_| BackendError::Backend("negative NDK input timestamp".into()))?;
             status_to_result(
                 // SAFETY: the codec and dequeued index are live. Callers bound `size` to the
                 // capacity returned by `input_buffer`, or pass zero when returning the index.
                 unsafe {
-                    AMediaCodec_queueInputBuffer(self.ptr.as_ptr(), index, 0, size, pts_us, flags)
+                    AMediaCodec_queueInputBuffer(
+                        self.ptr.as_ptr(),
+                        index,
+                        0,
+                        size,
+                        timestamp,
+                        flags,
+                    )
                 },
                 "AMediaCodec_queueInputBuffer",
             )
