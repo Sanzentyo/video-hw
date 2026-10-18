@@ -56,8 +56,8 @@ impl DecoderConfig {
             || height == 0
             || !width.is_multiple_of(2)
             || !height.is_multiple_of(2)
-            || width > 4096
-            || height > 4096
+            || width > super::MAX_IMAGE_DIMENSION
+            || height > super::MAX_IMAGE_DIMENSION
         {
             return Err(DecodeError::Contract(
                 "coded NV12 dimensions must be even and bounded",

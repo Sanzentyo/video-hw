@@ -6,6 +6,10 @@ compile_error!("ImageReader NDK FFI is verified only for aarch64 Android API 32+
 mod planes;
 pub use planes::{CompactYuv, CropRect, PlaneView, YuvImageView};
 
+/// Software admission bound per image axis. A codec's actual capabilities and
+/// the available bytes of every decoded plane remain independent constraints.
+pub const MAX_IMAGE_DIMENSION: u32 = 8192;
+
 #[cfg(any(target_os = "android", test))]
 mod hardware_buffer;
 #[cfg(target_os = "android")]

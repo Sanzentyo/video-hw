@@ -135,8 +135,8 @@ impl<'image> YuvImageView<'image> {
             || crop.height != height
             || width == 0
             || height == 0
-            || width > 4096
-            || height > 4096
+            || expected_width > super::MAX_IMAGE_DIMENSION
+            || expected_height > super::MAX_IMAGE_DIMENSION
         {
             return Err(DecodeError::Contract(
                 "crop differs from immutable decoder dimensions",
@@ -261,6 +261,43 @@ impl CompactYuv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maximum_axis_keeps_exact_last_sample_and_plane_bounds() {
+        for (width, height) in [(8192, 2), (2, 8192)] {
+            let y = vec![37; width * height];
+            let uv = vec![119; width * height / 4];
+            let crop = CropRect::new(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                width as i32,
+                height as i32,
+            )
+            .unwrap();
+            let image = |y_length, uv_length| {
+                YuvImageView::new(
+                    [
+                        PlaneView::new(&y[..y_length], width as i32, 1).unwrap(),
+                        PlaneView::new(&uv[..uv_length], width as i32 / 2, 1).unwrap(),
+                        PlaneView::new(&uv[..uv_length], width as i32 / 2, 1).unwrap(),
+                    ],
+                    crop,
+                    width as u32,
+                    height as u32,
+                )
+            };
+            let compact = image(y.len(), uv.len()).unwrap().copy_compact();
+            assert_eq!(compact.y(), y);
+            assert_eq!(compact.uv(), vec![119; uv.len() * 2]);
+            assert!(image(y.len() - 1, uv.len()).is_err());
+            assert!(image(y.len(), uv.len() - 1).is_err());
+        }
+        let bytes = [0; 4];
+        let planes = [PlaneView::new(&bytes, 1, 1).unwrap(); 3];
+        let crop = CropRect::new(0, 0, 8193, 2, 8193, 2).unwrap();
+        assert!(YuvImageView::new(planes, crop, 8193, 2).is_err());
+    }
     #[test]
     fn all_crop_phases_match_independent_planar_sampling() {
         for phase_x in 0..=1 {
