@@ -42,9 +42,35 @@ impl ImageReaderCodec {
     }
 }
 
+// MediaFormat accepts integer FPS. Reject zero and overflow before codec allocation.
+#[cfg(any(target_os = "android", test))]
+fn decoder_operating_rate(fps: u32) -> Result<i32, DecodeError> {
+    if fps == 0 {
+        return Err(DecodeError::Contract(
+            "decoder operating rate must be positive",
+        ));
+    }
+    i32::try_from(fps)
+        .map_err(|_| DecodeError::Contract("decoder operating rate exceeds MediaFormat integer"))
+}
+
 #[cfg(test)]
 mod codec_tests {
-    use super::ImageReaderCodec;
+    use super::{ImageReaderCodec, decoder_operating_rate};
+
+    #[test]
+    fn requested_operating_rate_preserves_integer_fps() {
+        assert_eq!(decoder_operating_rate(15).unwrap(), 15);
+        assert_eq!(decoder_operating_rate(30).unwrap(), 30);
+        assert_eq!(decoder_operating_rate(i32::MAX as u32).unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn invalid_operating_rate_is_rejected_before_codec_allocation() {
+        assert!(decoder_operating_rate(0).is_err());
+        assert!(decoder_operating_rate(i32::MAX as u32 + 1).is_err());
+        assert!(decoder_operating_rate(u32::MAX).is_err());
+    }
     #[test]
     fn explicit_codec_has_one_exact_ndk_mime() {
         assert_eq!(

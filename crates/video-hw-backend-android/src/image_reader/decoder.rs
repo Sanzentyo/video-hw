@@ -35,7 +35,7 @@ impl Drop for Permit {
     }
 }
 
-/// Immutable coded image and an explicit hardware codec policy.
+/// Immutable coded image, required operating rate, and explicit realtime codec policy.
 #[derive(Debug)]
 pub struct DecoderConfig {
     codec: ImageReaderCodec,
@@ -43,6 +43,7 @@ pub struct DecoderConfig {
     height: u32,
     name: CString,
     allow_frame_drop: bool,
+    operating_rate: i32,
 }
 impl DecoderConfig {
     pub fn new(
@@ -51,7 +52,9 @@ impl DecoderConfig {
         height: u32,
         codec_name: &str,
         allow_frame_drop: bool,
+        operating_fps: u32,
     ) -> Result<Self, DecodeError> {
+        let operating_rate = super::decoder_operating_rate(operating_fps)?;
         if width == 0
             || height == 0
             || !width.is_multiple_of(2)
@@ -74,6 +77,7 @@ impl DecoderConfig {
             height,
             name,
             allow_frame_drop,
+            operating_rate,
         })
     }
 }
@@ -554,6 +558,8 @@ impl Session {
                 (c"height", self.config.height as i32),
                 (c"max-input-size", MAX_PACKET as i32),
                 (c"low-latency", 1),
+                (c"priority", 0),
+                (c"operating-rate", self.config.operating_rate),
                 (c"color-format", 0x7f420888),
             ] {
                 ffi::AMediaFormat_setInt32(format.0.as_ptr(), key.as_ptr(), value);
