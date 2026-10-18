@@ -293,8 +293,13 @@ mod tests {
             assert!(image(y.len() - 1, uv.len()).is_err());
             assert!(image(y.len(), uv.len() - 1).is_err());
         }
-        let bytes = [0; 4];
-        let planes = [PlaneView::new(&bytes, 1, 1).unwrap(); 3];
+        let y = vec![0; 8193 * 2];
+        let uv = vec![0; 4097];
+        let planes = [
+            PlaneView::new(&y, 8193, 1).unwrap(),
+            PlaneView::new(&uv, 4097, 1).unwrap(),
+            PlaneView::new(&uv, 4097, 1).unwrap(),
+        ];
         let crop = CropRect::new(0, 0, 8193, 2, 8193, 2).unwrap();
         assert!(YuvImageView::new(planes, crop, 8193, 2).is_err());
     }
