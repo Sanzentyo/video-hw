@@ -3,7 +3,8 @@ use super::hardware_buffer::{
     wait_acquire_fence,
 };
 use super::{
-    CropRect, DecodeError, ImageReaderCodec, PlaneView, TimestampMicros, YuvImageView, ffi,
+    CropRect, DecodeError, DecodedColorimetry, ImageReaderCodec, PlaneView, TimestampMicros,
+    YuvImageView, ffi,
 };
 use std::{
     cell::RefCell,
@@ -15,6 +16,8 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
+
+use video_hw_core::ColorRange;
 
 const MAX_PACKET: usize = 8 * 1024 * 1024;
 static ADMITTED: AtomicUsize = AtomicUsize::new(0);
@@ -35,7 +38,7 @@ impl Drop for Permit {
     }
 }
 
-/// Immutable coded image, required operating rate, and explicit realtime codec policy.
+/// Immutable coded image, operating rate, and explicit realtime/color-range policy.
 #[derive(Debug)]
 pub struct DecoderConfig {
     codec: ImageReaderCodec,
@@ -44,8 +47,12 @@ pub struct DecoderConfig {
     name: CString,
     allow_frame_drop: bool,
     operating_rate: i32,
+    expected_color_range: ColorRange,
 }
 impl DecoderConfig {
+    /// Requires BT.709 output with the given range on every output-format change.
+    /// The expected range validates output metadata; it does not replace missing
+    /// output metadata or alter hardware-buffer conversion suggestions.
     pub fn new(
         codec: ImageReaderCodec,
         width: u32,
@@ -53,6 +60,7 @@ impl DecoderConfig {
         codec_name: &str,
         allow_frame_drop: bool,
         operating_fps: u32,
+        expected_color_range: ColorRange,
     ) -> Result<Self, DecodeError> {
         let operating_rate = super::decoder_operating_rate(operating_fps)?;
         if width == 0
@@ -78,6 +86,7 @@ impl DecoderConfig {
             name,
             allow_frame_drop,
             operating_rate,
+            expected_color_range,
         })
     }
 }
@@ -102,7 +111,7 @@ struct Session {
     codec_phase: CodecPhase,
     decode_phase: DecodePhase,
     last_pts: u64,
-    color_valid: bool,
+    colorimetry: Option<DecodedColorimetry>,
 }
 struct Anchor {
     session: RefCell<Option<Box<Session>>>,
@@ -163,7 +172,7 @@ impl ImageReaderDecoder {
                     codec_phase: CodecPhase::Created,
                     decode_phase: DecodePhase::Ready,
                     last_pts: 0,
-                    color_valid: false,
+                    colorimetry: None,
                 }))),
             }),
         };
@@ -198,7 +207,7 @@ impl ImageReaderDecoder {
         }
         session.decode_phase = DecodePhase::Failed;
         let start = Instant::now();
-        let raw = session.decode(packet, pts, start)?;
+        let (raw, colorimetry) = session.decode(packet, pts, start)?;
         let mut lease = DecodedImageLease {
             raw,
             _anchor: Rc::clone(&self.anchor),
@@ -206,6 +215,7 @@ impl ImageReaderDecoder {
             width: session.config.width,
             height: session.config.height,
             access: ImageAccess::default(),
+            colorimetry,
         };
         // Metadata and allocation capability only: getPlaneData would CPU-lock
         // the image until its return, preventing subsequent GPU access.
@@ -240,6 +250,7 @@ pub struct DecodedImageLease {
     width: u32,
     height: u32,
     access: ImageAccess,
+    colorimetry: DecodedColorimetry,
 }
 /// Exclusive, worker-affine borrow of an acquire-ready decoded hardware buffer.
 ///
@@ -254,6 +265,10 @@ pub struct HardwareBufferBorrow<'image> {
     crop: CropRect,
 }
 impl HardwareBufferBorrow<'_> {
+    /// Validated codec output facts of the held image, distinct from AHB suggestions.
+    pub const fn colorimetry(&self) -> DecodedColorimetry {
+        self.image.colorimetry
+    }
     /// Borrowed AHardwareBuffer pointer, never transferred or separately released.
     /// Importing or accessing it through an external API requires that API's
     /// synchronization contract; no access may outlive this exclusive borrow.
@@ -290,6 +305,10 @@ impl Drop for DecodedImageLease {
     }
 }
 impl DecodedImageLease {
+    /// Immutable output colorimetry validated before this image was published.
+    pub const fn colorimetry(&self) -> DecodedColorimetry {
+        self.colorimetry
+    }
     pub const fn timestamp(&self) -> TimestampMicros {
         self.timestamp
     }
@@ -588,7 +607,7 @@ impl Session {
         packet: &[u8],
         pts: TimestampMicros,
         start: Instant,
-    ) -> Result<NonNull<ffi::AImage>, DecodeError> {
+    ) -> Result<(NonNull<ffi::AImage>, DecodedColorimetry), DecodeError> {
         let mut queued = false;
         let mut rendered = false;
         while start.elapsed() < DECODE_TIMEOUT {
@@ -679,15 +698,15 @@ impl Session {
                 ffi::AImage_getTimestamp(image.as_ptr(), &raw mut ns)
             })
             .and_then(|()| TimestampMicros::from_image_nanoseconds(ns));
-            match outcome {
-                Ok(actual) if actual.get() < pts.get() => {
+            match (outcome, self.colorimetry) {
+                (Ok(actual), _) if actual.get() < pts.get() => {
                     /* SAFETY: proved stale uniquely owned image has no exported view. */
                     unsafe {
                         ffi::AImage_delete(image.as_ptr());
                     }
                 }
-                Ok(actual) if actual == pts && queued && rendered && self.color_valid => {
-                    return Ok(image);
+                (Ok(actual), Some(colorimetry)) if actual == pts && queued && rendered => {
+                    return Ok((image, colorimetry));
                 }
                 _ => {
                     // SAFETY: image never published; return it once before terminal failure.
@@ -701,6 +720,7 @@ impl Session {
         Err(DecodeError::Deadline)
     }
     fn validate_format(&mut self) -> Result<(), DecodeError> {
+        self.colorimetry = None;
         // SAFETY: NDK returns a newly owned output format for this codec.
         let format = Format(
             NonNull::new(unsafe { ffi::AMediaCodec_getOutputFormat(self.codec) })
@@ -709,21 +729,25 @@ impl Session {
         let mut standard = 0;
         let mut range = 0;
         // SAFETY: live owned format, NUL-terminated keys and writable outputs.
-        let valid = unsafe {
-            ffi::AMediaFormat_getInt32(
-                format.0.as_ptr(),
-                c"color-standard".as_ptr(),
-                &raw mut standard,
-            ) && ffi::AMediaFormat_getInt32(
-                format.0.as_ptr(),
-                c"color-range".as_ptr(),
-                &raw mut range,
+        let (has_standard, has_range) = unsafe {
+            (
+                ffi::AMediaFormat_getInt32(
+                    format.0.as_ptr(),
+                    c"color-standard".as_ptr(),
+                    &raw mut standard,
+                ),
+                ffi::AMediaFormat_getInt32(
+                    format.0.as_ptr(),
+                    c"color-range".as_ptr(),
+                    &raw mut range,
+                ),
             )
         };
-        if !valid || standard != 1 || range != 2 {
-            return Err(DecodeError::Contract("expected BT709 limited output"));
-        }
-        self.color_valid = true;
+        self.colorimetry = Some(DecodedColorimetry::from_output_format(
+            has_standard.then_some(standard),
+            has_range.then_some(range),
+            self.config.expected_color_range,
+        )?);
         Ok(())
     }
     fn close(&mut self) -> Result<(), DecodeError> {

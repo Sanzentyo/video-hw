@@ -19,4 +19,4 @@ video-hw-core = { path = "../video-hw-core", default-features = false }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 cudarc = { version = "=0.19.2", optional = true, default-features = false, features = ["driver", "nvrtc", "cuda-version-from-build-system"] }
-nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk.git", rev = "472380cae1a7d9b11848b16ce8862cc053f02678", version = "0.4.0", optional = true, default-features = false }
+nvidia-video-codec-sdk = { git = "https://github.com/Sanzentyo/nvidia-video-codec-sdk.git", rev = "d38e3efd32f70bb60cc94189da17096b25959351", version = "0.4.0", optional = true, default-features = false }

@@ -8,7 +8,7 @@ rust-version.workspace = true
 [features]
 default = ["backend-android"]
 backend-android = ["dep:jni", "dep:video-hw-core"]
-backend-android-imagereader = ["dep:thiserror"]
+backend-android-imagereader = ["dep:thiserror", "dep:video-hw-core"]
 
 [dependencies]
 video-hw-core = { path = "../video-hw-core", optional = true }

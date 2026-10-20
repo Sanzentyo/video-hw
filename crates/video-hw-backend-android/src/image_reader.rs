@@ -1,10 +1,18 @@
 //! Exact-timestamp Android ImageReader decoding, borrowed hardware buffers and CPU views.
+//!
+//! Decoder configuration requires an explicit `video_hw_core::ColorRange`. Every
+//! output-format change must report BT.709 and that range before an image can be
+//! published. Missing or contradictory metadata fails decoding. Acquired images
+//! and hardware-buffer borrows expose the validated immutable `DecodedColorimetry`,
+//! independently of any hardware-buffer sampler-conversion suggestions.
 
 #[cfg(all(target_os = "android", not(target_arch = "aarch64")))]
 compile_error!("ImageReader NDK FFI is verified only for aarch64 Android API 32+");
 
 mod planes;
 pub use planes::{CompactYuv, CropRect, PlaneView, YuvImageView};
+mod color;
+pub use color::DecodedColorimetry;
 
 /// Software admission bound per image axis. A codec's actual capabilities and
 /// the available bytes of every decoded plane remain independent constraints.
@@ -88,6 +96,14 @@ mod codec_tests {
 /// Plane, timestamp, or platform decoder operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
+    #[error(
+        "output colorimetry differs: standard={standard:?}, range={range:?}, expected BT709 {expected_range:?}"
+    )]
+    OutputColorimetry {
+        standard: Option<i32>,
+        range: Option<i32>,
+        expected_range: video_hw_core::ColorRange,
+    },
     #[error("ImageReader contract: {0}")]
     Contract(&'static str),
     #[error(

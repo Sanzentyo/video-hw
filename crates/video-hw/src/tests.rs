@@ -914,3 +914,12 @@ fn test_encode_frame() -> EncodeFrame {
         force_keyframe: false,
     }
 }
+#[cfg(all(windows, feature = "backend-nvidia-d3d12"))]
+#[test]
+fn external_hevc_color_range_is_explicit_through_the_facade() {
+    use crate::d3d12::{ColorRange, HevcLosslessConfig};
+    for range in [ColorRange::Limited, ColorRange::Full] {
+        let config = HevcLosslessConfig::new(1280, 720, 30, range).expect("valid policy");
+        assert_eq!(config.color_range(), range);
+    }
+}

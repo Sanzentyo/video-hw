@@ -5,7 +5,7 @@
 //! synchronization contract. CPU image conversion/readback is not performed.
 
 pub use nvidia_video_codec_sdk::d3d12::{
-    Codec, D3d12Encoder as ExternalD3d12Encoder, EncodeError, EncodedAccessUnit,
+    Codec, ColorRange, D3d12Encoder as ExternalD3d12Encoder, EncodeError, EncodedAccessUnit,
     EncoderCapabilities, EncoderConfig, FenceValue, H264Config, HevcLosslessConfig,
     TimestampMicros,
 };
