@@ -1,10 +1,22 @@
-//! Exact-timestamp Android ImageReader decoding, borrowed hardware buffers and CPU views.
+//! Exact-timestamp Android ImageReader decoding, owned/borrowed GPU leases and CPU views.
 //!
 //! Decoder configuration requires an explicit `video_hw_core::ColorRange`. Every
 //! output-format change must report BT.709 and that range before an image can be
 //! published. Missing or contradictory metadata fails decoding. Acquired images
 //! and hardware-buffer borrows expose the validated immutable `DecodedColorimetry`,
 //! independently of any hardware-buffer sampler-conversion suggestions.
+//!
+//! `DecoderConfig::new` also requires `ImageLeaseCapacity::One` or `Two`.
+//! A capacity unit is reserved before queueing an access unit and stays occupied
+//! until its acquired image is returned. Two supports keeping one image while
+//! decoding the next on the same thread. It does not permit concurrent decoder
+//! calls, increase the process's two-decoder limit, or relax exact increasing PTS.
+//!
+//! Use `DecodedImageLease::hardware_buffer` for a scoped GPU borrow, or consume
+//! the image with `into_hardware_buffer` for a movable `HardwareBufferLease`.
+//! Both share metadata and CPU-access validation. The owned capability exposes
+//! no CPU mapping; all external GPU use must finish before it is dropped.
+//! `try_close` reports `Borrowed` while either kind of image owner remains live.
 
 #[cfg(all(target_os = "android", not(target_arch = "aarch64")))]
 compile_error!("ImageReader NDK FFI is verified only for aarch64 Android API 32+");
@@ -20,17 +32,37 @@ pub const MAX_IMAGE_DIMENSION: u32 = 8192;
 
 #[cfg(any(target_os = "android", test))]
 mod hardware_buffer;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub use hardware_buffer::HardwareBufferDescriptor;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod decoder;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod ffi;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub use decoder::{
-    CloseOutcome, DecodedImageLease, DecoderConfig, HardwareBufferBorrow, ImageReaderDecoder,
+    CloseOutcome, DecodedImageLease, DecoderConfig, HardwareBufferBorrow, HardwareBufferLease,
+    ImageReaderDecoder,
 };
+
+/// Maximum acquired or acquiring images held by one decoder's consumer.
+///
+/// Two allows decoding the next image while the preceding image is still held.
+/// It does not make the decoder concurrent or change the reader's internal pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLeaseCapacity {
+    One,
+    Two,
+}
+#[cfg(any(target_os = "android", test))]
+impl ImageLeaseCapacity {
+    const fn count(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+        }
+    }
+}
 
 /// Explicit coding syntax for a named ImageReader decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +160,7 @@ pub enum DecodeError {
         #[source]
         source: std::io::Error,
     },
-    #[error("decoder has an outstanding image lease")]
+    #[error("decoder image lease capacity is occupied")]
     Borrowed,
     #[error("decoder observation deadline; recreate required")]
     Deadline,

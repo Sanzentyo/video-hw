@@ -70,6 +70,7 @@ const _: () = {
     assert!(std::mem::size_of::<PollFd>() == 8);
 };
 
+#[cfg(target_os = "android")]
 #[link(name = "android")]
 unsafe extern "C" {
     pub(super) fn AHardwareBuffer_describe(
@@ -77,12 +78,14 @@ unsafe extern "C" {
         desc: *mut HardwareBufferDesc,
     );
 }
+#[cfg(target_os = "android")]
 unsafe extern "C" {
     pub(super) fn poll(fds: *mut PollFd, count: u32, timeout_ms: i32) -> i32;
 }
 
 // SAFETY CONTRACT: callers own each live pointer, initialize output storage,
 // retain reader-owned windows and image memory, and invoke only on their worker.
+#[cfg(target_os = "android")]
 #[link(name = "mediandk")]
 unsafe extern "C" {
     pub(super) fn AImageReader_newWithUsage(
@@ -182,3 +185,8 @@ unsafe extern "C" {
         value: *mut i32,
     ) -> bool;
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod fake;
+#[cfg(all(test, not(target_os = "android")))]
+pub(super) use fake::*;

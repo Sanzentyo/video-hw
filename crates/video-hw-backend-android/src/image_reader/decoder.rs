@@ -1,16 +1,19 @@
+#[cfg(all(test, not(target_os = "android")))]
+use super::ffi::OwnedFd;
 use super::hardware_buffer::{
     DECODE_TIMEOUT, HardwareBufferDescriptor, IMAGE_USAGE, ImageAccess, validate_metadata,
     wait_acquire_fence,
 };
 use super::{
-    CropRect, DecodeError, DecodedColorimetry, ImageReaderCodec, PlaneView, TimestampMicros,
-    YuvImageView, ffi,
+    CropRect, DecodeError, DecodedColorimetry, ImageLeaseCapacity, ImageReaderCodec, PlaneView,
+    TimestampMicros, YuvImageView, ffi,
 };
+#[cfg(target_os = "android")]
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::CString,
     mem::ManuallyDrop,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     ptr::{self, NonNull},
     rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
@@ -25,7 +28,7 @@ struct Permit;
 impl Permit {
     fn acquire() -> Result<Self, DecodeError> {
         ADMITTED
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < 2).then_some(count + 1)
             })
             .map(|_| Self)
@@ -48,11 +51,17 @@ pub struct DecoderConfig {
     allow_frame_drop: bool,
     operating_rate: i32,
     expected_color_range: ColorRange,
+    image_capacity: ImageLeaseCapacity,
 }
 impl DecoderConfig {
     /// Requires BT.709 output with the given range on every output-format change.
     /// The expected range validates output metadata; it does not replace missing
     /// output metadata or alter hardware-buffer conversion suggestions.
+    /// `image_capacity` bounds both held images and an in-progress acquisition.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all codec and image policies are explicit"
+    )]
     pub fn new(
         codec: ImageReaderCodec,
         width: u32,
@@ -61,6 +70,7 @@ impl DecoderConfig {
         allow_frame_drop: bool,
         operating_fps: u32,
         expected_color_range: ColorRange,
+        image_capacity: ImageLeaseCapacity,
     ) -> Result<Self, DecodeError> {
         let operating_rate = super::decoder_operating_rate(operating_fps)?;
         if width == 0
@@ -87,6 +97,7 @@ impl DecoderConfig {
             allow_frame_drop,
             operating_rate,
             expected_color_range,
+            image_capacity,
         })
     }
 }
@@ -115,10 +126,37 @@ struct Session {
 }
 struct Anchor {
     session: RefCell<Option<Box<Session>>>,
+    image_capacity: ImageLeaseCapacity,
+    images: Cell<u8>,
+}
+
+/// A reservation owns the reader anchor from before acquisition through image
+/// deletion. Its counter is separate from the session borrow used by decode.
+struct ImageReservation {
+    anchor: Rc<Anchor>,
+}
+impl ImageReservation {
+    fn acquire(anchor: &Rc<Anchor>) -> Result<Self, DecodeError> {
+        let images = anchor.images.get();
+        if images >= anchor.image_capacity.count() {
+            return Err(DecodeError::Borrowed);
+        }
+        anchor.images.set(images + 1);
+        Ok(Self {
+            anchor: Rc::clone(anchor),
+        })
+    }
+}
+impl Drop for ImageReservation {
+    fn drop(&mut self) {
+        // Exactly one non-Clone reservation owns each counted unit. This runs
+        // after the enclosing image's Drop, or after local acquisition cleanup.
+        self.anchor.images.set(self.anchor.images.get() - 1);
+    }
 }
 thread_local! {
     // The initializer is const; Clippy also inspects the Android TLS fallback.
-    #[expect(clippy::missing_const_for_thread_local, reason = "Android TLS macro expansion reports an already const initializer")]
+    #[cfg_attr(target_os = "android", expect(clippy::missing_const_for_thread_local, reason = "Android TLS macro expansion reports an already const initializer"))]
     static RETAINED: RefCell<Vec<ManuallyDrop<Box<Session>>>> = const {RefCell::new(Vec::new())};
 }
 fn retain(session: Box<Session>) {
@@ -152,10 +190,7 @@ pub struct ImageReaderDecoder {
 impl std::fmt::Debug for ImageReaderDecoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImageReaderDecoder")
-            .field(
-                "image_lease_outstanding",
-                &(Rc::strong_count(&self.anchor) > 1),
-            )
+            .field("outstanding_images", &self.anchor.images.get())
             .finish_non_exhaustive()
     }
 }
@@ -164,6 +199,8 @@ impl ImageReaderDecoder {
         let permit = Permit::acquire()?;
         let decoder = Self {
             anchor: Rc::new(Anchor {
+                image_capacity: config.image_capacity,
+                images: Cell::new(0),
                 session: RefCell::new(Some(Box::new(Session {
                     config,
                     _permit: permit,
@@ -190,9 +227,6 @@ impl ImageReaderDecoder {
         packet: &[u8],
         pts: TimestampMicros,
     ) -> Result<DecodedImageLease, DecodeError> {
-        if Rc::strong_count(&self.anchor) != 1 {
-            return Err(DecodeError::Borrowed);
-        }
         let mut session = self.anchor.session.borrow_mut();
         let session = session
             .as_mut()
@@ -205,12 +239,14 @@ impl ImageReaderDecoder {
                 "access unit size or increasing exact PTS differs",
             ));
         }
+        // Capacity failure has no driver effect and leaves the decoder usable.
+        let reservation = ImageReservation::acquire(&self.anchor)?;
         session.decode_phase = DecodePhase::Failed;
         let start = Instant::now();
         let (raw, colorimetry) = session.decode(packet, pts, start)?;
         let mut lease = DecodedImageLease {
             raw,
-            _anchor: Rc::clone(&self.anchor),
+            _reservation: reservation,
             timestamp: pts,
             width: session.config.width,
             height: session.config.height,
@@ -228,7 +264,7 @@ impl ImageReaderDecoder {
         Ok(lease)
     }
     pub fn try_close(&mut self) -> CloseOutcome {
-        if Rc::strong_count(&self.anchor) != 1 {
+        if self.anchor.images.get() != 0 {
             return CloseOutcome::Borrowed;
         }
         let mut slot = self.anchor.session.borrow_mut();
@@ -245,7 +281,7 @@ impl ImageReaderDecoder {
 /// A move-only acquired AImage. CPU views cannot outlive it; reader/session stay alive.
 pub struct DecodedImageLease {
     raw: NonNull<ffi::AImage>,
-    _anchor: Rc<Anchor>,
+    _reservation: ImageReservation,
     timestamp: TimestampMicros,
     width: u32,
     height: u32,
@@ -259,6 +295,9 @@ pub struct DecodedImageLease {
 /// allocation reference does not protect its contents after the image is returned.
 pub struct HardwareBufferBorrow<'image> {
     image: &'image mut DecodedImageLease,
+    facts: HardwareBufferFacts,
+}
+struct HardwareBufferFacts {
     buffer: NonNull<ffi::AHardwareBuffer>,
     descriptor: HardwareBufferDescriptor,
     image_extent: [u32; 2],
@@ -273,20 +312,61 @@ impl HardwareBufferBorrow<'_> {
     /// Importing or accessing it through an external API requires that API's
     /// synchronization contract; no access may outlive this exclusive borrow.
     pub fn as_ptr(&self) -> NonNull<std::ffi::c_void> {
-        self.buffer.cast()
+        self.facts.buffer.cast()
     }
     pub const fn descriptor(&self) -> HardwareBufferDescriptor {
-        self.descriptor
+        self.facts.descriptor
     }
     /// Full extent observed from AImage metadata, before applying its crop.
     pub const fn image_extent(&self) -> [u32; 2] {
-        self.image_extent
+        self.facts.image_extent
     }
     pub const fn crop(&self) -> CropRect {
-        self.crop
+        self.facts.crop
     }
     pub const fn timestamp(&self) -> TimestampMicros {
         self.image.timestamp
+    }
+}
+
+/// Move-only, worker-affine GPU capability owning an acquire-ready image.
+///
+/// This keeps the image contents and its reader alive across caller operations;
+/// it does not submit GPU work or wait for its completion. Any external access
+/// through `as_ptr` must finish before this value is dropped. An allocation
+/// reference alone does not protect contents after the image returns to its reader.
+/// CPU views and conversion back to a CPU-accessible image are not exposed.
+pub struct HardwareBufferLease {
+    image: DecodedImageLease,
+    facts: HardwareBufferFacts,
+}
+impl HardwareBufferLease {
+    /// Borrowed allocation pointer; never transferred or separately released.
+    /// External imports must obey their API's synchronization and lifetime contract.
+    pub fn as_ptr(&self) -> NonNull<std::ffi::c_void> {
+        self.facts.buffer.cast()
+    }
+    pub const fn descriptor(&self) -> HardwareBufferDescriptor {
+        self.facts.descriptor
+    }
+    pub const fn image_extent(&self) -> [u32; 2] {
+        self.facts.image_extent
+    }
+    pub const fn crop(&self) -> CropRect {
+        self.facts.crop
+    }
+    pub const fn timestamp(&self) -> TimestampMicros {
+        self.image.timestamp
+    }
+    pub const fn colorimetry(&self) -> DecodedColorimetry {
+        self.image.colorimetry
+    }
+}
+impl std::fmt::Debug for HardwareBufferLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HardwareBufferLease")
+            .field("timestamp", &self.image.timestamp)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Debug for DecodedImageLease {
@@ -366,6 +446,17 @@ impl DecodedImageLease {
     /// }
     /// ```
     pub fn hardware_buffer(&mut self) -> Result<HardwareBufferBorrow<'_>, DecodeError> {
+        let facts = self.hardware_buffer_facts()?;
+        Ok(HardwareBufferBorrow { image: self, facts })
+    }
+    /// Consume this image into a GPU-only owner without copying image data.
+    /// Both owned and borrowed capabilities use the same metadata/access checks.
+    /// On validation failure the still-local image is returned exactly once.
+    pub fn into_hardware_buffer(self) -> Result<HardwareBufferLease, DecodeError> {
+        let facts = self.hardware_buffer_facts()?;
+        Ok(HardwareBufferLease { image: self, facts })
+    }
+    fn hardware_buffer_facts(&self) -> Result<HardwareBufferFacts, DecodeError> {
         self.access.hardware()?;
         let (crop, extent) = self.metadata()?;
         let mut buffer = ptr::null_mut();
@@ -391,8 +482,7 @@ impl DecodedImageLease {
             desc.stride,
             extent,
         )?;
-        Ok(HardwareBufferBorrow {
-            image: self,
+        Ok(HardwareBufferFacts {
             buffer,
             descriptor,
             image_extent: extent,
@@ -510,7 +600,7 @@ impl PendingImage {
 impl Drop for PendingImage {
     fn drop(&mut self) {
         if let Some(image) = self.image.take() {
-            let release_fence = self.fence.take().map_or(-1, IntoRawFd::into_raw_fd);
+            let release_fence = self.fence.take().map_or(-1, |fence| fence.into_raw_fd());
             // SAFETY: image has never escaped or been CPU/GPU accessed. NDK
             // consumes it and the transferred fd exactly once, waiting before
             // making its allocation reusable by the producer.
@@ -677,7 +767,8 @@ impl Session {
             }
             let mut image = ptr::null_mut();
             let mut acquire_fence = -1;
-            // SAFETY: live reader, no previous lease outstanding; writable output.
+            // SAFETY: live reader and one reserved image slot, with at most two
+            // acquiring/held images against maxImages=4; writable outputs.
             let status = unsafe {
                 ffi::AImageReader_acquireNextImageAsync(
                     self.reader,
@@ -786,3 +877,6 @@ impl Session {
         Ok(())
     }
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests;
